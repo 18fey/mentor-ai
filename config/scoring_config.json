@@ -1,0 +1,29 @@
+{
+  "total_max_score": 100,
+  "criteria": [
+    {
+      "id": "star",
+      "label": "STAR構造",
+      "weight": 0.4,
+      "description": "Situation, Task, Action, Result が整理されているか"
+    },
+    {
+      "id": "content_depth",
+      "label": "内容の深さ",
+      "weight": 0.2,
+      "description": "具体性・再現性・学びの深さ"
+    },
+    {
+      "id": "clarity",
+      "label": "話し方の分かりやすさ",
+      "weight": 0.2,
+      "description": "論理の一貫性・構成・筋の通り方"
+    },
+    {
+      "id": "delivery",
+      "label": "話し方（WPM・沈黙・フィラー）",
+      "weight": 0.2,
+      "description": "話す速さ、沈黙の多さ、えっと/そのー等のフィラー"
+    }
+  ]
+}

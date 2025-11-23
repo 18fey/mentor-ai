@@ -1,0 +1,91 @@
+{
+  "version": "1.0",
+  "patterns": [
+    {
+      "id": "fermi_basic_v1",
+      "label": "フェルミ推定（基本型）",
+      "kind": "fermi",
+      "total_max_score": 50,
+      "metrics": [
+        {
+          "id": "reframing",
+          "label": "再定義の明確さ",
+          "description": "問いを適切な式と単位に落とし込めているか。",
+          "max_score": 10,
+          "weight": 1
+        },
+        {
+          "id": "decomposition",
+          "label": "要素分解（MECE）",
+          "description": "過不足なく・重複少なく要因分解できているか。",
+          "max_score": 10,
+          "weight": 1
+        },
+        {
+          "id": "assumptions",
+          "label": "仮定の質",
+          "description": "仮定が妥当で、根拠が明示されているか。",
+          "max_score": 10,
+          "weight": 1
+        },
+        {
+          "id": "numbersSense",
+          "label": "数字感・丸め方",
+          "description": "丸め方が適切で、数字の大小感の理解があるか。",
+          "max_score": 10,
+          "weight": 1
+        },
+        {
+          "id": "sanityCheck",
+          "label": "オーダー感",
+          "description": "最終結果が常識・市場データと大きく乖離していないか。",
+          "max_score": 10,
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "id": "case_basic_v1",
+      "label": "ケース面接（基本フロー）",
+      "kind": "case",
+      "total_max_score": 50,
+      "metrics": [
+        {
+          "id": "hypothesis",
+          "label": "仮説の切れ味",
+          "description": "クライアントの状況を踏まえた筋の良い仮説になっているか。",
+          "max_score": 10,
+          "weight": 1
+        },
+        {
+          "id": "structure",
+          "label": "構造化（フレーム）",
+          "description": "フレームがMECEで、論点の優先順位が明確か。",
+          "max_score": 10,
+          "weight": 1
+        },
+        {
+          "id": "insightFromData",
+          "label": "データからの示唆",
+          "description": "与えられたデータから本質的な示唆を引き出しているか。",
+          "max_score": 10,
+          "weight": 1
+        },
+        {
+          "id": "solutionQuality",
+          "label": "打ち手の質",
+          "description": "打ち手が具体的で、ゴールやKPIと整合しているか。",
+          "max_score": 10,
+          "weight": 1
+        },
+        {
+          "id": "feasibility",
+          "label": "実現可能性",
+          "description": "リソースや制約を踏まえて実現可能な提案になっているか。",
+          "max_score": 10,
+          "weight": 1
+        }
+      ]
+    }
+  ]
+}
