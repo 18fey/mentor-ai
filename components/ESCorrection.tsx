@@ -97,17 +97,33 @@ export const ESCorrection: React.FC = () => {
         const rows: any[] = Array.isArray(data.storyCards)
           ? data.storyCards
           : [];
-　　　　　const mapped: StoryCard[] = rows.map((row) => ({
-  id: row.id,
-  topicType: row.type,
-  title: row.title,
-  star: row.star,             // 👈 jsonbそのまま
-  learnings: row.learnings,
-  axes: row.axes_link ?? [],
-  isSensitive: row.is_sensitive,
-  createdAt: row.created_at,
-}));
 
+        // 🧩 Supabase の実カラム名に合わせてマッピング
+        const mapped: StoryCard[] = rows.map((row: any) => {
+          // axes は text[] / text どちらでも配列に正規化
+          let axes: string[] = [];
+          if (Array.isArray(row.axes)) {
+            axes = row.axes.filter((v: any) => typeof v === "string");
+          } else if (typeof row.axes === "string" && row.axes.length > 0) {
+            axes = row.axes.split(",").map((s: string) => s.trim());
+          }
+
+          return {
+            id: row.id,
+            topicType: row.topic_type ?? "general",
+            title: row.title ?? "",
+            star: {
+              situation: row.star_situation ?? "",
+              task: row.star_task ?? "",
+              action: row.star_action ?? "",
+              result: row.star_result ?? "",
+            },
+            learnings: row.learnings ?? "",
+            axes,
+            isSensitive: row.is_sensitive ?? false,
+            createdAt: row.created_at,
+          };
+        });
 
         setStoryCards(mapped);
       } catch (e) {
@@ -448,13 +464,13 @@ export const ESCorrection: React.FC = () => {
               一般面接AIタブからセッションを行い、カードを保存してみてください。
             </p>
           ) : (
-            <div className="mt-2 space-y-2 max-h-72 overflow-y-auto">
+            <div className="mt-2 max-h-72 space-y-2 overflow-y-auto">
               {storyCards.map((card) => (
                 <button
                   key={card.id}
                   type="button"
                   onClick={() => handleApplyCardToEs(card)}
-                  className="w-full rounded-xl border border-slate-100 bg-white/90 p-2 text-left shadow-sm hover:border-sky-200 hover:bg-sky-50/80 transition"
+                  className="w-full rounded-xl border border-slate-100 bg-white/90 p-2 text-left shadow-sm transition hover:border-sky-200 hover:bg-sky-50/80"
                 >
                   <div className="flex items-center justify-between gap-1">
                     <span className="text-[10px] text-slate-500">
@@ -462,7 +478,7 @@ export const ESCorrection: React.FC = () => {
                     </span>
                     <div className="flex items-center gap-1">
                       {card.isSensitive && (
-                        <span className="inline-flex items-center rounded-full bg-rose-50 px-2 py-0.5 text-[9px] font-semibold text-rose-600 border border-rose-100">
+                        <span className="inline-flex items-center rounded-full border border-rose-100 bg-rose-50 px-2 py-0.5 text-[9px] font-semibold text-rose-600">
                           🔒 Sensitive
                         </span>
                       )}
@@ -477,7 +493,7 @@ export const ESCorrection: React.FC = () => {
                     {card.title || "タイトル未設定"}
                   </p>
                   <p className="mt-0.5 line-clamp-2 text-[10px] text-slate-600">
-                    {card.star.situation ||
+                    {card.star?.situation ||
                       "（状況Sが入力されるとここに表示されます）"}
                   </p>
                   {card.axes && card.axes.length > 0 && (
@@ -485,7 +501,7 @@ export const ESCorrection: React.FC = () => {
                       {card.axes.slice(0, 3).map((axis) => (
                         <span
                           key={axis}
-                          className="rounded-full bg-sky-50 px-2 py-0.5 text-[9px] text-sky-700 border border-sky-100"
+                          className="rounded-full border border-sky-100 bg-sky-50 px-2 py-0.5 text-[9px] text-sky-700"
                         >
                           {axis}
                         </span>

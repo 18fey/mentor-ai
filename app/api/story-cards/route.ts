@@ -1,22 +1,7 @@
+// app/api/story-cards/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabase-server";
 
-type StoryCardRow = {
-  id: string;
-  user_id: string;
-  session_id: string | null;
-  title: string;
-  type: string;
-  star: any;
-  learnings: string | null;
-  axes_link: string[] | null;
-  is_sensitive: boolean | null;
-  created_at: string;
-  last_updated_at: string;
-};
-
-// 今は userId を query/body で渡す。
-// 将来は「profile.ensure で作ったユーザーID + Auth の user.id」で統一する想定。
 const DEFAULT_USER_ID = "demo-user";
 
 // ======================
@@ -36,18 +21,18 @@ export async function GET(req: NextRequest) {
     if (error) {
       console.error("[story-cards] GET error:", error);
       return NextResponse.json(
-        { error: "story_cards_fetch_failed" },
+        { error: "story_cards_fetch_failed", storyCards: [] },
         { status: 500 }
       );
     }
 
     return NextResponse.json({
-      storyCards: (data ?? []) as StoryCardRow[],
+      storyCards: data ?? [],
     });
   } catch (e) {
     console.error("[story-cards] GET exception:", e);
     return NextResponse.json(
-      { error: "story_cards_fetch_failed" },
+      { error: "story_cards_fetch_failed", storyCards: [] },
       { status: 500 }
     );
   }
@@ -61,23 +46,28 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    const row = {
+    const star = body.star ?? {};
+
+    const insertRow = {
       user_id: body.userId ?? DEFAULT_USER_ID,
       session_id: body.sessionId ?? null,
-      title: body.title,
-      type: body.topicType,
-      star: body.star, // { situation, task, action, result } そのまま jsonb で保存
+      topic_type: body.topicType ?? null, // "gakuchika" など
+      title: body.title ?? "",
+      star_situation: star.situation ?? "",
+      star_task: star.task ?? "",
+      star_action: star.action ?? "",
+      star_result: star.result ?? "",
       learnings: body.learnings ?? "",
-      axes_link: body.axes ?? [],
+      axes: body.axes ?? [], // text[] カラム想定
       is_sensitive: body.isSensitive ?? false,
       last_updated_at: new Date().toISOString(),
     };
 
     const { data, error } = await supabaseServer
       .from("story_cards")
-      .insert(row)
+      .insert(insertRow)
       .select("*")
-      .single<StoryCardRow>();
+      .single();
 
     if (error) {
       console.error("[story-cards] POST error:", error);

@@ -25,6 +25,9 @@ const Settings: React.FC = () => {
   const [plan, setPlan] = useState<AppPlan>("free");
   const [loadingProfile, setLoadingProfile] = useState(true);
 
+  // ログインユーザーID（terms 更新などで使う）
+  const [userId, setUserId] = useState<string | null>(null);
+
   // 利用規約同意フラグ
   const [hasAcceptedTerms, setHasAcceptedTerms] = useState(false);
   const [acceptingTerms, setAcceptingTerms] = useState(false);
@@ -53,6 +56,7 @@ const Settings: React.FC = () => {
         }
 
         const user = data.user;
+        setUserId(user.id);
 
         // ② /api/profile/ensure を叩いて users_profile を自動作成 / 取得
         const res = await fetch("/api/profile/ensure", {
@@ -108,7 +112,9 @@ const Settings: React.FC = () => {
           // API未実装でも落ちないように
           const text = await res.text();
           console.warn("billing history not available:", text);
-          setBillingError("まだ決済履歴は取得できません。正式リリース時に有効化されます。");
+          setBillingError(
+            "まだ決済履歴は取得できません。正式リリース時に有効化されます。"
+          );
           return;
         }
 
@@ -117,7 +123,9 @@ const Settings: React.FC = () => {
         setBillingHistory(items);
       } catch (e) {
         console.error("fetchBillingHistory error:", e);
-        setBillingError("決済履歴の取得中にエラーが発生しました。時間をおいて再度お試しください。");
+        setBillingError(
+          "決済履歴の取得中にエラーが発生しました。時間をおいて再度お試しください。"
+        );
       } finally {
         setLoadingBilling(false);
       }
@@ -141,16 +149,26 @@ const Settings: React.FC = () => {
   // 利用規約への同意（Settingsから明示的に押せるボタン）
   // ---------------------------
   const handleAcceptTerms = async () => {
+    if (!userId) {
+      alert("ログイン情報を取得できませんでした。再読み込みしてからお試しください。");
+      return;
+    }
+
     try {
       setAcceptingTerms(true);
-      const res = await fetch("/api/profile/accept-terms", {
+      // ✅ 実際のAPIルートに合わせる: /api/accept-terms
+      const res = await fetch("/api/accept-terms", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId }),
       });
 
       if (!res.ok) {
         const text = await res.text();
         console.error("accept terms failed:", text);
-        alert("利用規約への同意を保存できませんでした。時間をおいて再度お試しください。");
+        alert(
+          "利用規約への同意を保存できませんでした。時間をおいて再度お試しください。"
+        );
         return;
       }
 
@@ -158,7 +176,9 @@ const Settings: React.FC = () => {
       alert("利用規約への同意が保存されました。");
     } catch (e) {
       console.error(e);
-      alert("利用規約への同意中にエラーが発生しました。ネットワーク状況をご確認ください。");
+      alert(
+        "利用規約への同意中にエラーが発生しました。ネットワーク状況をご確認ください。"
+      );
     } finally {
       setAcceptingTerms(false);
     }
@@ -192,7 +212,9 @@ const Settings: React.FC = () => {
       alert("あなたのデータ削除リクエストが完了しました。");
     } catch (e) {
       console.error(e);
-      alert("データ削除中にエラーが発生しました。ネットワーク状況をご確認ください。");
+      alert(
+        "データ削除中にエラーが発生しました。ネットワーク状況をご確認ください。"
+      );
     } finally {
       setDeleting(false);
     }
@@ -299,11 +321,6 @@ const Settings: React.FC = () => {
             </Link>
             。
           </p>
-
-          {/* NOTE:
-             実際の「Onboarding強制」は middleware.ts や各ページの保護ロジックで
-             profile.has_accepted_terms を判定して /onboarding にリダイレクトする実装を想定。
-          */}
         </section>
 
         {/* プラン / お支払い */}
@@ -367,7 +384,9 @@ const Settings: React.FC = () => {
           ) : billingError ? (
             <p className="text-xs text-slate-500">{billingError}</p>
           ) : billingHistory.length === 0 ? (
-            <p className="text-xs text-slate-500">現在表示できる決済履歴はありません。</p>
+            <p className="text-xs text-slate-500">
+              現在表示できる決済履歴はありません。
+            </p>
           ) : (
             <div className="overflow-hidden rounded-xl border border-slate-100 bg-white">
               <table className="min-w-full border-collapse text-xs">
