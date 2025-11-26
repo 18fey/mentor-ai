@@ -104,7 +104,7 @@ export default function PrivacyPage() {
             東京都中央区銀座一丁目22番11号{"\n"}
             銀座大竹ビジデンス 2F{"\n"}
             ※郵便物（住所）は必ず2Fまでご記入ください。{"\n"}
-            メールアドレス：support@mentor-ai.jp
+            メールアドレス：support@mentor-ai.net
           </p>
         </section>
 

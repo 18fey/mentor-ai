@@ -32,7 +32,7 @@ export default function LegalPage() {
         <div>
           <dt className="font-semibold">お問い合わせ先</dt>
           <dd className="whitespace-pre-line">
-            メールアドレス：support@mentor-ai.jp{"\n"}
+            メールアドレス：support@mentor-ai.net{"\n"}
             お問い合わせフォーム：準備中
           </dd>
         </div>
