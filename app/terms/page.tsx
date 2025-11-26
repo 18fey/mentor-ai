@@ -6,7 +6,7 @@ export default function TermsPage() {
 
       <div className="space-y-6 text-sm leading-relaxed text-slate-700">
         <p>
-          本利用規約（以下「本規約」といいます）は、【事業者名（例：渡邉花鈴）】
+          本利用規約（以下「本規約」といいます）は、【事業者名：Mentor.AI】
           （以下「当社」といいます）が提供する「Mentor.AI」（以下「本サービス」といいます）
           の利用条件を定めるものです。本サービスをご利用になる前に、本規約をよくお読みください。
           ユーザーが本サービスを利用した時点で、本規約に同意したものとみなします。
@@ -157,7 +157,7 @@ export default function TermsPage() {
         </section>
 
         <p className="text-right text-xs text-slate-500">
-          制定日：2025年【月】月【日】日
+          制定日：2025年【11】月【25】日
         </p>
       </div>
     </main>

@@ -71,6 +71,10 @@ export const ESCorrection: React.FC = () => {
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // 🔒 無料ユーザー用ロック状態
+  const [locked, setLocked] = useState(false);
+  const [lockMessage, setLockMessage] = useState<string | null>(null);
+
   const charCount = text.trim().length;
 
   // 📚 ストーリーカード一覧
@@ -100,7 +104,6 @@ export const ESCorrection: React.FC = () => {
 
         // 🧩 Supabase の実カラム名に合わせてマッピング
         const mapped: StoryCard[] = rows.map((row: any) => {
-          // axes は text[] / text どちらでも配列に正規化
           let axes: string[] = [];
           if (Array.isArray(row.axes)) {
             axes = row.axes.filter((v: any) => typeof v === "string");
@@ -208,6 +211,8 @@ export const ESCorrection: React.FC = () => {
     setErrorMessage(null);
     setScore(null);
     setFeedback(null);
+    setLocked(false);
+    setLockMessage(null);
 
     try {
       const res = await fetch("/api/es/eval", {
@@ -228,14 +233,18 @@ export const ESCorrection: React.FC = () => {
         throw new Error("Invalid JSON response");
       }
 
-      if (!res.ok || !data?.score || !data?.feedback) {
+      if (!res.ok || !data?.feedback) {
         console.error("ES eval error:", data);
         setErrorMessage(
-          "AI添削に失敗しました。時間をおいて再度お試しください。"
+          data?.message ??
+            "AI添削に失敗しました。時間をおいて再度お試しください。"
         );
       } else {
-        setScore(data.score as EsScore);
+        // ✅ バックエンドで plan を見て partial or full を返す想定
+        setScore((data.score ?? null) as EsScore | null);
         setFeedback(data.feedback as EsFeedback);
+        setLocked(Boolean(data.locked));
+        setLockMessage(data.message ?? null);
       }
     } catch (e) {
       console.error(e);
@@ -370,27 +379,28 @@ export const ESCorrection: React.FC = () => {
         </section>
 
         {/* フィードバック */}
-        {score && feedback && (
+        {feedback && (
           <section className="mb-4 space-y-4 rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
             <h2 className="text-xs font-semibold text-slate-800">
               フィードバック結果
             </h2>
 
             {/* スコア */}
-            <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-700 md:grid-cols-5">
-              <ScorePill label="構成" value={score.structure} />
-              <ScorePill label="ロジック" value={score.logic} />
-              <ScorePill label="わかりやすさ" value={score.clarity} />
-              <ScorePill label="企業フィット" value={score.companyFit} />
-              <ScorePill label="文字数フィット" value={score.lengthFit} />
-            </div>
+            {score && (
+              <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-700 md:grid-cols-5">
+                <ScorePill label="構成" value={score.structure} />
+                <ScorePill label="ロジック" value={score.logic} />
+                <ScorePill label="わかりやすさ" value={score.clarity} />
+                <ScorePill label="企業フィット" value={score.companyFit} />
+                <ScorePill label="文字数フィット" value={score.lengthFit} />
+              </div>
+            )}
 
-            {/* 要約 */}
+            {/* ✅ ここまで（要約＋良いポイント）は無料ユーザーにも素で見せる */}
             <div className="whitespace-pre-wrap rounded-xl bg-slate-50 p-3 text-[11px] text-slate-700">
               {feedback.summary}
             </div>
 
-            {/* 強み */}
             <div>
               <p className="mb-1 text-[11px] font-semibold text-emerald-700">
                 良いポイント
@@ -402,38 +412,64 @@ export const ESCorrection: React.FC = () => {
               </ul>
             </div>
 
-            {/* 改善 */}
-            <div>
-              <p className="mb-1 text-[11px] font-semibold text-amber-700">
-                改善すると一気に良くなるポイント
-              </p>
-              <ul className="list-disc space-y-1 pl-4 text-[11px] text-slate-700">
-                {feedback.improvements.map((s, i) => (
-                  <li key={i}>{s}</li>
-                ))}
-              </ul>
-            </div>
+            {/* 🔒 ここから下（改善・チェックリスト・構成）は PRO 専用：FREE はモヤ＋オーバーレイ */}
+            <div className="relative mt-3">
+              <div
+                className={
+                  locked
+                    ? "pointer-events-none select-none space-y-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50/80 p-3 blur-[1.5px] opacity-70"
+                    : "space-y-4 rounded-2xl border border-slate-100 bg-slate-50/80 p-3"
+                }
+              >
+                {/* 改善 */}
+                <div>
+                  <p className="mb-1 text-[11px] font-semibold text-amber-700">
+                    改善すると一気に良くなるポイント
+                  </p>
+                  <ul className="list-disc space-y-1 pl-4 text-[11px] text-slate-700">
+                    {feedback.improvements.map((s, i) => (
+                      <li key={i}>{s}</li>
+                    ))}
+                  </ul>
+                </div>
 
-            {/* チェックリスト */}
-            <div>
-              <p className="mb-1 text-[11px] font-semibold text-slate-800">
-                最終チェック用 ToDo
-              </p>
-              <ul className="list-disc space-y-1 pl-4 text-[11px] text-slate-700">
-                {feedback.checklist.map((s, i) => (
-                  <li key={i}>{s}</li>
-                ))}
-              </ul>
-            </div>
+                {/* チェックリスト */}
+                <div>
+                  <p className="mb-1 text-[11px] font-semibold text-slate-800">
+                    最終チェック用 ToDo
+                  </p>
+                  <ul className="list-disc space-y-1 pl-4 text-[11px] text-slate-700">
+                    {feedback.checklist.map((s, i) => (
+                      <li key={i}>{s}</li>
+                    ))}
+                  </ul>
+                </div>
 
-            {/* 構成サンプル */}
-            <div>
-              <p className="mb-1 text-[11px] font-semibold text-slate-800">
-                構成サンプル（この順番で直すときれいになります）
-              </p>
-              <pre className="whitespace-pre-wrap rounded-xl bg-slate-50 p-3 text-[11px] text-slate-700">
-                {feedback.sampleStructure}
-              </pre>
+                {/* 構成サンプル */}
+                <div>
+                  <p className="mb-1 text-[11px] font-semibold text-slate-800">
+                    構成サンプル（この順番で直すときれいになります）
+                  </p>
+                  <pre className="whitespace-pre-wrap rounded-xl bg-white p-3 text-[11px] text-slate-700">
+                    {feedback.sampleStructure}
+                  </pre>
+                </div>
+              </div>
+
+              {locked && (
+                <div className="pointer-events-auto absolute inset-0 flex flex-col items-center justify-center rounded-2xl bg-white/80 backdrop-blur-sm">
+                  <p className="mb-3 px-6 text-center text-[11px] text-slate-600">
+                    {lockMessage ??
+                      "詳細な改善ポイント・チェックリスト・構成サンプルは PRO プラン限定で閲覧できます。"}
+                  </p>
+                  <a
+                    href="/settings"
+                    className="rounded-full bg-violet-500 px-5 py-2 text-[11px] font-semibold text-white shadow hover:bg-violet-600"
+                  >
+                    PROプランにアップグレードして続きを見る
+                  </a>
+                </div>
+              )}
             </div>
           </section>
         )}

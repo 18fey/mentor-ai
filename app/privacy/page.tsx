@@ -6,7 +6,7 @@ export default function PrivacyPage() {
 
       <div className="space-y-6 text-sm leading-relaxed text-slate-700">
         <p>
-          【事業者名】（以下「当社」といいます）は、当社が提供する「Mentor.AI」
+          Mentor.AI（以下「当社」といいます）は、当社が提供する「Mentor.AI」
           （以下「本サービス」といいます）において取り扱うユーザーの個人情報等について、
           以下のとおりプライバシーポリシー（以下「本ポリシー」といいます）を定めます。
         </p>
@@ -99,16 +99,30 @@ export default function PrivacyPage() {
           <h2 className="mb-2 text-base font-semibold">第10条（お問い合わせ窓口）</h2>
           <p>本ポリシーに関するお問い合わせは、以下の窓口までご連絡ください。</p>
           <p className="mt-2 whitespace-pre-line">
-            【事業者名】{"\n"}
-            【住所】{"\n"}
-            【メールアドレス】{"\n"}
-            【問い合わせフォームURL（任意）】
+            Mentor.AI{"\n"}
+            〒104-0061{"\n"}
+            東京都中央区銀座一丁目22番11号{"\n"}
+            銀座大竹ビジデンス 2F{"\n"}
+            ※郵便物（住所）は必ず2Fまでご記入ください。{"\n"}
+            メールアドレス：support@mentor-ai.jp
           </p>
         </section>
 
         <p className="text-right text-xs text-slate-500">
-          制定日：2025年【月】月【日】日
+          制定日：2025年11月25日
         </p>
+
+        {/* ▼ 相互リンク（ここを追加） */}
+        <div className="pt-4 text-xs text-slate-500">
+          関連ページ：{" "}
+          <a href="/terms" className="underline hover:text-slate-800">
+            利用規約
+          </a>{" "}
+          ｜{" "}
+          <a href="/legal" className="underline hover:text-slate-800">
+            特定商取引法に基づく表記
+          </a>
+        </div>
       </div>
     </main>
   );

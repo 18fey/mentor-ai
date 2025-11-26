@@ -32,7 +32,7 @@ async function callOpenAiJson(systemPrompt: string, userPrompt: string) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "gpt-5.1-mini",
+      model: "gpt-4.1-mini",
       response_format: { type: "json_object" },
       input: [
         { role: "system", content: systemPrompt },
