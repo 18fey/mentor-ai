@@ -21,25 +21,27 @@ export function AuthInner() {
   const router = useRouter();
   const supabase = createClientComponentClient();
 
-  const handleLogin = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setError(null);
-    setLoading(true);
+const handleLogin = async (e: FormEvent<HTMLFormElement>) => {
+  e.preventDefault();
+  setError(null);
+  setLoading(true);
 
-    const formData = new FormData(e.currentTarget);
-    const email = String(formData.get("email") || "");
-    const password = String(formData.get("password") || "");
+  const formData = new FormData(e.currentTarget);
+  const email = String(formData.get("email") || "").trim();
+  const password = String(formData.get("password") || "");
 
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
+  try {
+    const res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
     });
 
-    setLoading(false);
+    const data = await res.json();
 
-    if (error) {
+    if (!res.ok) {
       setError(
-        error.message ||
+        data.error ||
           "ログインに失敗しました。もう一度お試しください。"
       );
       return;
@@ -47,7 +49,16 @@ export function AuthInner() {
 
     // ログイン成功 → ダッシュボードへ
     router.push("/");
-  };
+  } catch (err) {
+    console.error(err);
+    setError(
+      "通信エラーが発生しました。時間をおいて再度お試しください。"
+    );
+  } finally {
+    setLoading(false);
+  }
+};
+
 
   const handleSignup = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
