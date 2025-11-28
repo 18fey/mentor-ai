@@ -16,9 +16,9 @@ export default function PricingPage() {
           <p className="mb-4 text-sm text-slate-500">ベータテスト期間中に利用できる無料プランです。</p>
           <p className="mb-4 text-2xl font-semibold">¥0<span className="text-sm font-normal text-slate-500"> / 月</span></p>
           <ul className="mb-4 space-y-1 text-sm text-slate-600">
-            <li>・ケース面接AI：月 5 回まで</li>
-            <li>・フェルミ推定AI：月 10 問まで</li>
-            <li>・一般面接AI（音声版）：月 3 セッションまで</li>
+            <li>・ケース面接AI：月 3 回まで</li>
+            <li>・フェルミ推定AI：月 3 問まで</li>
+            <li>・一般面接AI（音声版）：月 1 セッションまで</li>
             <li>・ES添削AI：月 3 本まで</li>
             <li>・スコアダッシュボード：直近データのみ閲覧可能</li>
           </ul>
@@ -34,7 +34,7 @@ export default function PricingPage() {
             就活・転職対策を本格的に行いたい方向けの、有料サブスクリプションプランです。
           </p>
           <p className="mb-4 text-2xl font-semibold">
-            ¥1,980<span className="text-sm font-normal text-slate-500"> / 月（税込）</span>
+            ¥2,980<span className="text-sm font-normal text-slate-500"> / 月（税込）</span>
           </p>
           <ul className="mb-4 space-y-1 text-sm text-slate-700">
             <li>・ケース面接AI：回数無制限</li>

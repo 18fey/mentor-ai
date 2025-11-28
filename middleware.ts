@@ -14,13 +14,17 @@ export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   const isAuthRoute = pathname.startsWith("/auth");
+
+  // ✅ ログイン不要で見せたい公開ページをここに全部並べる
   const isPublicRoute =
     pathname.startsWith("/legal") ||
     pathname.startsWith("/privacy") ||
     pathname.startsWith("/terms") ||
+    pathname.startsWith("/pricing") ||
+    pathname.startsWith("/service") ||
     pathname.startsWith("/api");
 
-  // 🔐 未ログイン → /auth へ
+  // 🔐 未ログイン → /auth へリダイレクト（公開ページを除く）
   if (!session && !isAuthRoute && !isPublicRoute) {
     const url = req.nextUrl.clone();
     url.pathname = "/auth";

@@ -4,7 +4,13 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-const menu = [
+type MenuItem = {
+  label: string;
+  path: string;
+  badge?: string;
+};
+
+const menu: MenuItem[] = [
   { label: "ホーム", path: "/" },
   { label: "ケース面接AI", path: "/case" },
   { label: "フェルミ推定AI", path: "/fermi" },
@@ -13,22 +19,28 @@ const menu = [
   { label: "業界インサイト", path: "/industry" },
   { label: "スコアダッシュボード", path: "/score" },
 
-  // 🔹 ここから新しく追加
+  // 🔹 AI診断・思考系
   {
     label: "AI思考タイプ診断",
     path: "/diagnosis-16type",
-    badge: "NEW", // いらなければ消してOK
+    badge: "NEW",
   },
   {
     label: "AI思考力トレーニング",
     path: "/mentor-ai-index",
   },
+
+  // 🔹 公開情報（銀行・初見ユーザー向け）
+  {
+    label: "サービス概要",
+    path: "/service",
+  },
   {
     label: "プラン・料金",
-    path: "/plans",
+    path: "/pricing",
   },
-  // 🔹 ここまで新しく追加
 
+  // 🔹 各種設定・ガイド
   { label: "設定", path: "/settings" },
   { label: "プロフィール", path: "/profile" },
   { label: "ケースガイド", path: "/case-guide" },
@@ -39,7 +51,8 @@ export default function Sidebar() {
   const pathname = usePathname();
 
   return (
-    <aside className="w-64 h-screen bg-white/80 backdrop-blur-md border-r border-white/40 p-6 flex flex-col">
+    <aside className="flex h-screen w-64 flex-col border-r border-white/40 bg-white/80 p-6 backdrop-blur-md">
+      {/* ロゴエリア */}
       <div className="mb-8">
         <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
           Elite Career Platform
@@ -47,7 +60,8 @@ export default function Sidebar() {
         <div className="text-2xl font-semibold text-slate-900">Mentor.AI</div>
       </div>
 
-      <nav className="space-y-1 text-sm flex-1">
+      {/* メニュー */}
+      <nav className="flex-1 space-y-1 text-sm">
         {menu.map((item) => {
           const active = pathname === item.path;
           return (
@@ -61,7 +75,7 @@ export default function Sidebar() {
               }`}
             >
               <span>{item.label}</span>
-              {"badge" in item && item.badge && !active && (
+              {item.badge && !active && (
                 <span className="ml-2 rounded-full bg-sky-100 px-1.5 text-[10px] font-semibold text-sky-600">
                   {item.badge}
                 </span>
@@ -71,6 +85,7 @@ export default function Sidebar() {
         })}
       </nav>
 
+      {/* フッターバージョン表示など */}
       <div className="mt-auto text-[11px] text-slate-400">
         Nモード / v0.1.0
       </div>

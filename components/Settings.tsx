@@ -555,8 +555,8 @@ const Settings: React.FC = () => {
             {/* 🎯 月額 2,900 円 に設定 */}
             <div className="flex flex-col items-start gap-1">
               <PayjpCheckoutButton
-                amount={2900}
-                label="PROプランにアップグレード（月額¥2,900）"
+                amount={2980}
+                label="PROプランにアップグレード（月額¥2,980）"
               />
               <span className="text-[11px] text-slate-500">
                 PAY.JP を通じて安全に決済されます。
