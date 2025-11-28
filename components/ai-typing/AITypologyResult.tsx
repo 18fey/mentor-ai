@@ -1,0 +1,85 @@
+// components/ai-typing/AITypologyResult.tsx
+"use client";
+
+import { AITypeKey, aiTypologyTypes } from "@/lib/aiTypologyData";
+
+type Props = {
+  resultKey: AITypeKey;
+  onGoDashboard: () => void;
+  onRetake: () => void;
+};
+
+export function AITypologyResult({ resultKey, onGoDashboard, onRetake }: Props) {
+  const t = aiTypologyTypes[resultKey];
+
+  return (
+    <div className="w-full max-w-3xl rounded-3xl border border-white/40 bg-white/80 p-8 shadow-[0_18px_45px_rgba(15,23,42,0.12)] backdrop-blur-[30px]">
+      <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.25em] text-sky-500">
+        YOUR AI THINKING TYPE
+      </p>
+      <h1 className="mb-1 text-xl font-semibold text-slate-900">
+        あなたは <span className="text-sky-600">{t.nameJa}</span> タイプです。
+      </h1>
+      <p className="mb-6 text-xs text-slate-500">{t.catchphrase}</p>
+
+      <div className="grid gap-5 md:grid-cols-2">
+        <Section title="あなたの特徴" items={t.features} />
+        <Section title="AIとの付き合い方" items={t.aiStyle} />
+        <Section title="就活・キャリアでの強み" items={t.strengths} />
+        <Section title="注意ポイント" items={t.cautions} tone="warn" />
+      </div>
+
+      <div className="mt-6 rounded-2xl bg-sky-50 px-4 py-3 text-xs text-sky-900">
+        <p className="mb-1 text-[11px] font-semibold text-sky-700">
+          あなた専用の学習ルート
+        </p>
+        <p>{t.recommendedPath}</p>
+      </div>
+
+      <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <button
+          type="button"
+          onClick={onGoDashboard}
+          className="inline-flex items-center justify-center rounded-full bg-sky-500 px-6 py-2 text-xs font-semibold text-white shadow-sm hover:bg-sky-600"
+        >
+          あなた専用のダッシュボードを開く →
+        </button>
+
+        <button
+          type="button"
+          onClick={onRetake}
+          className="text-[11px] text-slate-400 underline-offset-2 hover:text-slate-600 hover:underline"
+        >
+          もう一度診断する
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Section({
+  title,
+  items,
+  tone,
+}: {
+  title: string;
+  items: string[];
+  tone?: "warn" | "normal";
+}) {
+  const bulletColor =
+    tone === "warn" ? "bg-rose-300" : "bg-sky-300";
+
+  return (
+    <div>
+      <h2 className="mb-2 text-xs font-semibold text-slate-800">{title}</h2>
+      <ul className="space-y-1.5 text-[11px] text-slate-600">
+        {items.map((item, i) => (
+          <li key={i} className="flex items-start gap-2">
+            <span className={`mt-[5px] h-1.5 w-1.5 rounded-full ${bulletColor}`} />
+            <span>{item}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}

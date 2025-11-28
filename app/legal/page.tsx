@@ -9,13 +9,13 @@ export default function LegalPage() {
       <dl className="space-y-4 text-sm leading-relaxed text-slate-700">
         <div>
           <dt className="font-semibold">販売事業者名</dt>
-          <dd>Mentor.AI</dd>
+          <dd>渡邉 花鈴（屋号：Mentor.AI）</dd>
         </div>
 
         <div>
           <dt className="font-semibold">運営責任者</dt>
           <dd>
-            個人事業主（氏名は、請求があった場合に遅滞なく開示いたします）
+           渡邉　花鈴
           </dd>
         </div>
 
@@ -39,7 +39,7 @@ export default function LegalPage() {
 
         <div>
           <dt className="font-semibold">販売URL</dt>
-          <dd>https://mentor-ai.jp（予定）</dd>
+          <dd>https://mentor-ai-2rw9.vercel.app</dd>
         </div>
 
         <div>

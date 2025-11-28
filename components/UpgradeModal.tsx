@@ -8,8 +8,13 @@ type UpgradeModalProps = {
   open: boolean;
   onClose: () => void;
   title?: string;
-  message?: string;
-  // 必要ならボタンのラベル差し替えもできるように
+  // API から来るとき undefined / null もありうるので広めに
+  message?: string | null;
+  /**
+   * どの機能でロックがかかったか（例：'フェルミ推定AI', 'ケース面接AI'）
+   * 渡ってきたらメッセージ文の中で使う
+   */
+  featureLabel?: string;
   primaryLabel?: string;
   secondaryLabel?: string;
 };
@@ -18,11 +23,19 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
   open,
   onClose,
   title = "PROプランのご案内",
-  message = "無料プランでの利用回数を使い切りました。PROプランにアップグレードすると、回数制限なく利用できます。",
+  message,
+  featureLabel,
   primaryLabel = "PROプランにアップグレード",
   secondaryLabel = "あとで",
 }) => {
   if (!open) return null;
+
+  // 表示するメッセージをここで一本化しておく
+  const displayMessage =
+    message ??
+    (featureLabel
+      ? `${featureLabel}の無料利用回数を使い切りました。PROプランにアップグレードすると、回数制限なく利用できます。`
+      : "無料プランでの利用回数を使い切りました。PROプランにアップグレードすると、回数制限なく利用できます。");
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm">
@@ -31,7 +44,7 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
           <div>
             <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
             <p className="mt-1 text-[11px] leading-relaxed text-slate-600">
-              {message}
+              {displayMessage}
             </p>
           </div>
           <button

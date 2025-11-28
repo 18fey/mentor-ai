@@ -1,238 +1,562 @@
 // app/onboarding/page.tsx
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useState, FormEvent } from "react";
 import { useRouter } from "next/navigation";
-import { supabaseBrowser } from "@/lib/supabase-browser";
+import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
 
-type PlanType = "beta_free" | "student_pro";
+type Step = 1 | 2 | 3;
+type Purpose = "job_hunting" | "thinking_training";
 
 export default function OnboardingPage() {
+  const supabase = createClientComponentClient();
   const router = useRouter();
-  const [loadingUser, setLoadingUser] = useState(true);
-  const [userId, setUserId] = useState<string | null>(null);
 
-  const [agreed, setAgreed] = useState(false);
-  const [plan, setPlan] = useState<PlanType>("beta_free");
-  const [contact, setContact] = useState("");
-  const [sending, setSending] = useState(false);
+  const [step, setStep] = useState<Step>(1);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // ① ログインユーザー取得
+  // --- フォーム状態 ---
+  const [affiliation, setAffiliation] = useState("");
+  const [status, setStatus] = useState("");
+  const [purpose, setPurpose] = useState<Purpose | null>(null);
+  const [interests, setInterests] = useState<string[]>([]);
+  const [jobStage, setJobStage] = useState("");
+  const [workIndustry, setWorkIndustry] = useState("");
+  const [workRole, setWorkRole] = useState("");
+  const [targetCompanyInput, setTargetCompanyInput] = useState("");
+  const [targetCompanies, setTargetCompanies] = useState<string[]>([]);
+
+  // 既にオンボ完了していたら / に逃がす
   useEffect(() => {
-    const fetchUser = async () => {
-      const { data, error } = await supabaseBrowser.auth.getUser();
-      if (error || !data.user) {
-        // 未ログインならログイン画面へ
-        router.push("/login"); // 実際のログインURLに合わせて変更
+    const init = async () => {
+      const { data: auth } = await supabase.auth.getUser();
+      if (!auth.user) {
+        router.push("/auth");
         return;
       }
-      setUserId(data.user.id);
-      setLoadingUser(false);
-    };
-    fetchUser();
-  }, [router]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!agreed) {
-      setError("利用規約とプライバシーポリシーへの同意が必要です。");
-      return;
-    }
-    if (!userId) return;
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", auth.user.id)
+        .maybeSingle();
 
-    setError(null);
-    setSending(true);
-
-    try {
-      const res = await fetch("/api/onboarding", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          authUserId: userId,
-          agreed: true,
-          planType: plan,
-          contact: contact || null,
-        }),
-      });
-
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        console.error("onboarding error:", body);
-        throw new Error("failed");
+      if (profile?.onboarding_completed) {
+        router.push("/");
+        return;
       }
 
-      router.push("/"); // ホームへ
-    } catch (e) {
-      console.error(e);
-      setError("保存に失敗しました。少し時間をおいて再度お試しください。");
-    } finally {
-      setSending(false);
-    }
+      if (profile) {
+        setAffiliation(profile.affiliation || "");
+        setStatus(profile.status || "");
+        setPurpose((profile.purpose as Purpose | null) ?? null);
+        setInterests(profile.interests || []);
+        setJobStage(profile.job_stage || "");
+        setWorkIndustry(profile.work_industry || "");
+        setWorkRole(profile.work_role || "");
+        setTargetCompanies(profile.target_companies || []);
+      }
+
+      setLoading(false);
+    };
+
+    init();
+  }, [supabase, router]);
+
+  const handleToggleInterest = (value: string) => {
+    setInterests((prev) =>
+      prev.includes(value)
+        ? prev.filter((v) => v !== value)
+        : [...prev, value]
+    );
   };
 
-  if (loadingUser) {
+  const handleAddTargetCompany = () => {
+    const trimmed = targetCompanyInput.trim();
+    if (!trimmed) return;
+    if (!targetCompanies.includes(trimmed)) {
+      setTargetCompanies((prev) => [...prev, trimmed]);
+    }
+    setTargetCompanyInput("");
+  };
+
+  const handleRemoveTargetCompany = (name: string) => {
+    setTargetCompanies((prev) => prev.filter((c) => c !== name));
+  };
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    setError(null);
+
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) {
+      setError("セッションが切れました。再度ログインしてください。");
+      setSaving(false);
+      router.push("/auth");
+      return;
+    }
+
+    const { error: upsertError } = await supabase.from("profiles").upsert(
+      {
+        id: auth.user.id,
+        affiliation,
+        status,
+        purpose,
+        interests,
+        job_stage: jobStage,
+        work_industry: workIndustry,
+        work_role: workRole,
+        target_companies: targetCompanies,
+        onboarding_completed: true,
+      },
+      { onConflict: "id" }
+    );
+
+    if (upsertError) {
+      console.error(upsertError);
+      setError(
+        upsertError.message ||
+          "保存に失敗しました。時間をおいて再度お試しください。"
+      );
+      setSaving(false);
+      return;
+    }
+
+    setSaving(false);
+
+    // ✅ プロフィール完了後は AIタイプ診断のオンボーディングへ
+    // ここを "/onboarding/ai-typing" → そこに Intro / 質問 / 結果を置くイメージ
+    router.push("/onboarding/ai-typing");
+  };
+
+  if (loading) {
     return (
-      <div className="min-h-[60vh] flex items-center justify-center text-slate-500 text-sm">
-        読み込み中…
-      </div>
+      <main className="flex min-h-screen items-center justify-center">
+        <div className="rounded-3xl bg-white/70 px-6 py-4 text-sm text-slate-600 shadow">
+          プロフィールを読み込んでいます…
+        </div>
+      </main>
     );
   }
 
   return (
-    <div className="max-w-3xl mx-auto py-10 space-y-8 px-6">
-      <div>
-        <p className="text-xs uppercase tracking-[0.18em] text-slate-400 mb-2">
-          Mentor.AI Beta
-        </p>
-        <h1 className="text-3xl font-semibold text-slate-900 mb-2">
-          ご利用前の確認とプラン選択
-        </h1>
-        <p className="text-base text-slate-600 leading-relaxed">
-          Mentor.AI β版では、あなたの就活トレーニングデータをもとに、
-          サービス改善のための分析を行うことがあります。
-          内容を確認し、同意のうえでご利用ください。
-        </p>
-      </div>
-
+    <main className="flex min-h-screen items-center justify-center px-4">
       <form
         onSubmit={handleSubmit}
-        className="space-y-6 bg-white/80 backdrop-blur-md border border-white/50 rounded-2xl p-6 shadow-sm"
+        className="w-full max-w-2xl rounded-3xl border border-white/40 bg-white/80 p-8 shadow-[0_18px_45px_rgba(15,23,42,0.12)] backdrop-blur-[30px]"
       >
-        {/* ① データ利用・プライバシー */}
-        <section className="space-y-3">
-          <h2 className="text-lg font-semibold text-slate-900">
-            ① データ利用とプライバシー
-          </h2>
-          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 text-sm text-slate-700 space-y-2 max-h-48 overflow-y-auto">
-            <p>
-              ・回答内容やスコアは、Mentor.AI のサービス改善・分析のために利用されます。
-            </p>
-            <p>
-              ・個人が特定される形で第三者（企業・学校など）に提供されることはありません。
-            </p>
-            <p>
-              ・センシティブな内容（健康・宗教・家庭事情など）は、統計分析には利用せず、
-              あなたのアカウント内のフィードバックのみに使われます。
-            </p>
-            <p>
-              ・アカウント削除やログ削除のリクエストがあれば、できるだけ速やかに対応します。
-            </p>
+        {/* ステップ表示 */}
+        <div className="mb-6 flex items-center justify-between text-xs text-slate-500">
+          <div className="flex items-center gap-2">
+            <StepDot active={step >= 1}>基本情報</StepDot>
+            <span className="text-slate-300">—</span>
+            <StepDot active={step >= 2}>目的</StepDot>
+            <span className="text-slate-300">—</span>
+            <StepDot active={step >= 3}>戦略の粒度</StepDot>
           </div>
-
-          <label className="flex items-start gap-2 text-sm text-slate-700">
-            <input
-              type="checkbox"
-              className="mt-1 h-4 w-4 rounded border-slate-300"
-              checked={agreed}
-              onChange={(e) => setAgreed(e.target.checked)}
-            />
-            <span>
-              上記の内容と
-              <a
-                href="/terms"
-                className="underline text-sky-600 hover:text-sky-700"
-                target="_blank"
-              >
-                利用規約
-              </a>
-              ・
-              <a
-                href="/privacy"
-                className="underline text-sky-600 hover:text-sky-700"
-                target="_blank"
-              >
-                プライバシーポリシー
-              </a>
-              に同意します。
-            </span>
-          </label>
-        </section>
-
-        {/* ② プラン選択 */}
-        <section className="space-y-3">
-          <h2 className="text-lg font-semibold text-slate-900">
-            ② ご利用プラン
-          </h2>
-          <div className="grid gap-3 md:grid-cols-2">
-            <button
-              type="button"
-              onClick={() => setPlan("beta_free")}
-              className={`text-left rounded-2xl border p-4 space-y-1 text-sm ${
-                plan === "beta_free"
-                  ? "border-sky-500 bg-sky-50"
-                  : "border-slate-200 bg-white hover:bg-slate-50"
-              }`}
-            >
-              <p className="text-xs font-semibold text-slate-500 uppercase">
-                今だけ
-              </p>
-              <p className="text-base font-semibold">β版フリープラン</p>
-              <p className="text-2xl font-bold text-slate-900">¥0</p>
-              <p className="text-xs text-slate-500">
-                ケース面接AI・フェルミ推定AI・一般面接AI・ES添削AI すべてβ期間中は無料で利用できます。
-              </p>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setPlan("student_pro")}
-              className={`text-left rounded-2xl border p-4 space-y-1 text-sm ${
-                plan === "student_pro"
-                  ? "border-sky-500 bg-sky-50"
-                  : "border-slate-200 bg-white hover:bg-slate-50"
-              }`}
-            >
-              <p className="text-xs font-semibold text-slate-500 uppercase">
-                Coming soon
-              </p>
-              <p className="text-base font-semibold">Student Pro（予定）</p>
-              <p className="text-2xl font-bold text-slate-900">¥未定</p>
-              <p className="text-xs text-slate-500">
-                面接コーチング機能・個別レポート・長期データ保存など、
-                有料プランを想定しています。
-              </p>
-            </button>
-          </div>
-          <p className="text-xs text-slate-500">
-            現在はすべてのユーザーに β版フリープランが適用されます。
-            Pro を希望する方は、下の連絡先をご記入ください。
-          </p>
-        </section>
-
-        {/* ③ 任意の連絡先 */}
-        <section className="space-y-3">
-          <h2 className="text-lg font-semibold text-slate-900">
-            ③ 任意のご連絡先（希望者のみ）
-          </h2>
-          <p className="text-xs text-slate-500">
-            アップデート情報や、クローズドなモニター募集の案内を受け取りたい方は、メールアドレスか LINE ID をご記入ください。
-          </p>
-          <input
-            type="text"
-            value={contact}
-            onChange={(e) => setContact(e.target.value)}
-            placeholder="メールアドレス or LINE ID（任意）"
-            className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-sky-400"
-          />
-        </section>
+          <span>Step {step} / 3</span>
+        </div>
 
         {error && (
-          <p className="text-sm text-red-500 bg-red-50 rounded-xl px-3 py-2">
+          <p className="mb-4 rounded-2xl bg-rose-50 px-4 py-2 text-xs text-rose-700">
             {error}
           </p>
         )}
 
-        <div className="flex justify-end">
+        {/* 各ステップ */}
+        {step === 1 && (
+          <Step1Basic
+            affiliation={affiliation}
+            status={status}
+            setAffiliation={setAffiliation}
+            setStatus={setStatus}
+          />
+        )}
+
+        {step === 2 && (
+          <Step2Purpose
+            purpose={purpose}
+            interests={interests}
+            jobStage={jobStage}
+            workIndustry={workIndustry}
+            workRole={workRole}
+            setPurpose={setPurpose}
+            setJobStage={setJobStage}
+            setWorkIndustry={setWorkIndustry}
+            setWorkRole={setWorkRole}
+            toggleInterest={handleToggleInterest}
+          />
+        )}
+
+        {step === 3 && (
+          <Step3Targets
+            targetCompanies={targetCompanies}
+            targetCompanyInput={targetCompanyInput}
+            setTargetCompanyInput={setTargetCompanyInput}
+            addTargetCompany={handleAddTargetCompany}
+            removeTargetCompany={handleRemoveTargetCompany}
+          />
+        )}
+
+        {/* ボトムナビ */}
+        <div className="mt-8 flex items-center justify-between">
           <button
-            type="submit"
-            disabled={sending}
-            className="px-6 py-2.5 rounded-full bg-sky-500 text-white text-sm font-medium shadow-sm hover:bg-sky-600 disabled:opacity-50"
+            type="button"
+            disabled={step === 1}
+            onClick={() =>
+              setStep((prev) => (prev > 1 ? ((prev - 1) as Step) : prev))
+            }
+            className="rounded-full border border-slate-200 px-4 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {sending ? "保存中..." : "Mentor.AI をはじめる"}
+            戻る
           </button>
+
+          {step < 3 ? (
+            <button
+              type="button"
+              onClick={() =>
+                setStep((prev) => (prev < 3 ? ((prev + 1) as Step) : prev))
+              }
+              className="rounded-full bg-sky-500 px-6 py-2 text-xs font-semibold text-white shadow-sm hover:bg-sky-600"
+            >
+              次へ進む
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={saving}
+              className="rounded-full bg-sky-500 px-6 py-2 text-xs font-semibold text-white shadow-sm hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {saving ? "保存中..." : "AIタイプ診断へ進む"}
+            </button>
+          )}
         </div>
       </form>
+    </main>
+  );
+}
+
+function StepDot({
+  active,
+  children,
+}: {
+  active: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <div
+        className={`h-2 w-2 rounded-full ${
+          active ? "bg-sky-500" : "bg-slate-200"
+        }`}
+      />
+      <span className={`text-[11px] ${active ? "text-slate-800" : "text-slate-400"}`}>
+        {children}
+      </span>
     </div>
+  );
+}
+
+// --- Step1: 基本情報 ---
+function Step1Basic({
+  affiliation,
+  status,
+  setAffiliation,
+  setStatus,
+}: {
+  affiliation: string;
+  status: string;
+  setAffiliation: (v: string) => void;
+  setStatus: (v: string) => void;
+}) {
+  return (
+    <>
+      <h1 className="mb-1 text-lg font-semibold text-slate-900">
+        あなたについて教えてください
+      </h1>
+      <p className="mb-6 text-xs text-slate-500">就活生以外の方もご利用いただけます。</p>
+
+      <div className="space-y-5 text-xs">
+        <div>
+          <label className="mb-1 block font-medium text-slate-700">
+            所属（大学・職場・学校など）
+          </label>
+          <input
+            value={affiliation}
+            onChange={(e) => setAffiliation(e.target.value)}
+            className="w-full rounded-2xl border border-slate-200 bg-white/80 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+            placeholder="慶應義塾大学 経済学部 / 社会人 / フリーランス など"
+          />
+        </div>
+
+        <div>
+          <label className="mb-1 block font-medium text-slate-700">
+            現在のステータス
+          </label>
+          <div className="flex flex-wrap gap-2">
+            {["大学生", "大学院生", "社会人", "転職検討中", "その他"].map((option) => (
+              <button
+                key={option}
+                type="button"
+                onClick={() => setStatus(option)}
+                className={`rounded-full border px-3 py-1 ${
+                  status === option
+                    ? "border-sky-400 bg-sky-50 text-sky-700"
+                    : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                {option}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// --- Step2: 目的＆興味 ---
+function Step2Purpose({
+  purpose,
+  interests,
+  jobStage,
+  workIndustry,
+  workRole,
+  setPurpose,
+  setJobStage,
+  setWorkIndustry,
+  setWorkRole,
+  toggleInterest,
+}: {
+  purpose: Purpose | null;
+  interests: string[];
+  jobStage: string;
+  workIndustry: string;
+  workRole: string;
+  setPurpose: (p: Purpose) => void;
+  setJobStage: (v: string) => void;
+  setWorkIndustry: (v: string) => void;
+  setWorkRole: (v: string) => void;
+  toggleInterest: (v: string) => void;
+}) {
+  const interestOptions = [
+    "戦略コンサル",
+    "投資銀行（IB）",
+    "PE/VC",
+    "マーケッツ/トレーディング",
+    "ITメガベンチャー",
+    "総合商社",
+    "メーカー",
+    "その他",
+  ];
+
+  return (
+    <>
+      <h1 className="mb-1 text-lg font-semibold text-slate-900">
+        Mentor.AIで叶えたいこと
+      </h1>
+      <p className="mb-6 text-xs text-slate-500">
+        目的に合わせて、ダッシュボードとおすすめメニューを最適化します。
+      </p>
+
+      <div className="space-y-6 text-xs">
+        <div>
+          <label className="mb-2 block font-medium text-slate-700">
+            メインの目的
+          </label>
+          <div className="grid gap-3 md:grid-cols-2">
+            <button
+              type="button"
+              onClick={() => setPurpose("job_hunting")}
+              className={`rounded-2xl border p-3 text-left ${
+                purpose === "job_hunting"
+                  ? "border-sky-400 bg-sky-50"
+                  : "border-slate-200 bg-white hover:bg-slate-50"
+              }`}
+            >
+              <div className="text-xs font-semibold text-slate-800">
+                就活・転職対策を進めたい
+              </div>
+              <p className="mt-1 text-[11px] text-slate-500">
+                ケース・面接・ES・業界研究を一気通貫で支援します。
+              </p>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setPurpose("thinking_training")}
+              className={`rounded-2xl border p-3 text-left ${
+                purpose === "thinking_training"
+                  ? "border-sky-400 bg-sky-50"
+                  : "border-slate-200 bg-white hover:bg-slate-50"
+              }`}
+            >
+              <div className="text-xs font-semibold text-slate-800">
+                思考力を鍛えたい（社会人・自己成長）
+              </div>
+              <p className="mt-1 text-[11px] text-slate-500">
+                仕事や人生の判断力を、AIと一緒に磨いていきます。
+              </p>
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <label className="mb-2 block font-medium text-slate-700">
+            興味のある業界（複数選択可）
+          </label>
+          <div className="flex flex-wrap gap-2">
+            {interestOptions.map((opt) => (
+              <button
+                key={opt}
+                type="button"
+                onClick={() => toggleInterest(opt)}
+                className={`rounded-full border px-3 py-1 ${
+                  interests.includes(opt)
+                    ? "border-sky-400 bg-sky-50 text-sky-700"
+                    : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                {opt}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {purpose === "job_hunting" && (
+          <div>
+            <label className="mb-2 block font-medium text-slate-700">
+              就活状況
+            </label>
+            <div className="grid gap-2 md:grid-cols-2">
+              {[
+                "これから本格的に始める",
+                "インターン選考中",
+                "本選考のES・面接対策中",
+                "内定済み（横移動を検討中）",
+              ].map((opt) => (
+                <button
+                  key={opt}
+                  type="button"
+                  onClick={() => setJobStage(opt)}
+                  className={`rounded-2xl border px-3 py-2 text-left ${
+                    jobStage === opt
+                      ? "border-sky-400 bg-sky-50"
+                      : "border-slate-200 bg-white hover:bg-slate-50"
+                  }`}
+                >
+                  <span className="text-[11px] text-slate-700">{opt}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {purpose === "thinking_training" && (
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <label className="mb-1 block font-medium text-slate-700">
+                現在の業界
+              </label>
+              <input
+                value={workIndustry}
+                onChange={(e) => setWorkIndustry(e.target.value)}
+                className="w-full rounded-2xl border border-slate-200 bg-white/80 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+                placeholder="IT / 金融 / コンサル / メーカー など"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block font-medium text-slate-700">
+                現在の立場
+              </label>
+              <input
+                value={workRole}
+                onChange={(e) => setWorkRole(e.target.value)}
+                className="w-full rounded-2xl border border-slate-200 bg-white/80 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+                placeholder="新人〜若手 / 中堅 / マネージャー / 経営層 など"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// --- Step3: 目標企業 ---
+function Step3Targets({
+  targetCompanies,
+  targetCompanyInput,
+  setTargetCompanyInput,
+  addTargetCompany,
+  removeTargetCompany,
+}: {
+  targetCompanies: string[];
+  targetCompanyInput: string;
+  setTargetCompanyInput: (v: string) => void;
+  addTargetCompany: () => void;
+  removeTargetCompany: (v: string) => void;
+}) {
+  return (
+    <>
+      <h1 className="mb-1 text-lg font-semibold text-slate-900">
+        目標とする企業・フィールド（任意）
+      </h1>
+      <p className="mb-6 text-xs text-slate-500">
+        設定しておくと、ダッシュボードでのおすすめやケース問題がよりあなた向けになります。
+      </p>
+
+      <div className="space-y-4 text-xs">
+        <div>
+          <label className="mb-1 block font-medium text-slate-700">
+            目標企業・フィールド（Enterで追加）
+          </label>
+          <div className="flex gap-2">
+            <input
+              value={targetCompanyInput}
+              onChange={(e) => setTargetCompanyInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addTargetCompany();
+                }
+              }}
+              className="flex-1 rounded-2xl border border-slate-200 bg-white/80 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+              placeholder="McKinsey / 三菱商事 / 外資IB / VC / 自分の事業 など"
+            />
+            <button
+              type="button"
+              onClick={addTargetCompany}
+              className="rounded-2xl bg-sky-500 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-sky-600"
+            >
+              追加
+            </button>
+          </div>
+        </div>
+
+        {targetCompanies.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {targetCompanies.map((company) => (
+              <span
+                key={company}
+                className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-3 py-1 text-[11px] text-sky-700"
+              >
+                {company}
+                <button
+                  type="button"
+                  onClick={() => removeTargetCompany(company)}
+                  className="text-[10px] text-sky-500 hover:text-sky-700"
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
   );
 }

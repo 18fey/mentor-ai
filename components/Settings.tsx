@@ -19,6 +19,28 @@ type BillingHistoryItem = {
   createdAt: string; // ISO文字列想定
 };
 
+// 利用状況ダッシュボード用
+type UsageItem = {
+  featureKey: string;
+  label: string;
+  description: string;
+  count: number;
+  limit: number | null; // null = 無制限
+};
+
+type UsageSummaryResponse = {
+  plan: AppPlan;
+  betaUser: boolean;
+  planStartedAt: string | null;
+  usage: {
+    caseInterview: { count: number; limit: number | null };
+    fermi: { count: number; limit: number | null };
+    generalInterview: { count: number; limit: number | null };
+    aiTraining: { count: number; limit: number | null };
+    esCorrection: { count: number; limit: number | null };
+  };
+};
+
 const Settings: React.FC = () => {
   const supabase = createClientComponentClient();
 
@@ -40,6 +62,11 @@ const Settings: React.FC = () => {
   const [billingHistory, setBillingHistory] = useState<BillingHistoryItem[]>([]);
   const [loadingBilling, setLoadingBilling] = useState(false);
   const [billingError, setBillingError] = useState<string | null>(null);
+
+  // 利用状況ダッシュボード
+  const [usage, setUsage] = useState<UsageItem[]>([]);
+  const [loadingUsage, setLoadingUsage] = useState(false);
+  const [usageError, setUsageError] = useState<string | null>(null);
 
   // ---------------------------
   // ログインユーザー → users_profile を保証 & plan / terms を取得
@@ -81,7 +108,6 @@ const Settings: React.FC = () => {
           setPlan(profile.plan as AppPlan);
         }
 
-        // accepted_terms_at or has_accepted_terms のどちらかが立っていれば同意済みとみなす
         if (profile?.accepted_terms_at || profile?.has_accepted_terms) {
           setHasAcceptedTerms(true);
         }
@@ -94,6 +120,85 @@ const Settings: React.FC = () => {
 
     fetchProfile();
   }, [supabase]);
+
+  // ---------------------------
+  // 利用状況 summary の取得（課金ダッシュボード用）
+  // ---------------------------
+  useEffect(() => {
+    const fetchUsage = async () => {
+      try {
+        setLoadingUsage(true);
+        setUsageError(null);
+
+        const res = await fetch("/api/usage/summary");
+        if (!res.ok) {
+          const text = await res.text();
+          console.warn("usage summary not available:", text);
+          setUsageError(
+            "利用状況ダッシュボードはまだ有効化されていません。（/api/usage/summary 未実装）"
+          );
+          return;
+        }
+
+        const data: UsageSummaryResponse = await res.json();
+
+        // plan が返ってきていれば念のため同期
+        if (data.plan) {
+          setPlan(data.plan);
+        }
+
+        const list: UsageItem[] = [
+          {
+            featureKey: "caseInterview",
+            label: "ケース面接AI",
+            description: "コンサル・総合商社・外銀向けのケース面接トレーニング。",
+            count: data.usage.caseInterview.count,
+            limit: data.usage.caseInterview.limit,
+          },
+          {
+            featureKey: "fermi",
+            label: "フェルミ推定AI",
+            description: "フェルミ推定の型トレーニング。式の設計〜オーダーチェックまで。",
+            count: data.usage.fermi.count,
+            limit: data.usage.fermi.limit,
+          },
+          {
+            featureKey: "generalInterview",
+            label: "一般面接AI（音声版）",
+            description: "自己PR・志望動機などの模擬面接セッション。",
+            count: data.usage.generalInterview.count,
+            limit: data.usage.generalInterview.limit,
+          },
+          {
+            featureKey: "aiTraining",
+            label: "AI思考トレーニング",
+            description: "AIへの指示力・編集力を鍛える5ステップ演習。",
+            count: data.usage.aiTraining.count,
+            limit: data.usage.aiTraining.limit,
+          },
+          {
+            featureKey: "esCorrection",
+            label: "ES添削AI",
+            description:
+              "構成・ロジック・文字数フィットなどの自動チェック（詳細フィードバックは PRO）。",
+            count: data.usage.esCorrection.count,
+            limit: data.usage.esCorrection.limit,
+          },
+        ];
+
+        setUsage(list);
+      } catch (e) {
+        console.error("fetchUsage error:", e);
+        setUsageError(
+          "利用状況の取得中にエラーが発生しました。時間をおいて再度お試しください。"
+        );
+      } finally {
+        setLoadingUsage(false);
+      }
+    };
+
+    fetchUsage();
+  }, []);
 
   // ---------------------------
   // 決済履歴の取得
@@ -131,7 +236,6 @@ const Settings: React.FC = () => {
       }
     };
 
-    // 将来的に「PRO/βユーザーのみ取得」など条件付けしてもOK
     fetchBillingHistory();
   }, []);
 
@@ -146,7 +250,7 @@ const Settings: React.FC = () => {
       : "FREE（βテスト）";
 
   // ---------------------------
-  // 利用規約への同意（Settingsから明示的に押せるボタン）
+  // 利用規約への同意
   // ---------------------------
   const handleAcceptTerms = async () => {
     if (!userId) {
@@ -156,7 +260,6 @@ const Settings: React.FC = () => {
 
     try {
       setAcceptingTerms(true);
-      // ✅ 実際のAPIルートに合わせる: /api/accept-terms
       const res = await fetch("/api/accept-terms", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -239,7 +342,6 @@ const Settings: React.FC = () => {
 
       const json = await res.json();
 
-      // JSON をファイルとしてダウンロード
       const blob = new Blob([JSON.stringify(json, null, 2)], {
         type: "application/json",
       });
@@ -263,6 +365,100 @@ const Settings: React.FC = () => {
     } finally {
       setExporting(false);
     }
+  };
+
+  // 利用状況バー用
+  const renderUsageSection = () => {
+    return (
+      <section className="rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm">
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-900">
+              今月の利用状況（機能別）
+            </h2>
+            <p className="text-[11px] text-slate-500">
+              ケース・フェルミ・一般面接・AI思考トレーニング・ES添削の利用回数をまとめて確認できます。
+              FREE プランでは上限に達すると各画面でロック表示が出ます。
+            </p>
+          </div>
+          <span className="rounded-full bg-slate-50 px-2.5 py-0.5 text-[10px] text-slate-500">
+            {loadingUsage ? "同期中..." : "今月分のカウント"}
+          </span>
+        </div>
+
+        {usageError ? (
+          <p className="text-[11px] text-slate-500">{usageError}</p>
+        ) : usage.length === 0 ? (
+          <p className="text-[11px] text-slate-500">
+            まだ利用状況データがありません。
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {usage.map((u) => {
+              const limitLabel =
+                u.limit === null
+                  ? plan === "pro"
+                    ? "無制限"
+                    : "制限なし"
+                  : `${u.limit} 回 / 月`;
+              const ratio =
+                u.limit && u.limit > 0
+                  ? Math.min(100, Math.round((u.count / u.limit) * 100))
+                  : 0;
+
+              const barColor =
+                u.limit && u.limit > 0 && ratio >= 100
+                  ? "bg-rose-400"
+                  : u.limit && u.limit > 0 && ratio >= 70
+                  ? "bg-amber-400"
+                  : "bg-sky-500";
+
+              return (
+                <div
+                  key={u.featureKey}
+                  className="rounded-2xl border border-slate-100 bg-slate-50/70 p-3"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <p className="text-xs font-semibold text-slate-800">
+                        {u.label}
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        {u.description}
+                      </p>
+                    </div>
+                    <div className="text-right text-[11px]">
+                      <p className="font-semibold text-slate-800">
+                        {u.count}
+                        {u.limit ? ` / ${u.limit} 回` : " 回"}
+                      </p>
+                      <p className="text-[10px] text-slate-500">
+                        {limitLabel}
+                      </p>
+                    </div>
+                  </div>
+
+                  {u.limit && u.limit > 0 && (
+                    <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/80">
+                      <div
+                        className={`h-full rounded-full ${barColor}`}
+                        style={{ width: `${ratio}%` }}
+                      />
+                    </div>
+                  )}
+
+                  {u.limit && u.count >= u.limit && (
+                    <p className="mt-1 text-[10px] font-semibold text-rose-600">
+                      今月の FREE プラン上限に達しました。PRO にアップグレードすると、ほぼ無制限で利用できます。
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+    );
   };
 
   return (
@@ -356,11 +552,11 @@ const Settings: React.FC = () => {
               </p>
             </div>
 
-            {/* 金額は pricing ページと合わせて調整してOK */}
+            {/* 🎯 月額 2,900 円 に設定 */}
             <div className="flex flex-col items-start gap-1">
               <PayjpCheckoutButton
-                amount={1980}
-                label="PROプランにアップグレード（月額¥1,980）"
+                amount={2900}
+                label="PROプランにアップグレード（月額¥2,900）"
               />
               <span className="text-[11px] text-slate-500">
                 PAY.JP を通じて安全に決済されます。
@@ -368,6 +564,9 @@ const Settings: React.FC = () => {
             </div>
           </div>
         </section>
+
+        {/* 利用状況ダッシュボード */}
+        {renderUsageSection()}
 
         {/* ✅ 決済履歴表示 */}
         <section className="rounded-2xl border border-slate-100 bg-white/80 p-6 shadow-sm backdrop-blur">
@@ -422,7 +621,7 @@ const Settings: React.FC = () => {
         </section>
 
         {/* データとプライバシー */}
-        <section className="rounded-2xl border border-slate-200 bg-white/80 px-4 py-4 shadow-sm">
+        <section className="mb-10 rounded-2xl border border-slate-200 bg-white/80 px-4 py-4 shadow-sm">
           <h2 className="mb-1 text-sm font-semibold text-slate-900">
             データとプライバシー
           </h2>
@@ -437,7 +636,6 @@ const Settings: React.FC = () => {
           </p>
 
           <div className="space-y-2 text-[11px] text-slate-700">
-            {/* データの扱い説明 */}
             <div className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2">
               <p className="font-semibold text-slate-800">
                 あなたのデータの扱いについて
@@ -453,7 +651,6 @@ const Settings: React.FC = () => {
               </ul>
             </div>
 
-            {/* データ削除ボタン */}
             <div className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2">
               <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div>
@@ -477,7 +674,6 @@ const Settings: React.FC = () => {
               </div>
             </div>
 
-            {/* データダウンロードボタン */}
             <div className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2">
               <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div>

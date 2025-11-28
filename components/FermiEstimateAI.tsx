@@ -103,7 +103,7 @@ const FERMI_PROBLEM_BANK: FermiProblem[] = [
   },
 ];
 
-const DEMO_USER_ID = "demo-user";
+const DEMO_USER_ID = "demo-user"; // ★ 今はこれでOK。あとで auth の id に差し替え。
 
 /* -------------------------------
    メインコンポーネント
@@ -130,8 +130,9 @@ export const FermiEstimateAI: React.FC = () => {
   });
   const [feedback, setFeedback] = useState<FermiFeedback | null>(null);
   const [isEvaluating, setIsEvaluating] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // 🔒 無料回数オーバー時の課金モーダル
+  // 課金モーダル
   const [upgradeOpen, setUpgradeOpen] = useState(false);
   const [upgradeMessage, setUpgradeMessage] = useState<string | undefined>();
 
@@ -146,6 +147,7 @@ export const FermiEstimateAI: React.FC = () => {
     setResult("");
     setSanityComment("");
     setFeedback(null);
+    setErrorMessage(null);
     setScore({
       reframing: 0,
       decomposition: 0,
@@ -166,47 +168,13 @@ export const FermiEstimateAI: React.FC = () => {
     );
   };
 
-  const generateNewProblem = async () => {
-    // ① まずサーバー側で「ケース／フェルミ 月3問」制限チェック
-    try {
-      const res = await fetch("/api/fermi/new", {
-        method: "POST",
-        body: JSON.stringify({
-          userId: DEMO_USER_ID,
-          category,
-          difficulty,
-        }),
-      });
-
-      const json = await res.json().catch(() => null);
-
-      if (!res.ok) {
-        // 利用回数オーバー → 課金モーダル
-        if (json?.error === "limit_exceeded") {
-          setUpgradeMessage(
-            json.message ??
-              "無料プランでのケース／フェルミの利用回数（月3問まで）を使い切りました。PROプランにアップグレードすると無制限で利用できます。"
-          );
-          setUpgradeOpen(true);
-          return;
-        }
-
-        console.error("fermi/new error:", json);
-        alert("フェルミ問題の出題に失敗しました。時間をおいて再度お試しください。");
-        return;
-      }
-
-      // ② 制限OK → 従来どおりローカルバンクから1問出す
-      const candidates = FERMI_PROBLEM_BANK.filter(
-        (p) => p.category === category && p.difficulty === difficulty
-      );
-      const pool = candidates.length > 0 ? candidates : FERMI_PROBLEM_BANK;
-      const random = pool[Math.floor(Math.random() * pool.length)];
-      materializeProblem(random);
-    } catch (e) {
-      console.error(e);
-      alert("ネットワークエラーが発生しました。時間をおいて再度お試しください。");
-    }
+  const generateNewProblem = () => {
+    const candidates = FERMI_PROBLEM_BANK.filter(
+      (p) => p.category === category && p.difficulty === difficulty
+    );
+    const pool = candidates.length > 0 ? candidates : FERMI_PROBLEM_BANK;
+    const random = pool[Math.floor(Math.random() * pool.length)];
+    materializeProblem(random);
   };
 
   /* -------------------------------
@@ -253,10 +221,11 @@ export const FermiEstimateAI: React.FC = () => {
   };
 
   /* -------------------------------
-     AI 採点（＋フィードバック）
+     AI 採点（＋回数制限チェック）
   -------------------------------- */
   const handleEvaluate = async () => {
     setIsEvaluating(true);
+    setErrorMessage(null);
 
     const payload = {
       question,
@@ -270,24 +239,56 @@ export const FermiEstimateAI: React.FC = () => {
     };
 
     try {
+      // ① まず無料枠を1回消費できるかチェック
+      const usageRes = await fetch("/api/usage/consume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: DEMO_USER_ID,
+          feature: "fermi", // ★ フェルミ推定AI
+        }),
+      });
+
+      const usageJson = await usageRes.json().catch(() => null);
+
+      if (!usageRes.ok) {
+        // 無料枠オーバーなど
+        if (usageRes.status === 403 && usageJson?.error === "limit_exceeded") {
+          setUpgradeMessage(
+            usageJson.message ??
+              "フェルミ推定AIの今月の無料利用回数が上限に達しました。"
+          );
+          setUpgradeOpen(true);
+          return;
+        }
+
+        console.error("usage error:", usageJson);
+        setErrorMessage(
+          "利用状況の確認に失敗しました。時間をおいて再度お試しください。"
+        );
+        return;
+      }
+
+      // ② OKなら本来の AI 採点 API を呼ぶ
       const res = await fetch("/api/eval/fermi", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
 
-      if (!res.ok) throw new Error("Eval API error");
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        console.error("eval error:", err);
+        setErrorMessage("AI採点に失敗しました。時間をおいて再度お試しください。");
+        return;
+      }
 
       const data = await res.json();
-
-      if (data.score) {
-        setScore(data.score);
-      }
-      if (data.feedback) {
-        setFeedback(data.feedback);
-      }
+      if (data.score) setScore(data.score as FermiScore);
+      if (data.feedback) setFeedback(data.feedback as FermiFeedback);
     } catch (e) {
       console.error(e);
+      setErrorMessage("ネットワークエラーが発生しました。");
     } finally {
       setIsEvaluating(false);
     }
@@ -302,15 +303,15 @@ export const FermiEstimateAI: React.FC = () => {
         {/* 左カラム */}
         <div className="flex-1 space-y-6 overflow-y-auto pr-2">
           {/* 無限フェルミ問題ガチャ */}
-          <section className="mb-3 rounded-2xl border border-sky-100 bg-sky-50/70 p-4 shadow-sm">
+          <section className="mb-2 rounded-2xl border border-sky-100 bg-sky-50/70 p-4 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
               <div>
                 <h1 className="text-sm font-semibold text-sky-900">
                   Fermi Estimation Trainer
                 </h1>
                 <p className="mt-1 text-[11px] text-sky-700">
-                  カテゴリと難易度を選んで「新しい問題を出す」を押すと、フェルミ問題が無限に出題されます。
-                  無料プランではケース／フェルミ合わせて月3問まで解放されます。
+                  カテゴリと難易度を選んで「新しい問題を出す」を押すと、
+                  フェルミ問題が無限に出題されます。
                 </p>
               </div>
               <button
@@ -375,9 +376,7 @@ export const FermiEstimateAI: React.FC = () => {
             </h2>
             <div className="space-y-3">
               <div>
-                <label className="text-xs text-slate-500">
-                  お題 / Question
-                </label>
+                <label className="text-xs text-slate-500">お題 / Question</label>
                 <textarea
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm"
                   rows={2}
@@ -399,9 +398,7 @@ export const FermiEstimateAI: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="text-xs text-slate-500">
-                    単位（Unit）
-                  </label>
+                  <label className="text-xs text-slate-500">単位（Unit）</label>
                   <select
                     className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 px-2 py-1.5 text-sm"
                     value={unit}
@@ -450,7 +447,11 @@ export const FermiEstimateAI: React.FC = () => {
                       className="rounded-lg border border-slate-200 bg-white/80 px-1.5 py-1 text-[11px]"
                       value={factor.operator}
                       onChange={(e) =>
-                        updateFactor(factor.id, "operator", e.target.value)
+                        updateFactor(
+                          factor.id,
+                          "operator",
+                          e.target.value as "×" | "+"
+                        )
                       }
                     >
                       <option value="×">掛け算（×）</option>
@@ -518,7 +519,7 @@ export const FermiEstimateAI: React.FC = () => {
           </section>
 
           {/* ③ 計算 */}
-          <section className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm">
+          <section className="rounded-2xl border border-slate-200 bg白/70 p-4 shadow-sm">
             <div className="mb-2 flex items-center justify-between">
               <h2 className="text-sm font-semibold text-slate-700">
                 ④ 計算（Computation）
@@ -537,12 +538,12 @@ export const FermiEstimateAI: React.FC = () => {
           </section>
 
           {/* ④ オーダーチェック */}
-          <section className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm">
+          <section className="rounded-2xl border border-slate-200 bg白/70 p-4 shadow-sm">
             <h2 className="mb-2 text-sm font-semibold text-slate-700">
               ⑤ オーダーチェック（Sanity Check）
             </h2>
             <textarea
-              className="w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm"
+              className="w-full rounded-xl border border-slate-200 bg白/80 p-2 text-sm"
               rows={3}
               placeholder="例：スタバ売上や飲食市場と比較して 1〜2桁以内なので妥当。"
               value={sanityComment}
@@ -551,7 +552,7 @@ export const FermiEstimateAI: React.FC = () => {
           </section>
 
           {/* AI 採点ボタン */}
-          <section className="mb-6 flex justify-end">
+          <section className="mb-2 flex justify-end">
             <button
               type="button"
               onClick={handleEvaluate}
@@ -566,16 +567,18 @@ export const FermiEstimateAI: React.FC = () => {
             </button>
           </section>
 
-          {/* フィードバック表示（模範回答ゾーン） */}
+          {errorMessage && (
+            <p className="mb-4 text-[11px] text-rose-600">{errorMessage}</p>
+          )}
+
+          {/* フィードバック表示 */}
           {feedback && (
             <section className="mb-8 rounded-2xl border border-violet-100 bg-violet-50/60 p-4 shadow-sm">
               <h3 className="mb-2 text-xs font-semibold text-violet-700">
                 フィードバック & 模範回答イメージ
               </h3>
 
-              <p className="mb-3 text-xs text-slate-700">
-                {feedback.summary}
-              </p>
+              <p className="mb-3 text-xs text-slate-700">{feedback.summary}</p>
 
               <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-2">
                 <div className="rounded-xl border border-slate-100 bg-white/80 p-3">
@@ -662,10 +665,12 @@ export const FermiEstimateAI: React.FC = () => {
         </aside>
       </div>
 
+      {/* 共通 課金モーダル */}
       <UpgradeModal
         open={upgradeOpen}
         onClose={() => setUpgradeOpen(false)}
         message={upgradeMessage}
+        featureLabel="フェルミ推定AI"
       />
     </>
   );
