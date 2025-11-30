@@ -5,6 +5,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { StatCard } from "@/components/StatCard";
 import { InterviewRecorder } from "@/components/InterviewRecorder";
 import { useRouter } from "next/navigation";
+import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+
+type Database = any;
 
 type QA = { question: string; answer: string };
 
@@ -107,15 +110,19 @@ function buildQuestions(profile: Profile | null): string[] {
 
 export default function InterviewPage() {
   const router = useRouter();
+  const supabase = createClientComponentClient<Database>();
 
-  // 上部カード（ダミー統計）
+  const [userId, setUserId] = useState<string | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
+  // 上部カード（※ここは将来 /api/score-dashboard に差し替え可）
   const stats = [
-    { label: "模擬面接回数", value: "35回", helper: "これまでのセッション数" },
-    { label: "平均評価", value: "4.8", helper: "5点満点の平均レビュー（仮）" },
+    { label: "模擬面接回数", value: "—", helper: "これまでのセッション数（あなた専用）" },
+    { label: "平均評価", value: "—", helper: "5点満点の平均レビュー（あなた専用）" },
     {
       label: "累計練習時間",
-      value: "18時間",
-      helper: "ケース以外の面接練習時間",
+      value: "—",
+      helper: "ケース以外の面接練習時間（あなた専用）",
     },
   ];
 
@@ -136,23 +143,38 @@ export default function InterviewPage() {
 
   const logRef = useRef<HTMLDivElement | null>(null);
 
-  // Karin プロフィール取得（今は demo-user 固定）
+  // ✅ ログインユーザー取得 → プロフィール取得
   useEffect(() => {
-    const fetchProfile = async () => {
+    const run = async () => {
       try {
-        const res = await fetch("/api/profile/get?userId=demo-user");
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+
+        if (!user) {
+          router.push("/auth");
+          return;
+        }
+
+        setUserId(user.id);
+
+        // プロフィール取得（完全個別化）
+        const res = await fetch(
+          `/api/profile/get?userId=${encodeURIComponent(user.id)}`
+        );
         const data = await res.json();
         if (data.profile) {
           setProfile(data.profile);
         }
       } catch (e) {
-        console.error("Failed to fetch profile:", e);
+        console.error("Failed to fetch auth/profile:", e);
       } finally {
         setProfileLoaded(true);
+        setAuthChecked(true);
       }
     };
-    fetchProfile();
-  }, []);
+    run();
+  }, [supabase, router]);
 
   const questions = useMemo(
     () => buildQuestions(profile),
@@ -174,6 +196,11 @@ export default function InterviewPage() {
   // 面接開始
   // -------------------------------------
   const startInterview = () => {
+    if (!authChecked || !userId) {
+      // 念のためガード
+      router.push("/auth");
+      return;
+    }
     setQAList([]);
     setEvaluation(null);
     setCurrentIdx(0);
@@ -251,6 +278,7 @@ export default function InterviewPage() {
         body: JSON.stringify({
           persona_id: personaId,
           qaList: finishedList,
+          userId, // 将来 weekly_reports 保存などで利用
         }),
       });
 
@@ -277,6 +305,11 @@ export default function InterviewPage() {
   // このセッション → ストーリーカード作成（from-audio API を使用）
   // -------------------------------------
   const createStoryCardFromSession = async () => {
+    if (!userId) {
+      router.push("/auth");
+      return;
+    }
+
     // まずは簡単なバリデーション
     if (!evaluation) {
       setCreateMessage(
@@ -299,7 +332,7 @@ export default function InterviewPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId: "demo-user", // ★本番ではログインユーザーIDに差し替え
+          userId, // ✅ ログインユーザーごとに完全個別保存
           personaId,
           qaList,
           profile,
@@ -321,7 +354,6 @@ export default function InterviewPage() {
           "ストーリーカードを作成しました。ES添削タブに移動します…"
         );
 
-        // 成功したら少し待って ES 添削AIタブへ自動遷移
         setTimeout(() => {
           router.push("/es");
         }, 1500);
@@ -346,8 +378,7 @@ export default function InterviewPage() {
         <h1 className="text-2xl font-semibold">一般面接AI（音声版）</h1>
         <p className="text-sm text-slate-500">
           ガクチカ・自己PR・志望動機などを、実際の面接に近いかたちで「音声」で練習できるモードです。
-          プロフィールが登録されている場合は、Karin
-          さんの大学・志望業界などに合わせて質問文が少しだけパーソナライズされます。
+          プロフィールが登録されている場合は、あなたの大学・志望業界などに合わせて質問文が少しだけパーソナライズされます。
         </p>
       </div>
 
@@ -412,6 +443,7 @@ export default function InterviewPage() {
                     type="button"
                     onClick={startInterview}
                     className="rounded-full bg-sky-500 text-white text-xs px-4 py-2 hover:bg-sky-600"
+                    disabled={!authChecked || !userId}
                   >
                     {step === "finished" ? "もう一度やる" : "面接を開始する"}
                   </button>

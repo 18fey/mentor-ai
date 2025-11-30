@@ -15,29 +15,34 @@ type UserProfileRow = {
   beta_user: boolean | null;
 };
 
-// いまは query/body から渡してるけど、将来は Supabase Auth の user.id に置き換える想定
-function getLogicalUserIdFromRequest(req: NextRequest): string {
+// いまは query/body から渡してるけど、
+// 本番仕様では Supabase Auth の user.id（= auth_user_id）を想定
+function getLogicalUserIdFromRequest(req: NextRequest): string | null {
   const { searchParams } = new URL(req.url);
-  return (
-    searchParams.get("userId") ??
-    searchParams.get("id") ??
-    "demo-user"
-  );
+  return searchParams.get("userId") ?? searchParams.get("id") ?? null;
 }
 
 /**
  * GET: プロフィール取得
  *   /api/profile/save?userId=xxx
+ *   userId = Supabase auth.user.id
  */
 export async function GET(req: NextRequest) {
   try {
     const logicalUserId = getLogicalUserIdFromRequest(req);
 
-    // いまは "id" カラムを論理的な userId として使う
+    if (!logicalUserId) {
+      return NextResponse.json(
+        { error: "user_not_authenticated", profile: null },
+        { status: 401 }
+      );
+    }
+
+    // auth_user_id 単位で完全個別化
     const { data, error } = await supabaseServer
       .from("users_profile")
       .select("*")
-      .eq("id", logicalUserId)
+      .eq("auth_user_id", logicalUserId)
       .limit(1)
       .maybeSingle<UserProfileRow>();
 
@@ -50,12 +55,14 @@ export async function GET(req: NextRequest) {
     }
 
     if (!data) {
+      // まだプロフィール未作成
       return NextResponse.json({ profile: null });
     }
 
     return NextResponse.json({
       profile: {
         id: data.id,
+        authUserId: data.auth_user_id,
         name: data.name ?? "",
         university: data.university ?? "",
         faculty: data.faculty ?? "",
@@ -78,7 +85,8 @@ export async function GET(req: NextRequest) {
 /**
  * POST: プロフィール保存（upsert）
  * body: {
- *   id?: string; // なければ "demo-user"
+ *   userId?: string;     // Supabase auth.user.id
+ *   authUserId?: string; // ↑どちらでもOKだが、最終的には auth_user_id に入れる
  *   name?: string;
  *   university?: string;
  *   faculty?: string;
@@ -86,31 +94,36 @@ export async function GET(req: NextRequest) {
  *   interestedIndustries?: string[];
  *   valuesTags?: string[];
  * }
- *
- * 将来 Auth を入れたら:
- *   - auth_user_id に Supabase Auth の user.id を入れる
- *   - id は UUID 主キー or 内部ID に移行
  */
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => ({}));
-    const logicalUserId: string = body.id ?? "demo-user";
+    const body = await req.json().catch(() => ({} as any));
+
+    const authUserId: string | null =
+      body.authUserId ?? body.userId ?? body.id ?? null;
+
+    if (!authUserId) {
+      return NextResponse.json(
+        { error: "user_not_authenticated" },
+        { status: 401 }
+      );
+    }
 
     const rowToUpsert = {
-      id: logicalUserId,
-      name: body.name ?? "",
-      university: body.university ?? "",
-      faculty: body.faculty ?? "",
-      grade: body.grade ?? "",
+      auth_user_id: authUserId,
+      name: body.name ?? null,
+      university: body.university ?? null,
+      faculty: body.faculty ?? null,
+      grade: body.grade ?? null,
       interested_industries: body.interestedIndustries ?? [],
       values_tags: body.valuesTags ?? [],
-      // plan / beta_user は決済API側で更新するのでここではいじらない
+      // plan / beta_user / usage_reset_at 等は他 API から更新
     };
 
     const { error } = await supabaseServer
       .from("users_profile")
       .upsert(rowToUpsert, {
-        onConflict: "id", // 1ユーザー1レコード
+        onConflict: "auth_user_id", // 1ユーザー1レコード
       });
 
     if (error) {

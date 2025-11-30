@@ -2,6 +2,7 @@
 "use client";
 
 import React, { useState, useMemo, useEffect } from "react";
+import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
 
 type TopicType = "gakuchika" | "self_pr" | "why_company" | "why_industry";
 
@@ -68,6 +69,12 @@ const DEEP_DIVE_QUESTIONS: string[] = [
 ];
 
 export const GeneralInterviewAI: React.FC = () => {
+  const supabase = createClientComponentClient();
+
+  const [authLoading, setAuthLoading] = useState(true);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+
   const [topic, setTopic] = useState<TopicType>("gakuchika");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [currentAnswer, setCurrentAnswer] = useState("");
@@ -81,15 +88,52 @@ export const GeneralInterviewAI: React.FC = () => {
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [cloudCards, setCloudCards] = useState<StoredStoryCard[]>([]);
 
-  const DEMO_USER_ID = "demo-user";
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isSensitive, setIsSensitive] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
 
+  // -------- 認証ユーザー取得（B仕様の心臓部）--------
   useEffect(() => {
+    const fetchUser = async () => {
+      setAuthLoading(true);
+      setAuthError(null);
+      try {
+        const {
+          data: { user },
+          error,
+        } = await supabase.auth.getUser();
+
+        if (error) {
+          console.error("getUser error:", error);
+          setAuthError("ログイン情報の取得に失敗しました。再読み込みしてください。");
+          setUserId(null);
+        } else if (!user) {
+          setAuthError("ログインが必要です。");
+          setUserId(null);
+        } else {
+          setUserId(user.id);
+        }
+      } catch (e) {
+        console.error(e);
+        setAuthError("ログイン情報の取得に失敗しました。");
+        setUserId(null);
+      } finally {
+        setAuthLoading(false);
+      }
+    };
+
+    fetchUser();
+  }, [supabase]);
+
+  // -------- クラウド保存済みカード取得（ユーザー別）--------
+  useEffect(() => {
+    if (!userId) return;
+
     const fetchCards = async () => {
       try {
-        const res = await fetch("/api/story-cards");
+        const res = await fetch(
+          `/api/story-cards?userId=${encodeURIComponent(userId)}`
+        );
         const data = await res.json();
         if (data.storyCards) {
           const mapped: StoredStoryCard[] = data.storyCards.map((row: any) => ({
@@ -114,7 +158,7 @@ export const GeneralInterviewAI: React.FC = () => {
       }
     };
     fetchCards();
-  }, []);
+  }, [userId]);
 
   const extractAxesFromLearnings = (text: string): string[] => {
     const axes: string[] = [];
@@ -138,10 +182,15 @@ export const GeneralInterviewAI: React.FC = () => {
     return axes;
   };
 
-  const canStart = useMemo(() => stepIndex === -1, [stepIndex]);
+  const canStart = useMemo(
+    () => !authLoading && !!userId && stepIndex === -1,
+    [authLoading, userId, stepIndex]
+  );
 
   // ------- セッション開始 --------
   const handleStart = async () => {
+    if (!userId) return;
+
     setStartError(null);
     setSaveMessage(null);
 
@@ -150,7 +199,7 @@ export const GeneralInterviewAI: React.FC = () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId: DEMO_USER_ID,
+          userId,
           topic,
           isSensitive,
         }),
@@ -282,11 +331,15 @@ export const GeneralInterviewAI: React.FC = () => {
     setSaveMessage(null);
   };
 
-  // ------- Supabase 保存 -------
+  // ------- Supabase 保存（ユーザー別）-------
   const handleSaveToSupabase = async () => {
     if (!storyDraft) return;
     if (!sessionId) {
       setSaveMessage("まずセッションを開始してください。");
+      return;
+    }
+    if (!userId) {
+      setSaveMessage("ログイン情報を取得できませんでした。");
       return;
     }
 
@@ -298,7 +351,7 @@ export const GeneralInterviewAI: React.FC = () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId: DEMO_USER_ID,
+          userId,
           sessionId,
           isSensitive,
           topicType: storyDraft.topicType,
@@ -373,6 +426,14 @@ export const GeneralInterviewAI: React.FC = () => {
               <p className="text-[11px] text-slate-500">
                 テーマを選び、STAR形式で深掘りします。
               </p>
+              {authLoading && (
+                <p className="mt-1 text-[10px] text-slate-400">
+                  ログイン情報を読み込み中です…
+                </p>
+              )}
+              {!authLoading && authError && (
+                <p className="mt-1 text-[10px] text-rose-600">{authError}</p>
+              )}
             </div>
 
             <div className="flex items-center gap-2">

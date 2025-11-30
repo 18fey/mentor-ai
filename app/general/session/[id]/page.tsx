@@ -1,13 +1,43 @@
 "use client";
-import { useState } from "react";
-import { useParams } from "next/navigation";
+
+import { useEffect, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+
+type Database = any;
 
 export default function SessionPage() {
   const { id: sessionId } = useParams();
+  const router = useRouter();
+  const supabase = createClientComponentClient<Database>();
+
+  const [userId, setUserId] = useState<string | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
   const [messages, setMessages] = useState<any[]>([]);
   const [input, setInput] = useState("");
 
+  // ✅ ログインユーザー取得
+  useEffect(() => {
+    const run = async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user) {
+        router.push("/auth");
+        return;
+      }
+
+      setUserId(user.id);
+      setAuthChecked(true);
+    };
+    run();
+  }, [supabase, router]);
+
   async function send() {
+    if (!input.trim()) return;
+
     const res = await fetch("/api/interview/turn", {
       method: "POST",
       body: JSON.stringify({
@@ -28,13 +58,27 @@ export default function SessionPage() {
   }
 
   async function finish() {
+    if (!userId) {
+      router.push("/auth");
+      return;
+    }
+
     const res = await fetch("/api/story-cards/generate", {
       method: "POST",
       body: JSON.stringify({
         sessionId,
-        userId: "demo-user",
+        userId, // ✅ ログインユーザー単位でカード生成
       }),
     });
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      alert(
+        data.error || "ストーリーカードの作成に失敗しました。時間をおいて再度お試しください。"
+      );
+      return;
+    }
+
     alert("ストーリーカードを作成しました！");
   }
 
@@ -63,7 +107,11 @@ export default function SessionPage() {
         送信
       </button>
 
-      <button className="bg-green-600 text-white px-4 py-2" onClick={finish}>
+      <button
+        className="bg-green-600 text-white px-4 py-2"
+        onClick={finish}
+        disabled={!authChecked || !userId}
+      >
         セッション終了（カード作成）
       </button>
     </div>

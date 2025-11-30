@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabase-server";
 
-const DEFAULT_USER_ID = "demo-user";
-
 type WeeklyReportRow = {
   id: string;
   user_id: string;
@@ -17,9 +15,17 @@ type WeeklyReportRow = {
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
-    const userId = searchParams.get("userId") ?? DEFAULT_USER_ID;
+    // userId = Supabase auth.user.id
+    const userId = searchParams.get("userId");
 
-    // ✅ 将来用：weekly_reports から最新スコアを取得
+    if (!userId) {
+      return NextResponse.json(
+        { error: "user_not_authenticated" },
+        { status: 401 }
+      );
+    }
+
+    // ✅ weekly_reports から最新スコアを取得（user_id = auth_user_id）
     const { data, error } = await supabaseServer
       .from("weekly_reports")
       .select("*")
@@ -30,48 +36,43 @@ export async function GET(req: NextRequest) {
 
     if (error) {
       console.error("[score-dashboard] select error:", error);
-      // エラー時も画面を死なせないためにデモ値を返す
     }
 
     const src = data ?? null;
 
     const payload = {
-      overallScore: src?.overall_score ?? 88,
-      caseScore: src?.case_score ?? 86,
-      fermiScore: src?.fermi_score ?? 84,
-      interviewScore: src?.interview_score ?? 91,
-      esScore: src?.es_score ?? 89,
-      recentSessions: [
-        // 将来: interview_sessions / fermi_sessions / story_cards から直近の履歴を入れる
-        {
-          id: src?.id ?? "demo-1",
-          type: "case",
-          title: "売上向上ケース",
-          score: src?.case_score ?? 86,
-          createdAt: src?.created_at ?? new Date().toISOString(),
-        },
-      ],
+      overallScore: src?.overall_score ?? null,
+      caseScore: src?.case_score ?? null,
+      fermiScore: src?.fermi_score ?? null,
+      interviewScore: src?.interview_score ?? null,
+      esScore: src?.es_score ?? null,
+      recentSessions: src
+        ? [
+            {
+              id: src.id,
+              type: "weekly",
+              title: "最新ウィークリーレポート",
+              score: src.overall_score ?? null,
+              createdAt: src.created_at,
+            },
+          ]
+        : [],
     };
 
     return NextResponse.json(payload);
   } catch (e) {
     console.error("[score-dashboard] exception:", e);
-    // ここも fallback でデモ値
-    return NextResponse.json({
-      overallScore: 88,
-      caseScore: 86,
-      fermiScore: 84,
-      interviewScore: 91,
-      esScore: 89,
-      recentSessions: [
-        {
-          id: "demo-1",
-          type: "case",
-          title: "売上向上ケース",
-          score: 86,
-          createdAt: new Date().toISOString(),
-        },
-      ],
-    });
+    return NextResponse.json(
+      {
+        overallScore: null,
+        caseScore: null,
+        fermiScore: null,
+        interviewScore: null,
+        esScore: null,
+        recentSessions: [],
+        error: "score_dashboard_failed",
+      },
+      { status: 500 }
+    );
   }
 }

@@ -27,36 +27,26 @@ const handleLogin = async (e: FormEvent<HTMLFormElement>) => {
   setLoading(true);
 
   const formData = new FormData(e.currentTarget);
-  const email = String(formData.get("email") || "").trim();
+  const email = String(formData.get("email") || "");
   const password = String(formData.get("password") || "");
 
-  try {
-    const res = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    });
+  const { error } = await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
 
-    const data = await res.json();
+  setLoading(false);
 
-    if (!res.ok) {
-      setError(
-        data.error ||
-          "ログインに失敗しました。もう一度お試しください。"
-      );
-      return;
-    }
-
-    // ログイン成功 → ダッシュボードへ
-    router.push("/");
-  } catch (err) {
-    console.error(err);
+  if (error) {
     setError(
-      "通信エラーが発生しました。時間をおいて再度お試しください。"
+      error.message ||
+        "ログインに失敗しました。もう一度お試しください。"
     );
-  } finally {
-    setLoading(false);
+    return;
   }
+
+  // ログイン成功 → ダッシュボードへ
+  router.push("/");
 };
 
 

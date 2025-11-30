@@ -4,20 +4,29 @@ import { supabaseServer } from "@/lib/supabase-server";
 
 /**
  * GET /api/profile/get?userId=xxx
- * ・将来 Supabase Auth 導入時は auth_user_id を userId に渡す設計
- * ・今は demo-user を暫定利用
+ *
+ * B. 完全プロダクト仕様：
+ * ・userId には Supabase auth.user.id を渡す
+ * ・users_profile.auth_user_id 単位でプロファイルを取得
  */
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
-    const userId = searchParams.get("userId") ?? "demo-user";
+    const userId = searchParams.get("userId");
 
-    // 🔑 今は id で検索しているが、
-    // Auth導入後は .eq("auth_user_id", userId) に切り替えるだけでOK
+    // ✅ demo-user にフォールバックしない
+    if (!userId) {
+      return NextResponse.json(
+        { ok: false, error: "user_not_authenticated", profile: null },
+        { status: 401 }
+      );
+    }
+
+    // auth_user_id ベースで検索（完全個別化）
     const { data, error } = await supabaseServer
       .from("users_profile")
       .select("*")
-      .eq("id", userId)
+      .eq("auth_user_id", userId)
       .maybeSingle();
 
     if (error) {
@@ -40,6 +49,7 @@ export async function GET(req: NextRequest) {
     // ✅ フロント用に正規化
     const profile = {
       id: data.id,
+      authUserId: data.auth_user_id,
       name: data.name ?? "",
       university: data.university ?? "",
       faculty: data.faculty ?? "",
@@ -55,7 +65,6 @@ export async function GET(req: NextRequest) {
       profile,
       isNewUser: false,
     });
-
   } catch (e) {
     console.error("[profile/get] unexpected error:", e);
     return NextResponse.json(

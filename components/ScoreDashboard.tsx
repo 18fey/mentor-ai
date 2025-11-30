@@ -2,6 +2,9 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+
+type Database = any;
 
 type SessionType = "case" | "fermi" | "interview" | "es";
 
@@ -20,44 +23,7 @@ type ScoreSummary = {
   }[];
 };
 
-const DEMO_DATA: ScoreSummary = {
-  overallScore: 88,
-  caseScore: 86,
-  fermiScore: 84,
-  interviewScore: 91,
-  esScore: 89,
-  recentSessions: [
-    {
-      id: "1",
-      type: "case",
-      title: "新規事業の参入可否（人材サービス）",
-      score: 92,
-      createdAt: new Date().toISOString(),
-    },
-    {
-      id: "2",
-      type: "fermi",
-      title: "都内のタクシー市場規模",
-      score: 88,
-      createdAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
-    },
-    {
-      id: "3",
-      type: "interview",
-      title: "自己PR ロールプレイ（3分想定）",
-      score: 91,
-      createdAt: new Date(Date.now() - 1000 * 60 * 60 * 48).toISOString(),
-    },
-    {
-      id: "4",
-      type: "es",
-      title: "総合商社志望動機（400字）",
-      score: 87,
-      createdAt: new Date(Date.now() - 1000 * 60 * 60 * 72).toISOString(),
-    },
-  ],
-};
-
+// 下の2つはまだサンプル可視化用（実スコアとは切り離し）
 const SKILL_ITEMS = [
   { label: "結論ファーストの徹底", value: 86 },
   { label: "ロジックの一貫性", value: 82 },
@@ -74,9 +40,11 @@ const HISTORY = [
 ];
 
 export default function ScoreDashboard() {
+  const supabase = createClientComponentClient<Database>();
+
+  const [userId, setUserId] = useState<string | null>(null);
   const [data, setData] = useState<ScoreSummary | null>(null);
   const [loading, setLoading] = useState(true);
-  const [usingDemo, setUsingDemo] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -85,44 +53,60 @@ export default function ScoreDashboard() {
         setLoading(true);
         setError(null);
 
-        const res = await fetch("/api/score-dashboard", {
+        // 1) ログインユーザー取得
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+
+        if (!user) {
+          // 未ログインなら /auth に飛ばす
+          window.location.href = "/auth";
+          return;
+        }
+
+        setUserId(user.id);
+
+        // 2) ユーザーごとのスコア取得
+        const res = await fetch(`/api/score-dashboard?userId=${user.id}`, {
           method: "GET",
           cache: "no-store",
         });
 
-        if (res.ok) {
-          const json = (await res.json()) as ScoreSummary;
-          setData(json);
-          setUsingDemo(false);
-        } else {
-          // 404 など API 未実装時 → デモデータにフォールバック
-          console.warn("API not ready, using demo data. status:", res.status);
-          setData(DEMO_DATA);
-          setUsingDemo(true);
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          console.error("score-dashboard API error:", res.status, body);
           setError(
-            "現在はサンプルデータで表示しています。本番環境では、あなたの実際のスコアがここに反映されます。"
+            "スコア情報の取得に失敗しました。時間をおいてもう一度お試しください。"
           );
+          setData(null);
+          return;
         }
+
+        const json = (await res.json()) as ScoreSummary;
+        setData(json);
       } catch (e) {
         console.error(e);
-        setData(DEMO_DATA);
-        setUsingDemo(true);
         setError(
-          "現在はサンプルデータで表示しています。本番環境では、あなたの実際のスコアがここに反映されます。"
+          "スコア情報の取得中にエラーが発生しました。通信環境を確認して、再度お試しください。"
         );
+        setData(null);
       } finally {
         setLoading(false);
       }
     };
 
     load();
-  }, []);
+  }, [supabase]);
 
   const renderScoreCard = (
     label: string,
-    value: number,
+    value: number | null | undefined,
     accent?: boolean
   ) => {
+    const safeValue =
+      typeof value === "number" && !Number.isNaN(value) ? value : 0;
+    const hasValue = typeof value === "number";
+
     return (
       <div
         className={`flex flex-col justify-between rounded-3xl border border-slate-100 bg-white/80 px-6 py-4 shadow-[0_10px_40px_rgba(15,23,42,0.04)] backdrop-blur ${
@@ -130,17 +114,23 @@ export default function ScoreDashboard() {
         }`}
       >
         <div className="text-xs font-medium text-slate-500">{label}</div>
-        <div className="mt-2 flex items	end gap-2">
+        <div className="mt-2 flex items-end gap-2">
           <div className="text-2xl md:text-3xl font-semibold text-slate-900">
-            {Math.round(value)}
+            {hasValue ? Math.round(safeValue) : "—"}
           </div>
-          <div className="mb-1 text-[11px] text-slate-400">/ 100</div>
+          <div className="mb-1 text-[11px] text-slate-400">
+            {hasValue ? "/ 100" : ""}
+          </div>
         </div>
         <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-100">
-          <div
-            className="h-full rounded-full bg-gradient-to-r from-sky-400 to-emerald-400"
-            style={{ width: `${Math.min(Math.max(value, 0), 100)}%` }}
-          />
+          {hasValue && (
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-sky-400 to-emerald-400"
+              style={{
+                width: `${Math.min(Math.max(safeValue, 0), 100)}%`,
+              }}
+            />
+          )}
         </div>
       </div>
     );
@@ -158,15 +148,16 @@ export default function ScoreDashboard() {
             スコアダッシュボード
           </h1>
           <p className="mt-2 text-sm text-slate-500">
-            ケース・フェルミ・一般面接・ES添削など、それぞれのスコア推移や弱点領域を一覧で確認できる画面です。
-            本番環境では、各セッションの実データをもとに自動集計されます。
+            ケース・フェルミ・一般面接・ES添削などのスコアと、直近セッションの履歴を
+            「あなた専用のデータ」だけで集計して表示しています。
           </p>
         </div>
 
-        {usingDemo && (
-          <div className="inline-flex items-center gap-2 self-start rounded-full border border-dashed border-sky-200 bg-sky-50/70 px-3 py-1 text-[11px] text-sky-700">
-            <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />
-            デモデータで表示中
+        {userId && (
+          <div className="inline-flex items-center gap-2 self-start rounded-full border border-slate-200 bg-white/70 px-3 py-1 text-[11px] text-slate-500">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+            ログイン中ユーザーID:{" "}
+            <span className="font-mono text-[10px]">{userId}</span>
           </div>
         )}
       </div>
@@ -179,28 +170,29 @@ export default function ScoreDashboard() {
       )}
 
       {/* データ表示 */}
-      {!loading && data && (
+      {!loading && (
         <>
           {/* 上部スコアカード */}
           <section className="mb-8 grid gap-4 md:grid-cols-4">
-            {renderScoreCard("総合スコア", data.overallScore, true)}
-            {renderScoreCard("ケース面接", data.caseScore)}
-            {renderScoreCard("フェルミ推定", data.fermiScore)}
-            {renderScoreCard("一般面接", data.interviewScore)}
-            {renderScoreCard("ES添削", data.esScore)}
+            {renderScoreCard("総合スコア", data?.overallScore, true)}
+            {renderScoreCard("ケース面接", data?.caseScore)}
+            {renderScoreCard("フェルミ推定", data?.fermiScore)}
+            {renderScoreCard("一般面接", data?.interviewScore)}
+            {renderScoreCard("ES添削", data?.esScore)}
           </section>
 
           {/* 中段：スコア推移 + スキル別 */}
           <section className="mb-8 grid gap-6 xl:grid-cols-[3fr,2fr]">
-            {/* スコア推移 */}
+            {/* スコア推移（現状はサンプル可視化） */}
             <div className="rounded-3xl border border-slate-100 bg-white/80 p-6 shadow-[0_10px_40px_rgba(15,23,42,0.04)] backdrop-blur">
               <div className="mb-4 flex items-center justify-between">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900">
-                    総合スコア推移（サンプル）
+                    総合スコア推移（イメージ）
                   </h2>
                   <p className="mt-1 text-[11px] text-slate-500">
-                    直近数週間の総合スコアの推移です。V2では日別・セッション別にも切り替え可能になります。
+                    将来的に、あなたの実データから週次・月次の推移を描画する想定です。
+                    今はレイアウト確認用のイメージグラフを表示しています。
                   </p>
                 </div>
               </div>
@@ -241,13 +233,14 @@ export default function ScoreDashboard() {
               </div>
             </div>
 
-            {/* スキル別分析 */}
+            {/* スキル別分析（現状はサンプル可視化） */}
             <div className="rounded-3xl border border-slate-100 bg-white/80 p-6 shadow-[0_10px_40px_rgba(15,23,42,0.04)] backdrop-blur">
               <h2 className="text-sm font-semibold text-slate-900">
-                スキル別分析（サンプル）
+                スキル別分析（イメージ）
               </h2>
               <p className="mt-1 text-[11px] text-slate-500">
-                面接ログの内容から、Mentor.AI が算出したスキル指標です。弱めの項目は「今日のおすすめ対策」にも反映されます。
+                面接ログ・ケースの内容から「結論ファースト」「深掘り耐性」などの指標を算出する予定です。
+                今はレイアウト確認用のサンプル値を表示しています。
               </p>
 
               <div className="mt-4 space-y-3">
@@ -279,73 +272,79 @@ export default function ScoreDashboard() {
                   最近のセッション
                 </h2>
                 <span className="text-xs text-slate-400">
-                  直近 {data.recentSessions.length} 件
+                  直近 {data?.recentSessions.length ?? 0} 件
                 </span>
               </div>
               <div className="mt-4 divide-y divide-slate-100">
-                {data.recentSessions.length === 0 && (
+                {!data || data.recentSessions.length === 0 ? (
                   <p className="py-4 text-sm text-slate-400">
-                    まだスコア付きのセッションがありません。まずはケース・フェルミ・一般面接・ES添削AIを使ってみてください。
+                    まだスコア付きのセッションがありません。
+                    まずはケースAI・フェルミAI・一般面接AI・ES添削AIを使ってみてください。
                   </p>
-                )}
-
-                {data.recentSessions.map((s) => (
-                  <div
-                    key={s.id}
-                    className="flex items-center justify-between gap-4 py-3"
-                  >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
-                            s.type === "case"
-                              ? "bg-emerald-50 text-emerald-700"
+                ) : (
+                  data.recentSessions.map((s) => (
+                    <div
+                      key={s.id}
+                      className="flex items-center justify-between gap-4 py-3"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                              s.type === "case"
+                                ? "bg-emerald-50 text-emerald-700"
+                                : s.type === "fermi"
+                                ? "bg-indigo-50 text-indigo-700"
+                                : s.type === "interview"
+                                ? "bg-sky-50 text-sky-700"
+                                : "bg-rose-50 text-rose-700"
+                            }`}
+                          >
+                            {s.type === "case"
+                              ? "ケース"
                               : s.type === "fermi"
-                              ? "bg-indigo-50 text-indigo-700"
+                              ? "フェルミ"
                               : s.type === "interview"
-                              ? "bg-sky-50 text-sky-700"
-                              : "bg-rose-50 text-rose-700"
-                          }`}
-                        >
-                          {s.type === "case"
-                            ? "ケース"
-                            : s.type === "fermi"
-                            ? "フェルミ"
-                            : s.type === "interview"
-                            ? "一般面接"
-                            : "ES"}
-                        </span>
-                        <p className="truncate text-sm font-medium text-slate-900">
-                          {s.title}
+                              ? "一般面接"
+                              : "ES"}
+                          </span>
+                          <p className="truncate text-sm font-medium text-slate-900">
+                            {s.title}
+                          </p>
+                        </div>
+                        <p className="mt-1 text-xs text-slate-400">
+                          {new Date(s.createdAt).toLocaleString("ja-JP", {
+                            month: "short",
+                            day: "numeric",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
                         </p>
                       </div>
-                      <p className="mt-1 text-xs text-slate-400">
-                        {new Date(s.createdAt).toLocaleString("ja-JP", {
-                          month: "short",
-                          day: "numeric",
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <div className="text-right">
-                        <div className="text-sm font-semibold text-slate-900">
-                          {Math.round(s.score)}
+                      <div className="flex items-center gap-3">
+                        <div className="text-right">
+                          <div className="text-sm font-semibold text-slate-900">
+                            {Math.round(s.score)}
+                          </div>
+                          <div className="text-[10px] text-slate-400">
+                            / 100
+                          </div>
                         </div>
-                        <div className="text-[10px] text-slate-400">/ 100</div>
-                      </div>
-                      <div className="h-2 w-20 overflow-hidden rounded-full bg-slate-100">
-                        <div
-                          className="h-full rounded-full bg-sky-400/90"
-                          style={{
-                            width: `${Math.min(Math.max(s.score, 0), 100)}%`,
-                          }}
-                        />
+                        <div className="h-2 w-20 overflow-hidden rounded-full bg-slate-100">
+                          <div
+                            className="h-full rounded-full bg-sky-400/90"
+                            style={{
+                              width: `${Math.min(
+                                Math.max(s.score, 0),
+                                100
+                              )}%`,
+                            }}
+                          />
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  ))
+                )}
               </div>
             </div>
 
@@ -354,13 +353,13 @@ export default function ScoreDashboard() {
                 ダッシュボードの使い方
               </h2>
               <ul className="mt-3 space-y-2 text-xs leading-relaxed text-slate-600">
-                <li>・各AIで回答→採点すると、自動的にここへ反映されます。</li>
-                <li>・総合スコアは４領域の平均スコアです。</li>
+                <li>・各AIで採点まで完了すると、自動的にここへ反映されます。</li>
+                <li>・総合スコアは４領域（ケース・フェルミ・面接・ES）の平均です。</li>
                 <li>
-                  ・直近スコアが低い領域は、優先してトレーニングすると効率的です。
+                  ・スコアが低い領域から順番に対策すると、短期間で伸びやすくなります。
                 </li>
                 <li>
-                  ・今後「週ごとの推移グラフ」「志望業界別の強み」なども追加予定です。
+                  ・今後、「週ごとの推移」「志望業界別の強み」なども追加予定です。
                 </li>
               </ul>
             </div>
@@ -369,7 +368,7 @@ export default function ScoreDashboard() {
       )}
 
       {error && (
-        <p className="mt-4 text-[11px] text-slate-400">
+        <p className="mt-4 text-[11px] text-red-500">
           {error}
         </p>
       )}

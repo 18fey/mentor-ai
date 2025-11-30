@@ -1,7 +1,8 @@
 // src/components/FermiEstimateAI.tsx
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
 import { UpgradeModal } from "@/components/UpgradeModal";
 
 /* -------------------------------
@@ -103,12 +104,14 @@ const FERMI_PROBLEM_BANK: FermiProblem[] = [
   },
 ];
 
-const DEMO_USER_ID = "demo-user"; // ★ 今はこれでOK。あとで auth の id に差し替え。
-
 /* -------------------------------
    メインコンポーネント
 -------------------------------- */
 export const FermiEstimateAI: React.FC = () => {
+  const supabase = createClientComponentClient();
+  const [userId, setUserId] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
   const [question, setQuestion] = useState("");
   const [formula, setFormula] = useState("");
   const [unit, setUnit] = useState("件 / 年");
@@ -135,6 +138,21 @@ export const FermiEstimateAI: React.FC = () => {
   // 課金モーダル
   const [upgradeOpen, setUpgradeOpen] = useState(false);
   const [upgradeMessage, setUpgradeMessage] = useState<string | undefined>();
+
+  // ---- 認証ユーザー取得 ----
+  useEffect(() => {
+    const run = async () => {
+      try {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        setUserId(user?.id ?? null);
+      } finally {
+        setAuthLoading(false);
+      }
+    };
+    run();
+  }, [supabase]);
 
   /* -------------------------------
      無限フェルミ問題生成
@@ -224,10 +242,17 @@ export const FermiEstimateAI: React.FC = () => {
      AI 採点（＋回数制限チェック）
   -------------------------------- */
   const handleEvaluate = async () => {
+    if (!userId) {
+      setErrorMessage(
+        "ログイン情報を取得できませんでした。ページを再読み込みしてください。"
+      );
+    }
+
     setIsEvaluating(true);
     setErrorMessage(null);
 
     const payload = {
+      userId,
       question,
       formula,
       unit,
@@ -244,7 +269,7 @@ export const FermiEstimateAI: React.FC = () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId: DEMO_USER_ID,
+          userId,
           feature: "fermi", // ★ フェルミ推定AI
         }),
       });
@@ -293,6 +318,22 @@ export const FermiEstimateAI: React.FC = () => {
       setIsEvaluating(false);
     }
   };
+
+  if (authLoading) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-slate-600">
+        ログイン情報を読み込み中です…
+      </div>
+    );
+  }
+
+  if (!userId) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-slate-600">
+        ログイン状態を確認できませんでした。いったんログアウトして再ログインしてください。
+      </div>
+    );
+  }
 
   /* -------------------------------
      UI
@@ -519,7 +560,7 @@ export const FermiEstimateAI: React.FC = () => {
           </section>
 
           {/* ③ 計算 */}
-          <section className="rounded-2xl border border-slate-200 bg白/70 p-4 shadow-sm">
+          <section className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm">
             <div className="mb-2 flex items-center justify-between">
               <h2 className="text-sm font-semibold text-slate-700">
                 ④ 計算（Computation）
@@ -538,12 +579,12 @@ export const FermiEstimateAI: React.FC = () => {
           </section>
 
           {/* ④ オーダーチェック */}
-          <section className="rounded-2xl border border-slate-200 bg白/70 p-4 shadow-sm">
+          <section className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm">
             <h2 className="mb-2 text-sm font-semibold text-slate-700">
               ⑤ オーダーチェック（Sanity Check）
             </h2>
             <textarea
-              className="w-full rounded-xl border border-slate-200 bg白/80 p-2 text-sm"
+              className="w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm"
               rows={3}
               placeholder="例：スタバ売上や飲食市場と比較して 1〜2桁以内なので妥当。"
               value={sanityComment}

@@ -2,6 +2,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
 
 type QuestionType =
   | "self_pr"
@@ -58,9 +59,11 @@ type StoryCard = {
   createdAt: string;
 };
 
-const DEMO_USER_ID = "demo-user";
-
 export const ESCorrection: React.FC = () => {
+  const supabase = createClientComponentClient();
+  const [userId, setUserId] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
   const [company, setCompany] = useState("");
   const [qType, setQType] = useState<QuestionType>("self_pr");
   const [limit, setLimit] = useState<number>(400);
@@ -71,7 +74,7 @@ export const ESCorrection: React.FC = () => {
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // 🔒 無料ユーザー用ロック状態
+  // 🔒 無料ユーザー用ロック状態（バックエンドから受け取る前提）
   const [locked, setLocked] = useState(false);
   const [lockMessage, setLockMessage] = useState<string | null>(null);
 
@@ -82,14 +85,36 @@ export const ESCorrection: React.FC = () => {
   const [cardsLoading, setCardsLoading] = useState(false);
   const [cardsError, setCardsError] = useState<string | null>(null);
 
+  // ⭐ AIドラフト（Pro専用表示想定）
+  const [aiDraft, setAiDraft] = useState<string | null>(null);
+  const [draftLoading, setDraftLoading] = useState(false);
+  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+
+  // ---- 認証ユーザー取得 ----
+  useEffect(() => {
+    const run = async () => {
+      try {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        setUserId(user?.id ?? null);
+      } finally {
+        setAuthLoading(false);
+      }
+    };
+    run();
+  }, [supabase]);
+
   // 初回ロードでストーリーカード取得（一般面接AIと同じ /api/story-cards を利用）
   useEffect(() => {
+    if (!userId) return;
+
     const fetchCards = async () => {
       setCardsLoading(true);
       setCardsError(null);
       try {
         const res = await fetch(
-          `/api/story-cards?userId=${encodeURIComponent(DEMO_USER_ID)}`
+          `/api/story-cards?userId=${encodeURIComponent(userId)}`
         );
         if (!res.ok) {
           const body = await res.text();
@@ -138,7 +163,7 @@ export const ESCorrection: React.FC = () => {
     };
 
     fetchCards();
-  }, []);
+  }, [userId]);
 
   // 🔧 topicType → QuestionType のマッピング
   const mapTopicToQuestionType = (
@@ -202,15 +227,26 @@ export const ESCorrection: React.FC = () => {
     const template = buildTemplateFromCard(card);
     setText(template);
     setQType(mapTopicToQuestionType(card.topicType));
+    setSelectedCardId(card.id);
+    setAiDraft(null); // カード切り替え時は前のドラフトはクリア
   };
 
+  // ES評価（構成・ロジックチェック）
   const handleEvaluate = async () => {
     if (!text.trim()) return;
+
+    if (!userId) {
+      setErrorMessage(
+        "ログイン情報を取得できませんでした。ページを再読み込みしてください。"
+      );
+      return;
+    }
 
     setIsEvaluating(true);
     setErrorMessage(null);
     setScore(null);
     setFeedback(null);
+    // 評価ごとにロック状態をリセット（バックエンド側で付け直す想定）
     setLocked(false);
     setLockMessage(null);
 
@@ -219,6 +255,7 @@ export const ESCorrection: React.FC = () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          userId,
           text,
           company,
           qType,
@@ -240,7 +277,7 @@ export const ESCorrection: React.FC = () => {
             "AI添削に失敗しました。時間をおいて再度お試しください。"
         );
       } else {
-        // ✅ バックエンドで plan を見て partial or full を返す想定
+        // ✅ バックエンドで plan に応じて partial or full を返す想定
         setScore((data.score ?? null) as EsScore | null);
         setFeedback(data.feedback as EsFeedback);
         setLocked(Boolean(data.locked));
@@ -253,6 +290,60 @@ export const ESCorrection: React.FC = () => {
       setIsEvaluating(false);
     }
   };
+
+  // 🧠 Pro専用想定：ストーリーカードからAIドラフト生成
+  const handleGenerateDraft = async () => {
+    if (!selectedCardId) {
+      setErrorMessage(
+        "まず右側のストーリーカードを1つ選択してからドラフト生成を実行してください。"
+      );
+      return;
+    }
+
+    setDraftLoading(true);
+    setErrorMessage(null);
+
+    try {
+      const res = await fetch("/api/es/draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storyCardId: selectedCardId }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data?.draft) {
+        console.error("ES draft error:", data);
+        setErrorMessage(
+          data?.message ??
+            "AIドラフト生成に失敗しました。時間をおいて再度お試しください。"
+        );
+      } else {
+        setAiDraft(data.draft as string);
+      }
+    } catch (e) {
+      console.error(e);
+      setErrorMessage("AIドラフト生成中にエラーが発生しました。");
+    } finally {
+      setDraftLoading(false);
+    }
+  };
+
+  if (authLoading) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-slate-600">
+        ログイン情報を読み込み中です…
+      </div>
+    );
+  }
+
+  if (!userId) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-slate-600">
+        ログイン状態を確認できませんでした。いったんログアウトして再ログインしてください。
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full gap-6">
@@ -358,7 +449,7 @@ export const ESCorrection: React.FC = () => {
             value={text}
             onChange={(e) => setText(e.target.value)}
           />
-          <div className="mt-2 flex justify-end">
+          <div className="mt-2 flex flex-wrap justify-end gap-2">
             <button
               type="button"
               onClick={handleEvaluate}
@@ -380,7 +471,7 @@ export const ESCorrection: React.FC = () => {
 
         {/* フィードバック */}
         {feedback && (
-          <section className="mb-4 space-y-4 rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
+          <section className="space-y-4 rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
             <h2 className="text-xs font-semibold text-slate-800">
               フィードバック結果
             </h2>
@@ -473,6 +564,34 @@ export const ESCorrection: React.FC = () => {
             </div>
           </section>
         )}
+
+        {/* 🧠 AI書き直しドラフト（Pro想定機能） */}
+        {aiDraft && (
+          <section className="mb-4 space-y-2 rounded-2xl border border-indigo-200 bg-indigo-50/80 p-4 text-[11px] text-slate-700 shadow-sm">
+            <h2 className="text-xs font-semibold text-indigo-800">
+              AIが書き直したESドラフト（PRO専用想定）
+            </h2>
+            <div
+              className={
+                locked
+                  ? "rounded-xl bg-white p-3 text-[11px] text-slate-700 blur-[1.5px] opacity-70"
+                  : "rounded-xl bg-white p-3 text-[11px] text-slate-700"
+              }
+            >
+              <pre className="whitespace-pre-wrap">{aiDraft}</pre>
+            </div>
+            {locked && (
+              <div className="mt-3 text-center">
+                <a
+                  href="/settings"
+                  className="rounded-full bg-violet-500 px-5 py-2 text-[11px] font-semibold text-white shadow hover:bg-violet-600"
+                >
+                  PROプランにアップグレードして全文を見る
+                </a>
+              </div>
+            )}
+          </section>
+        )}
       </div>
 
       {/* 右：ストーリーカード一覧＋ヒント */}
@@ -490,6 +609,29 @@ export const ESCorrection: React.FC = () => {
             その上で企業ごとの細かい調整だけしてください。
           </p>
 
+          {/* Pro想定：選択中カードからAIドラフト生成 */}
+          <div className="mb-2">
+            <button
+              type="button"
+              onClick={handleGenerateDraft}
+              disabled={!selectedCardId || draftLoading}
+              className={`w-full rounded-full px-3 py-1.5 text-[10px] font-semibold ${
+                !selectedCardId || draftLoading
+                  ? "cursor-not-allowed bg-slate-200 text-slate-500"
+                  : "bg-indigo-500 text-white hover:bg-indigo-600"
+              }`}
+            >
+              {draftLoading
+                ? "ドラフト生成中..."
+                : "選択中カードからAIドラフト生成（PRO想定）"}
+            </button>
+            {!selectedCardId && (
+              <p className="mt-1 text-[10px] text-slate-500">
+                ※ 先に下のリストからカードを1つ選択してください。
+              </p>
+            )}
+          </div>
+
           {cardsLoading ? (
             <p className="mt-2 text-[11px] text-slate-500">読み込み中...</p>
           ) : cardsError ? (
@@ -501,56 +643,65 @@ export const ESCorrection: React.FC = () => {
             </p>
           ) : (
             <div className="mt-2 max-h-72 space-y-2 overflow-y-auto">
-              {storyCards.map((card) => (
-                <button
-                  key={card.id}
-                  type="button"
-                  onClick={() => handleApplyCardToEs(card)}
-                  className="w-full rounded-xl border border-slate-100 bg-white/90 p-2 text-left shadow-sm transition hover:border-sky-200 hover:bg-sky-50/80"
-                >
-                  <div className="flex items-center justify-between gap-1">
-                    <span className="text-[10px] text-slate-500">
-                      {topicLabelFromCard(card.topicType)}
-                    </span>
-                    <div className="flex items-center gap-1">
-                      {card.isSensitive && (
-                        <span className="inline-flex items-center rounded-full border border-rose-100 bg-rose-50 px-2 py-0.5 text-[9px] font-semibold text-rose-600">
-                          🔒 Sensitive
-                        </span>
-                      )}
-                      <span className="text-[9px] text-slate-400">
-                        {card.createdAt
-                          ? new Date(card.createdAt).toLocaleDateString("ja-JP")
-                          : ""}
+              {storyCards.map((card) => {
+                const isSelected = selectedCardId === card.id;
+                return (
+                  <button
+                    key={card.id}
+                    type="button"
+                    onClick={() => handleApplyCardToEs(card)}
+                    className={`w-full rounded-xl border bg-white/90 p-2 text-left shadow-sm transition hover:border-sky-200 hover:bg-sky-50/80 ${
+                      isSelected
+                        ? "border-sky-400 ring-1 ring-sky-200"
+                        : "border-slate-100"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[10px] text-slate-500">
+                        {topicLabelFromCard(card.topicType)}
                       </span>
-                    </div>
-                  </div>
-                  <p className="mt-0.5 line-clamp-1 text-[11px] font-semibold text-slate-800">
-                    {card.title || "タイトル未設定"}
-                  </p>
-                  <p className="mt-0.5 line-clamp-2 text-[10px] text-slate-600">
-                    {card.star?.situation ||
-                      "（状況Sが入力されるとここに表示されます）"}
-                  </p>
-                  {card.axes && card.axes.length > 0 && (
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {card.axes.slice(0, 3).map((axis) => (
-                        <span
-                          key={axis}
-                          className="rounded-full border border-sky-100 bg-sky-50 px-2 py-0.5 text-[9px] text-sky-700"
-                        >
-                          {axis}
-                        </span>
-                      ))}
-                      {card.axes.length > 3 && (
+                      <div className="flex items-center gap-1">
+                        {card.isSensitive && (
+                          <span className="inline-flex items-center rounded-full border border-rose-100 bg-rose-50 px-2 py-0.5 text-[9px] font-semibold text-rose-600">
+                            🔒 Sensitive
+                          </span>
+                        )}
                         <span className="text-[9px] text-slate-400">
-                          +{card.axes.length - 3}
+                          {card.createdAt
+                            ? new Date(card.createdAt).toLocaleDateString(
+                                "ja-JP"
+                              )
+                            : ""}
                         </span>
-                      )}
+                      </div>
                     </div>
-                  )}
-                </button>
-              ))}
+                    <p className="mt-0.5 line-clamp-1 text-[11px] font-semibold text-slate-800">
+                      {card.title || "タイトル未設定"}
+                    </p>
+                    <p className="mt-0.5 line-clamp-2 text-[10px] text-slate-600">
+                      {card.star?.situation ||
+                        "（状況Sが入力されるとここに表示されます）"}
+                    </p>
+                    {card.axes && card.axes.length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {card.axes.slice(0, 3).map((axis) => (
+                          <span
+                            key={axis}
+                            className="rounded-full border border-sky-100 bg-sky-50 px-2 py-0.5 text-[9px] text-sky-700"
+                          >
+                            {axis}
+                          </span>
+                        ))}
+                        {card.axes.length > 3 && (
+                          <span className="text-[9px] text-slate-400">
+                            +{card.axes.length - 3}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           )}
 

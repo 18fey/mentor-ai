@@ -61,22 +61,32 @@ async function callOpenAiJson(systemPrompt: string, userPrompt: string) {
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
-    const userId = searchParams.get("userId") ?? "demo-user";
+    // userId = Supabase auth.user.id
+    const userId = searchParams.get("userId");
+
+    if (!userId) {
+      return NextResponse.json(
+        { error: "user_not_authenticated" },
+        { status: 401 }
+      );
+    }
 
     // 直近7日間
     const now = new Date();
     const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const from = weekAgo.toISOString();
 
-    // 1. プロフィール取得
+    // 1. プロフィール取得（auth_user_id 単位）
     const profileRes = await supabaseFetch(
-      `users_profile?select=*&id=eq.${encodeURIComponent(userId)}&limit=1`,
+      `users_profile?select=*&auth_user_id=eq.${encodeURIComponent(
+        userId
+      )}&limit=1`,
       { method: "GET" }
     );
     const profileRows = await profileRes.json();
     const profile = profileRows[0] ?? null;
 
-    // 2. 直近1週間のストーリーカード取得
+    // 2. 直近1週間のストーリーカード取得（user_id = auth_user_id）
     const cardsRes = await supabaseFetch(
       `story_cards?select=*&user_id=eq.${encodeURIComponent(
         userId

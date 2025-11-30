@@ -1,24 +1,57 @@
 // app/interview/general-flow/page.tsx
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+
+type Database = any;
 
 type Message = { role: "ai" | "user"; content: string };
 
 export default function GeneralFlowPage() {
-  const [userId] = useState("demo-user");
+  const router = useRouter();
+  const supabase = createClientComponentClient<Database>();
+
+  const [userId, setUserId] = useState<string | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
   const [topic, setTopic] = useState("gakuchika");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [tips, setTips] = useState("");
 
+  // ✅ ログインユーザー取得
+  useEffect(() => {
+    const run = async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user) {
+        router.push("/auth");
+        return;
+      }
+
+      setUserId(user.id);
+      setAuthChecked(true);
+    };
+    run();
+  }, [supabase, router]);
+
   async function startSession() {
+    if (!userId) {
+      router.push("/auth");
+      return;
+    }
+
     const res = await fetch("/api/interview/session", {
       method: "POST",
       body: JSON.stringify({ userId, topic }),
     });
     const json = await res.json();
+
     const id = json.session.id as string;
     setSessionId(id);
 
@@ -54,12 +87,22 @@ export default function GeneralFlowPage() {
   }
 
   async function finishSession() {
-    if (!sessionId) return;
+    if (!sessionId || !userId) return;
+
     const res = await fetch("/api/story-cards/generate", {
       method: "POST",
       body: JSON.stringify({ sessionId, userId }),
     });
     const data = await res.json();
+
+    if (!res.ok || !data.storyCard) {
+      alert(
+        data.error ||
+          "ストーリーカードの保存に失敗しました。時間をおいて再度お試しください。"
+      );
+      return;
+    }
+
     alert("ストーリーカードを保存しました: " + data.storyCard.title);
   }
 
@@ -84,6 +127,7 @@ export default function GeneralFlowPage() {
         <button
           onClick={startSession}
           className="bg-black text-white px-4 py-2 rounded"
+          disabled={!authChecked || !userId}
         >
           セッション開始
         </button>
@@ -138,6 +182,7 @@ export default function GeneralFlowPage() {
             <button
               onClick={finishSession}
               className="bg-green-600 text-white px-3 py-2 rounded text-sm"
+              disabled={!sessionId || !userId}
             >
               セッション終了
             </button>

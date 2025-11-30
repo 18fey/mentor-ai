@@ -16,7 +16,10 @@ type FeatureKey =
  * 機能ごとの「プラン別・月あたり無料回数」
  * null = 上限なし
  */
-const FEATURE_LIMITS: Record<FeatureKey, { free: number; beta: number; pro: number | null }> = {
+const FEATURE_LIMITS: Record<
+  FeatureKey,
+  { free: number; beta: number; pro: number | null }
+> = {
   case_interview: {
     free: 3, // ケース面接：月3問まで無料
     beta: 5,
@@ -47,7 +50,8 @@ const FEATURE_LIMITS: Record<FeatureKey, { free: number; beta: number; pro: numb
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
-    const userId = body.userId as string | undefined; // ★ users_profile.id を想定（今は demo-user でもOK）
+    // userId = Supabase auth.user.id
+    const userId = body.userId as string | undefined;
     const feature = body.feature as FeatureKey | undefined;
 
     if (!userId || !feature) {
@@ -66,22 +70,26 @@ export async function POST(req: NextRequest) {
     }
 
     // ---------------------------
-    // プロファイル取得
+    // プロファイル取得（auth_user_id 単位）
     // ---------------------------
     const { data: profile, error: profileError } = await supabaseServer
       .from("users_profile")
       .select("*")
-      .eq("id", userId)
+      .eq("auth_user_id", userId)
       .maybeSingle();
 
     if (profileError || !profile) {
       console.error("profile not found:", profileError);
       return NextResponse.json(
-        { error: "profile_not_found", message: "ユーザープロファイルが見つかりません。" },
+        {
+          error: "profile_not_found",
+          message: "ユーザープロファイルが見つかりません。",
+        },
         { status: 404 }
       );
     }
 
+    const profileId: string = profile.id; // feature_usage.profile_id 用
     const plan: Plan = (profile.plan as Plan) ?? "free";
     const now = new Date();
 
@@ -91,7 +99,7 @@ export async function POST(req: NextRequest) {
     // ---------------------------
     let resetAt: Date;
     if (profile.usage_reset_at) {
-      resetAt = new Date(profile.usage_reset_at);
+      resetAt = new Date(profile.usage_reset_at as string);
       const sameMonth =
         resetAt.getFullYear() === now.getFullYear() &&
         resetAt.getMonth() === now.getMonth();
@@ -101,14 +109,14 @@ export async function POST(req: NextRequest) {
         await supabaseServer
           .from("users_profile")
           .update({ usage_reset_at: resetAt.toISOString() })
-          .eq("id", userId);
+          .eq("id", profileId);
       }
     } else {
       resetAt = new Date(now.getFullYear(), now.getMonth(), 1);
       await supabaseServer
         .from("users_profile")
         .update({ usage_reset_at: resetAt.toISOString() })
-        .eq("id", userId);
+        .eq("id", profileId);
     }
 
     // ---------------------------
@@ -118,7 +126,7 @@ export async function POST(req: NextRequest) {
 
     if (plan === "pro" || planLimit === null) {
       await supabaseServer.from("feature_usage").insert({
-        profile_id: userId,
+        profile_id: profileId,
         feature,
       });
 
@@ -138,7 +146,7 @@ export async function POST(req: NextRequest) {
     const { data: rows, error: countError } = await supabaseServer
       .from("feature_usage")
       .select("id")
-      .eq("profile_id", userId)
+      .eq("profile_id", profileId)
       .eq("feature", feature)
       .gte("used_at", resetAt.toISOString());
 
@@ -178,7 +186,7 @@ export async function POST(req: NextRequest) {
     // 1回消費（ログ追加）
     // ---------------------------
     await supabaseServer.from("feature_usage").insert({
-      profile_id: userId,
+      profile_id: profileId,
       feature,
     });
 

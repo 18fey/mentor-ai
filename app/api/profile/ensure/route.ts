@@ -1,11 +1,11 @@
-// 例: app/api/profile/ensure/route.ts
+// app/api/profile/ensure/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabase-server";
 
 type SaveProfileBody = {
   // 最低限あればOKな項目
-  userId?: string;        // まだ auth 未導入なら「users_profile.id」でもOK
-  authUserId?: string;    // Supabase auth.users.id を使うならこっち
+  userId?: string;        // Supabase auth.user.id（フロントから渡す）
+  authUserId?: string;    // どちらを使ってもOKだが、最終的には auth_user_id に保存
   name?: string;
   university?: string;
   faculty?: string;
@@ -13,6 +13,11 @@ type SaveProfileBody = {
   interestedIndustries?: string[]; // interested_industries
   valuesTags?: string[];           // values_tags
 };
+
+function getLogicalUserId(body: SaveProfileBody | null): string | null {
+  if (!body) return null;
+  return body.authUserId ?? body.userId ?? null;
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -25,7 +30,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const authUserId = body.authUserId ?? body.userId ?? "demo-user";
+    const authUserId = getLogicalUserId(body);
+
+    // ✅ demo-user にフォールバックせず必須にする（完全個別化）
+    if (!authUserId) {
+      return NextResponse.json(
+        { ok: false, error: "user_not_authenticated" },
+        { status: 401 }
+      );
+    }
 
     const { data, error } = await supabaseServer
       .from("users_profile")
