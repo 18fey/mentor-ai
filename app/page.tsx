@@ -19,7 +19,51 @@ type BaseStep = {
   badge?: string;
 };
 
+// ★ 追加：APP_MODE を環境変数から取得（なければ production 扱い）
+const APP_MODE = process.env.NEXT_PUBLIC_APP_MODE || "production";
+
 export default function HomePage() {
+  // ★ 追加：クローズモードならここで早期リターン
+  if (APP_MODE === "closed") {
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-center bg-slate-950 text-slate-50 px-6">
+        <div className="max-w-lg text-center space-y-4">
+          <p className="text-xs tracking-[0.2em] uppercase text-slate-400">
+            Mentor.AI Classroom
+          </p>
+          <h1 className="text-2xl font-semibold">
+            このクラス用デモは終了しました
+          </h1>
+          <p className="text-sm text-slate-300 leading-relaxed">
+            本日の授業で利用した Mentor.AI クラス専用環境はクローズしました。
+            <br />
+            登録されたプロフィール・ストーリーカード・診断結果などのデータは、
+            安全に保存されています。
+          </p>
+          <div className="mt-4 rounded-2xl bg-slate-900/60 border border-slate-700 px-4 py-3 text-xs text-left text-slate-300">
+            <p className="font-semibold text-slate-100 mb-1">
+              これからのご利用について
+            </p>
+            <ul className="list-disc list-inside space-y-1">
+              <li>
+                正式版リリース後、同じメールアドレス・パスワードで本番環境にログインすると、
+                今回のデータをそのまま引き継いでご利用いただけます。
+              </li>
+              <li>
+                詳細なご案内は、Mentor.AI
+                公式Instagramや授業内で今後お知らせ予定です。
+              </li>
+            </ul>
+          </div>
+          <p className="pt-2 text-[11px] text-slate-500">
+            ご不明点があれば、授業担当の藤田先生 または 渡邉 までお問い合わせください。
+          </p>
+        </div>
+      </main>
+    );
+  }
+
+  // ★ ここから下は元の HomePage ロジックそのまま
   const supabase = createClientComponentClient<Database>();
   const router = useRouter();
 
@@ -333,7 +377,7 @@ function BaseStepCard({ step }: { step: BaseStep }) {
   return (
     <div className="flex flex-col justify-between rounded-2xl bg-white/90 p-4 shadow-sm shadow-sky-100">
       <div className="space-y-1">
-        <div className="mb-1 flex items-center justify-between">
+        <div className="mb-1 flex items中心 justify-between">
           <p className="text-[11px] font-semibold text-sky-500">
             STEP {step.id}
           </p>
