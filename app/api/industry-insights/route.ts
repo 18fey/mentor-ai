@@ -10,12 +10,23 @@ type InsightResult = {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { industry, targetCompany, focusTopic, includeNews } = body as {
-      industry: string;
+    const {
+      industryGroup,
+      industrySub,
+      targetCompany,
+      focusTopic,
+      includeNews,
+    } = body as {
+      industryGroup: string;
+      industrySub?: string | null;
       targetCompany?: string | null;
       focusTopic?: string | null;
       includeNews?: boolean;
     };
+
+    const industryLine = industrySub
+      ? `対象業界: ${industryGroup} / ${industrySub}`
+      : `対象業界: ${industryGroup}`;
 
     const companyPart = targetCompany
       ? `志望企業: ${targetCompany}`
@@ -28,20 +39,26 @@ export async function POST(req: Request) {
       : "ニュース・トレンドは簡潔で構いません。";
 
     const systemPrompt = `
-あなたは日本の就活生向けに、業界インサイトを整理するプロフェッショナルキャリアメンターです。
+あなたは日本の就活生向けに、
+「業界構造 × 個別企業の強み/弱み × 将来性（中期リスク） × 直近トレンド」
+を統合して整理するプロフェッショナルキャリアメンターです。
+
 出力は必ず JSON 形式「のみ」で行ってください。前後に説明文は書かないでください。
 
 JSON の形式は次の通りです：
 
 {
-  "insight": "業界構造・ビジネスモデル・押さえるべき論点の解説（Markdown 可）",
+  "insight": "業界構造・ビジネスモデル・個別企業の位置づけ・強み/弱み・将来性（Markdown 可）",
   "questions": "想定質問リストと答え方のポイント（Markdown 可）",
   "news": "直近ニュース・トレンドと面接での語り方（Markdown 可）"
 }
+
+・コードブロック（\`\`\`json など）で囲まず、純粋な JSON テキストだけを出力してください。
+・「insight」「questions」「news」の3フィールドは必ず含めてください。
     `.trim();
 
     const userPrompt = `
-対象業界: ${industry}
+${industryLine}
 ${companyPart}
 ${focusPart}
 
@@ -50,6 +67,10 @@ ${focusPart}
 - 日本語で出力。
 - 大学3〜4年生が読んで理解しやすいトーンで。
 - "insight" / "questions" / "news" で、情報が被りすぎないようにしてください。
+- insight では、業界構造（プレーヤー・収益源・規制・リスク）、主要論点、個別企業の位置づけに加えて、
+  「強み」「弱み」「中期3〜5年の将来性（追い風・向かい風・構造的リスク）」も整理してください。
+- questions では、面接で実際に聞かれそうな質問と、答え方のポイントを 10〜15 個まとめてください。
+- news では、就活生が押さえておくべき直近トレンド・ニュースと、それをどう語るかのヒントを書いてください。
 ${newsPart}
     `.trim();
 
@@ -65,7 +86,7 @@ ${newsPart}
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
         ],
-        temperature: 0.7,
+        temperature: 0.55,
       }),
     });
 
@@ -79,20 +100,43 @@ ${newsPart}
     }
 
     const json = await res.json();
-    const content = json.choices?.[0]?.message?.content;
+    let content: string | null = json.choices?.[0]?.message?.content ?? null;
 
     if (!content) {
       throw new Error("Empty content from OpenAI");
     }
 
-    // モデルに「JSONだけ出して」とお願いしているので、それをパースする
+    // -------- ここから JSON クリーニング処理 --------
+    let cleaned = content.trim();
+    console.log("Raw content from OpenAI:", cleaned);
+
+    // 1) ```〜``` で囲まれていたら中身だけ取り出す
+    if (cleaned.startsWith("```")) {
+      const firstNewline = cleaned.indexOf("\n");
+      const lastFence = cleaned.lastIndexOf("```");
+      if (firstNewline !== -1 && lastFence !== -1 && lastFence > firstNewline) {
+        cleaned = cleaned.slice(firstNewline + 1, lastFence).trim();
+      }
+    }
+
+    // 2) それでも余計な文章がついていたら、最初の { から最後の } までを抜き出す
+    const firstBrace = cleaned.indexOf("{");
+    const lastBrace = cleaned.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+    }
+
     let parsed: Partial<InsightResult>;
     try {
-      parsed = JSON.parse(content);
+      parsed = JSON.parse(cleaned);
     } catch (e) {
-      console.error("JSON parse error. Raw content:", content);
-      throw new Error("JSON parse error");
+      console.error("JSON parse error. Cleaned content:", cleaned, e);
+      return NextResponse.json(
+        { error: "インサイト生成に失敗しました（JSON parse error）" },
+        { status: 500 }
+      );
     }
+    // -------- ここまで --------
 
     const result: InsightResult = {
       insight: parsed.insight ?? "インサイト情報を取得できませんでした。",

@@ -1,12 +1,25 @@
 // app/onboarding/page.tsx
 "use client";
 
-import { useEffect, useState, FormEvent } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
 
 type Step = 1 | 2 | 3;
 type Purpose = "job_hunting" | "thinking_training";
+
+type ProfileRow = {
+  id: string;
+  affiliation: string | null;
+  status: string | null;
+  purpose: Purpose | null;
+  interests: string[] | null;
+  job_stage: string | null;
+  work_industry: string | null;
+  work_role: string | null;
+  target_companies: string[] | null;
+  onboarding_completed: boolean | null;
+};
 
 export default function OnboardingPage() {
   const supabase = createClientComponentClient();
@@ -37,11 +50,17 @@ export default function OnboardingPage() {
         return;
       }
 
-      const { data: profile } = await supabase
+      const { data: profile, error } = await supabase
         .from("profiles")
-        .select("*")
+        .select(
+          "affiliation,status,purpose,interests,job_stage,work_industry,work_role,target_companies,onboarding_completed"
+        )
         .eq("id", auth.user.id)
-        .maybeSingle();
+        .maybeSingle<ProfileRow>();
+
+      if (error) {
+        console.error("profiles load error:", error);
+      }
 
       if (profile?.onboarding_completed) {
         router.push("/");
@@ -49,14 +68,14 @@ export default function OnboardingPage() {
       }
 
       if (profile) {
-        setAffiliation(profile.affiliation || "");
-        setStatus(profile.status || "");
-        setPurpose((profile.purpose as Purpose | null) ?? null);
-        setInterests(profile.interests || []);
-        setJobStage(profile.job_stage || "");
-        setWorkIndustry(profile.work_industry || "");
-        setWorkRole(profile.work_role || "");
-        setTargetCompanies(profile.target_companies || []);
+        setAffiliation(profile.affiliation ?? "");
+        setStatus(profile.status ?? "");
+        setPurpose(profile.purpose ?? null);
+        setInterests(profile.interests ?? []);
+        setJobStage(profile.job_stage ?? "");
+        setWorkIndustry(profile.work_industry ?? "");
+        setWorkRole(profile.work_role ?? "");
+        setTargetCompanies(profile.target_companies ?? []);
       }
 
       setLoading(false);
@@ -86,10 +105,10 @@ export default function OnboardingPage() {
     setTargetCompanies((prev) => prev.filter((c) => c !== name));
   };
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    setSaving(true);
+  // 👇 最終保存だけやる関数
+  const handleSave = async () => {
     setError(null);
+    setSaving(true);
 
     const { data: auth } = await supabase.auth.getUser();
     if (!auth.user) {
@@ -105,11 +124,11 @@ export default function OnboardingPage() {
         affiliation,
         status,
         purpose,
-        interests,
+        interests, // text[]
         job_stage: jobStage,
         work_industry: workIndustry,
         work_role: workRole,
-        target_companies: targetCompanies,
+        target_companies: targetCompanies, // text[]
         onboarding_completed: true,
       },
       { onConflict: "id" }
@@ -126,9 +145,6 @@ export default function OnboardingPage() {
     }
 
     setSaving(false);
-
-    // ✅ プロフィール完了後は AIタイプ診断のオンボーディングへ
-    // ここを "/onboarding/ai-typing" → そこに Intro / 質問 / 結果を置くイメージ
     router.push("/onboarding/ai-typing");
   };
 
@@ -144,10 +160,7 @@ export default function OnboardingPage() {
 
   return (
     <main className="flex min-h-screen items-center justify-center px-4">
-      <form
-        onSubmit={handleSubmit}
-        className="w-full max-w-2xl rounded-3xl border border-white/40 bg-white/80 p-8 shadow-[0_18px_45px_rgba(15,23,42,0.12)] backdrop-blur-[30px]"
-      >
+      <div className="w-full max-w-2xl rounded-3xl border border-white/40 bg-white/80 p-8 shadow-[0_18px_45px_rgba(15,23,42,0.12)] backdrop-blur-[30px]">
         {/* ステップ表示 */}
         <div className="mb-6 flex items-center justify-between text-xs text-slate-500">
           <div className="flex items-center gap-2">
@@ -226,7 +239,8 @@ export default function OnboardingPage() {
             </button>
           ) : (
             <button
-              type="submit"
+              type="button"
+              onClick={handleSave}
               disabled={saving}
               className="rounded-full bg-sky-500 px-6 py-2 text-xs font-semibold text-white shadow-sm hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-60"
             >
@@ -234,7 +248,7 @@ export default function OnboardingPage() {
             </button>
           )}
         </div>
-      </form>
+      </div>
     </main>
   );
 }
@@ -244,7 +258,7 @@ function StepDot({
   children,
 }: {
   active: boolean;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   return (
     <div className="flex items-center gap-2">
@@ -253,7 +267,11 @@ function StepDot({
           active ? "bg-sky-500" : "bg-slate-200"
         }`}
       />
-      <span className={`text-[11px] ${active ? "text-slate-800" : "text-slate-400"}`}>
+      <span
+        className={`text-[11px] ${
+          active ? "text-slate-800" : "text-slate-400"
+        }`}
+      >
         {children}
       </span>
     </div>
@@ -277,7 +295,9 @@ function Step1Basic({
       <h1 className="mb-1 text-lg font-semibold text-slate-900">
         あなたについて教えてください
       </h1>
-      <p className="mb-6 text-xs text-slate-500">就活生以外の方もご利用いただけます。</p>
+      <p className="mb-6 text-xs text-slate-500">
+        就活生以外の方もご利用いただけます。
+      </p>
 
       <div className="space-y-5 text-xs">
         <div>
@@ -297,20 +317,22 @@ function Step1Basic({
             現在のステータス
           </label>
           <div className="flex flex-wrap gap-2">
-            {["大学生", "大学院生", "社会人", "転職検討中", "その他"].map((option) => (
-              <button
-                key={option}
-                type="button"
-                onClick={() => setStatus(option)}
-                className={`rounded-full border px-3 py-1 ${
-                  status === option
-                    ? "border-sky-400 bg-sky-50 text-sky-700"
-                    : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                }`}
-              >
-                {option}
-              </button>
-            ))}
+            {["大学生", "大学院生", "社会人", "転職検討中", "その他"].map(
+              (option) => (
+                <button
+                  key={option}
+                  type="button"
+                  onClick={() => setStatus(option)}
+                  className={`rounded-full border px-3 py-1 ${
+                    status === option
+                      ? "border-sky-400 bg-sky-50 text-sky-700"
+                      : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                  }`}
+                >
+                  {option}
+                </button>
+              )
+            )}
           </div>
         </div>
       </div>
@@ -521,6 +543,7 @@ function Step3Targets({
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
+                  e.stopPropagation();
                   addTargetCompany();
                 }
               }}

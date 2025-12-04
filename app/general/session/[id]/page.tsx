@@ -1,3 +1,4 @@
+// app/session/[id]/page.tsx など
 "use client";
 
 import { useEffect, useState } from "react";
@@ -40,8 +41,9 @@ export default function SessionPage() {
 
     const res = await fetch("/api/interview/turn", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        sessionId,
+        sessionId: String(sessionId),
         userAnswer: input,
       }),
     });
@@ -51,7 +53,7 @@ export default function SessionPage() {
     setMessages((prev) => [
       ...prev,
       { role: "user", content: input },
-      { role: "ai", content: data.aiTurn.content },
+      { role: "ai", content: data.aiTurn?.content ?? "" },
     ]);
 
     setInput("");
@@ -65,8 +67,9 @@ export default function SessionPage() {
 
     const res = await fetch("/api/story-cards/generate", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        sessionId,
+        sessionId: String(sessionId),
         userId, // ✅ ログインユーザー単位でカード生成
       }),
     });
@@ -74,7 +77,8 @@ export default function SessionPage() {
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       alert(
-        data.error || "ストーリーカードの作成に失敗しました。時間をおいて再度お試しください。"
+        data.error ||
+          "ストーリーカードの作成に失敗しました。時間をおいて再度お試しください。"
       );
       return;
     }

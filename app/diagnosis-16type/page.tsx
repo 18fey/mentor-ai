@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import { CareerGapSectionMulti } from "@/components/CareerGapSectionMulti";
 
 // ============================
 // Mentor.AI 16タイプ診断
@@ -68,7 +69,10 @@ const QUESTIONS: Question[] = [
     id: 2,
     text: "AIの出力がイマイチだったとき、あなたは？",
     options: [
-      { text: "原因を分析してプロンプトを修正する", score: { analytical: 2, strategic: 1 } },
+      {
+        text: "原因を分析してプロンプトを修正する",
+        score: { analytical: 2, strategic: 1 },
+      },
       { text: "とりあえずもう一度、違う角度で聞いてみる", score: { intuitive: 2 } },
       { text: "自分の方で編集してしまう", score: { creative: 2 } },
       { text: "ゴールとのズレを指摘して方向性を戻す", score: { strategic: 2 } },
@@ -89,7 +93,10 @@ const QUESTIONS: Question[] = [
     text: "AIへのプロンプトを書くときのクセに近いのは？",
     options: [
       { text: "条件や箇条書きが多くなる", score: { analytical: 2 } },
-      { text: "比喩やトーンの指定が多い", score: { creative: 2, intuitive: 1 } },
+      {
+        text: "比喩やトーンの指定が多い",
+        score: { creative: 2, intuitive: 1 },
+      },
       { text: "誰が・何のために使うかを強く意識する", score: { strategic: 2 } },
       { text: "その場のノリで書きながら調整する", score: { intuitive: 2 } },
     ],
@@ -118,7 +125,10 @@ const QUESTIONS: Question[] = [
     id: 7,
     text: "自分の思考スタイルを一言で言うと？",
     options: [
-      { text: "全体最適を意識して組み立てる", score: { strategic: 2, analytical: 1 } },
+      {
+        text: "全体最適を意識して組み立てる",
+        score: { strategic: 2, analytical: 1 },
+      },
       { text: "ロジックを積み上げていく", score: { analytical: 2 } },
       { text: "直感で方向性を決めてから詰める", score: { intuitive: 2 } },
       { text: "まず広げてから、あとで整理する", score: { creative: 2 } },
@@ -130,18 +140,30 @@ const QUESTIONS: Question[] = [
     options: [
       { text: "ズレている前提・条件を特定する", score: { analytical: 2 } },
       { text: "ゴールとの距離感を言語化して伝え直す", score: { strategic: 2 } },
-      { text: "「もっとこんな雰囲気で」と感覚的に修正する", score: { intuitive: 2, creative: 1 } },
-      { text: "一度自分で書き直してから再度AIに渡す", score: { creative: 2 } },
+      {
+        text: "「もっとこんな雰囲気で」と感覚的に修正する",
+        score: { intuitive: 2, creative: 1 },
+      },
+      {
+        text: "一度自分で書き直してから再度AIに渡す",
+        score: { creative: 2 },
+      },
     ],
   },
   {
     id: 9,
     text: "AI活用でいちばんワクワクする瞬間は？",
     options: [
-      { text: "自分一人では組めない戦略・構造が見えたとき", score: { strategic: 2, analytical: 1 } },
+      {
+        text: "自分一人では組めない戦略・構造が見えたとき",
+        score: { strategic: 2, analytical: 1 },
+      },
       { text: "ロジックや数字が綺麗にそろったとき", score: { analytical: 2 } },
       { text: "想像していなかった切り口が出てきたとき", score: { intuitive: 2 } },
-      { text: "表現や世界観が一気に立ち上がったとき", score: { creative: 2 } },
+      {
+        text: "表現や世界観が一気に立ち上がったとき",
+        score: { creative: 2 },
+      },
     ],
   },
   {
@@ -162,7 +184,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   strategic_copilot: {
     id: "strategic_copilot",
     nameEn: "Strategic Co-Pilot",
-    nameJa: "戦略的コ・パイロット型",
+    nameJa: "A：戦略的コ・パイロット型",
     tagLine: "AIを「右腕」にしながら、全体戦略から逆算して動くタイプ。",
     summary:
       "AIを単なるツールではなく、戦略実行のパートナーとして扱えるタイプです。ゴールから逆算し、どこにAIを組み込むかを設計する力に優れています。",
@@ -185,7 +207,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   cognitive_architect: {
     id: "cognitive_architect",
     nameEn: "Cognitive Architect",
-    nameJa: "思考構造アーキテクト型",
+    nameJa: "B：思考構造アーキテクト型",
     tagLine: "情報や論点を構造化し、AIを高度な設計ツールとして使うタイプ。",
     summary:
       "複雑なテーマを分解し、構造として整理する力に優れたタイプです。AIに渡す前の“思考の設計図”を描くのが得意で、戦略・資料作りなどで真価を発揮します。",
@@ -208,7 +230,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   adaptive_visionary: {
     id: "adaptive_visionary",
     nameEn: "Adaptive Visionary",
-    nameJa: "適応ビジョナリー型",
+    nameJa: "C：適応ビジョナリー型",
     tagLine: "未来の方向性を見据えつつ、AIの特性に合わせて柔軟に舵を切るタイプ。",
     summary:
       "大きなビジョンや方向性を描きながら、その場その場でAIの力を借りて進め方を調整できるタイプです。変化の激しい環境で、AIとともに進路を探るのが得意です。",
@@ -231,7 +253,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   precision_operator: {
     id: "precision_operator",
     nameEn: "Precision Operator",
-    nameJa: "精密オペレーター型",
+    nameJa: "D：精密オペレーター型",
     tagLine: "細部の条件や精度にこだわり、AIの出力品質をコントロールするタイプ。",
     summary:
       "プロンプトの文言や条件設定の“わずかな違い”に敏感で、AIの出力精度を高く保つことに長けたタイプです。高品質が求められる資料や分析で強みを発揮します。",
@@ -254,7 +276,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   intuitive_navigator: {
     id: "intuitive_navigator",
     nameEn: "Intuitive Navigator",
-    nameJa: "直感ナビゲーター型",
+    nameJa: "E：直感ナビゲーター型",
     tagLine: "感覚的な「しっくり感」を大事にしながら、AIと対話して方向を探るタイプ。",
     summary:
       "言語化しきれないニュアンスや“なんとなく違う”という感覚を頼りに、AIとの対話を調整していくタイプです。言葉になりにくいテーマや企画の初期探索で強みを発揮します。",
@@ -277,7 +299,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   systemic_thinker: {
     id: "systemic_thinker",
     nameEn: "Systemic Thinker",
-    nameJa: "システミックシンカー型",
+    nameJa: "F：システミックシンカー型",
     tagLine: "個別タスクではなく、仕組み・システムとしてAI活用を考えるタイプ。",
     summary:
       "一つ一つのタスクではなく、全体のフローや組織の動きの中でAIを位置づけて考えるタイプです。業務設計や組織レベルでのAI導入に向いています。",
@@ -300,7 +322,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   creative_divergent: {
     id: "creative_divergent",
     nameEn: "Creative Divergent",
-    nameJa: "クリエイティブ・ダイバージェント型",
+    nameJa: "G：クリエイティブ・ダイバージェント型",
     tagLine: "発想を広げるための相棒としてAIを使う、企画・表現寄りのタイプ。",
     summary:
       "AIを使って「まだ見たことのない案」や「新しい表現」を次々と出していくタイプです。企画・コピー・デザインなど、クリエイティブな文脈で力を発揮します。",
@@ -323,8 +345,8 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   delegation_optimizer: {
     id: "delegation_optimizer",
     nameEn: "Delegation Optimizer",
-    nameJa: "委任オプティマイザー型",
-    tagLine: "AIに“何を・どこまで”任せるかのライン設計が上手いタイプ。",
+    nameJa: "H：委任オプティマイザー型",
+    tagLine: "AIに“何を・どこ까지”任せるかのライン設計が上手いタイプ。",
     summary:
       "AIを部下や外注のように扱い、「任せる領域」と「自分で判断する領域」を切り分けるのが得意なタイプです。マネジメント視点でのAI活用に向いています。",
     strengths: [
@@ -346,7 +368,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   analytical_executor: {
     id: "analytical_executor",
     nameEn: "Analytical Executor",
-    nameJa: "アナリティカル・エグゼキューター型",
+    nameJa: "I：アナリティカル・エグゼキューター型",
     tagLine: "分析と実行をセットで回し、AIをオペレーションに溶け込ませるタイプ。",
     summary:
       "数字・ロジックに強く、AIを使った分析やシミュレーションを好むタイプです。その結果をもとに、具体的なアクションまで落とし込む動きが得意です。",
@@ -369,7 +391,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   reflective_synthesizer: {
     id: "reflective_synthesizer",
     nameEn: "Reflective Synthesizer",
-    nameJa: "リフレクティブ・シンセサイザー型",
+    nameJa: "J：リフレクティブ・シンセサイザー型",
     tagLine: "AIとの対話を通して内省し、複数の視点を統合していくタイプ。",
     summary:
       "AIを“鏡”のように使いながら、自分の考えを深めていくタイプです。対話を通して思考を整理し、異なる視点を統合していくプロセスで力を発揮します。",
@@ -392,7 +414,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   scenario_designer: {
     id: "scenario_designer",
     nameEn: "Scenario Designer",
-    nameJa: "シナリオ・デザイナー型",
+    nameJa: "K：シナリオ・デザイナー型",
     tagLine: "複数のシナリオを描き、AIにそれぞれの展開を試させるタイプ。",
     summary:
       "「もしこうしたら？」というシナリオを複数描き、それぞれをAIにシミュレーションさせるのが得意なタイプです。意思決定や事業検討の場面で強く機能します。",
@@ -415,7 +437,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   collaborative_strategist: {
     id: "collaborative_strategist",
     nameEn: "Collaborative Strategist",
-    nameJa: "コラボレーティブ・ストラテジスト型",
+    nameJa: "L：コラボレーティブ・ストラテジスト型",
     tagLine: "人とAIの両方を巻き込みながら、戦略を共同で作っていくタイプ。",
     summary:
       "チームメンバーとAIの両方から意見やアイデアを集めて、戦略を組み立てていくタイプです。ファシリテーションや合意形成の場で力を発揮します。",
@@ -438,7 +460,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   experimental_improver: {
     id: "experimental_improver",
     nameEn: "Experiment-Driven Improver",
-    nameJa: "実験ドリブン・インプルーバー型",
+    nameJa: "M：実験ドリブン・インプルーバー型",
     tagLine: "小さな実験をAIと繰り返しながら、改善を積み上げていくタイプ。",
     summary:
       "完璧な計画よりも、小さな試行錯誤を重ねることで前に進むタイプです。AIを使ったABテストや、日々の業務改善などで強みを発揮します。",
@@ -461,7 +483,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   efficiency_engineer: {
     id: "efficiency_engineer",
     nameEn: "Efficiency Engineer",
-    nameJa: "エフィシェンシー・エンジニア型",
+    nameJa: "N:エフィシェンシー・エンジニア型",
     tagLine: "業務フローとツールを組み合わせ、効率を最大化するタイプ。",
     summary:
       "AIだけでなく、既存のツールやシステムも含めた業務効率化を考えるタイプです。自動化やテンプレ整備など、“見えにくい生産性向上”に貢献します。",
@@ -484,7 +506,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   contextual_interpreter: {
     id: "contextual_interpreter",
     nameEn: "Contextual Interpreter",
-    nameJa: "コンテクスチュアル・インタープリター型",
+    nameJa: "O:コンテクスチュアル・インタープリター型",
     tagLine: "文脈や背景を読み取りながら、AIの出力を調整するタイプ。",
     summary:
       "相手や状況の文脈を読み、AIの出力をその場にフィットさせるのが得意なタイプです。顧客対応や社内調整、コミュニケーション設計などで真価を発揮します。",
@@ -507,7 +529,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   digital_philosopher: {
     id: "digital_philosopher",
     nameEn: "Digital Philosopher",
-    nameJa: "デジタル・フィロソファー型",
+    nameJa: "P：デジタル・フィロソファー型",
     tagLine: "AI時代の意思決定や倫理・意味を問い続けるタイプ。",
     summary:
       "AIの使い方そのものや、データ・アルゴリズムの影響について考え続けるタイプです。長期的なリスクや社会的な意味を踏まえた議論で力を発揮します。",
@@ -759,9 +781,7 @@ function ResultSection({
         <h2 className="mt-2 text-xl font-semibold text-slate-900">
           {profile.nameEn}
         </h2>
-        <p className="text-xs font-medium text-slate-600">
-          {profile.nameJa}
-        </p>
+        <p className="text-xs font-medium text-slate-600">{profile.nameJa}</p>
         <p className="mt-3 text-sm text-slate-700">{profile.tagLine}</p>
         <p className="mt-2 text-xs text-slate-600">{profile.summary}</p>
 
@@ -777,7 +797,9 @@ function ResultSection({
         {/* Strengths & Cautions */}
         <div className="mt-5 grid gap-3 text-[11px] md:grid-cols-2">
           <div className="rounded-xl bg-sky-50/80 p-3">
-            <p className="text-[11px] font-semibold text-sky-700">Strengths / 強み</p>
+            <p className="text-[11px] font-semibold text-sky-700">
+              Strengths / 強み
+            </p>
             <ul className="mt-1 list-disc pl-4 text-sky-900">
               {profile.strengths.map((s, i) => (
                 <li key={i}>{s}</li>
@@ -838,6 +860,14 @@ function ResultSection({
           </div>
         </div>
       </section>
+
+      {/* ▶ 診断タイプ × 志望業界のマッチ・ギャップセクション */}
+      <CareerGapSectionMulti
+        thinkingTypeId={typeId}
+        thinkingTypeNameJa={profile.nameJa}
+        thinkingTypeNameEn={profile.nameEn}
+        typeSummary={profile.summary}
+      />
     </>
   );
 }

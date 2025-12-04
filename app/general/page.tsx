@@ -6,6 +6,7 @@ import { StatCard } from "@/components/StatCard";
 import { InterviewRecorder } from "@/components/InterviewRecorder";
 import { useRouter } from "next/navigation";
 import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import type { TopicType } from "@/lib/types/story";
 
 type Database = any;
 
@@ -47,6 +48,14 @@ const PERSONAS = [
     label: "サービス・教育・エンタメ系",
   },
 ];
+
+const TOPIC_LABEL: Record<TopicType, string> = {
+  gakuchika: "ガクチカ（学生時代に力を入れたこと）",
+  self_pr: "自己PR",
+  why_company: "志望動機（企業）",
+  why_industry: "志望動機（業界）",
+  general: ""
+};
 
 type Step = "idle" | "asking" | "thinking" | "evaluating" | "finished";
 
@@ -126,7 +135,10 @@ export default function InterviewPage() {
     },
   ];
 
+  // 面接官ペルソナ
   const [personaId, setPersonaId] = useState<string>("consulting_finance");
+  // どのタブのストーリーカードとして保存するか（ES添削と共通）
+  const [topicType, setTopicType] = useState<TopicType>("gakuchika");
 
   const [profile, setProfile] = useState<Profile | null>(null);
   const [profileLoaded, setProfileLoaded] = useState(false);
@@ -197,7 +209,6 @@ export default function InterviewPage() {
   // -------------------------------------
   const startInterview = () => {
     if (!authChecked || !userId) {
-      // 念のためガード
       router.push("/auth");
       return;
     }
@@ -278,7 +289,7 @@ export default function InterviewPage() {
         body: JSON.stringify({
           persona_id: personaId,
           qaList: finishedList,
-          userId, // 将来 weekly_reports 保存などで利用
+          userId,
         }),
       });
 
@@ -310,7 +321,6 @@ export default function InterviewPage() {
       return;
     }
 
-    // まずは簡単なバリデーション
     if (!evaluation) {
       setCreateMessage(
         "まず10問すべて回答して、面接評価を出してください。"
@@ -332,10 +342,11 @@ export default function InterviewPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId, // ✅ ログインユーザーごとに完全個別保存
-          personaId,
+          userId,         // ログインユーザーごとに保存
+          personaId,      // どの面接官人格で聞いたか
           qaList,
           profile,
+          topicType,      // ★ このセッションをどのタブのカードとして保存するか
         }),
       });
 
@@ -425,6 +436,24 @@ export default function InterviewPage() {
                       {p.label}
                     </option>
                   ))}
+                </select>
+              </div>
+
+              {/* テーマ（ストーリーカードのタブ）セレクト */}
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-slate-500">テーマ：</span>
+                <select
+                  className="text-xs border border-slate-200 rounded-full px-3 py-1.5 bg-slate-50"
+                  value={topicType}
+                  onChange={(e) => setTopicType(e.target.value as TopicType)}
+                  disabled={step !== "idle" && step !== "finished"}
+                >
+                  <option value="gakuchika">{TOPIC_LABEL.gakuchika}</option>
+                  <option value="self_pr">{TOPIC_LABEL.self_pr}</option>
+                  <option value="why_company">{TOPIC_LABEL.why_company}</option>
+                  <option value="why_industry">
+                    {TOPIC_LABEL.why_industry}
+                  </option>
                 </select>
               </div>
 
@@ -618,7 +647,7 @@ export default function InterviewPage() {
                   </div>
                 </div>
 
-                {/* ここがストーリーカード生成ボタン */}
+                {/* ストーリーカード生成ボタン */}
                 <div className="pt-3 border-t border-slate-100 space-y-2">
                   <button
                     type="button"

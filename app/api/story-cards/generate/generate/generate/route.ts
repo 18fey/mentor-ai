@@ -1,10 +1,21 @@
 // app/api/story-cards/generate/route.ts
 import { NextRequest, NextResponse } from "next/server";
+import type { TopicType } from "@/lib/types/story";
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
 const TABLE_NAME = "story_cards";
+
+const isValidTopicType = (v: unknown): v is TopicType => {
+  return (
+    v === "gakuchika" ||
+    v === "self_pr" ||
+    v === "why_company" ||
+    v === "why_industry" ||
+    v === "general"
+  );
+};
 
 async function supabaseFetch(path: string, init: RequestInit = {}) {
   const url = `${SUPABASE_URL}/rest/v1/${path}`;
@@ -24,7 +35,23 @@ async function supabaseFetch(path: string, init: RequestInit = {}) {
   return res;
 }
 
-async function callOpenAI(systemPrompt: string, userPrompt: string) {
+type GeneratedCard = {
+  title?: string;
+  topicType?: TopicType | string;
+  star?: {
+    situation?: string;
+    task?: string;
+    action?: string;
+    result?: string;
+  };
+  learnings?: string;
+  axes?: string[];
+};
+
+async function callOpenAI(
+  systemPrompt: string,
+  userPrompt: string
+): Promise<GeneratedCard> {
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -48,8 +75,19 @@ async function callOpenAI(systemPrompt: string, userPrompt: string) {
   }
 
   const json = await res.json();
-  const text = json.choices?.[0]?.message?.content as string;
-  return JSON.parse(text);
+  const text = json?.choices?.[0]?.message?.content as string | undefined;
+
+  if (!text || typeof text !== "string") {
+    console.error("OpenAI story_cards/generate invalid response:", json);
+    throw new Error("invalid OpenAI response");
+  }
+
+  try {
+    return JSON.parse(text) as GeneratedCard;
+  } catch (e) {
+    console.error("OpenAI story_cards/generate JSON.parse error:", text);
+    throw e;
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -92,16 +130,30 @@ export async function POST(req: NextRequest) {
       .map((t) => `${t.role === "ai" ? "質問" : "回答"}: ${t.content}`)
       .join("\n");
 
+    if (!qaText) {
+      return NextResponse.json(
+        { error: "このセッションにはQ&Aログがありません。" },
+        { status: 400 }
+      );
+    }
+
     // 2. OpenAI に STAR カード生成を依頼
     const systemPrompt = `
 あなたは外銀・コンサルの面接官です。
-以下のQ&Aログから、就活でそのまま使える「STAR形式のガクチカカード」を1枚作成してください。
+以下のQ&Aログから、就活でそのまま使える「STAR形式のストーリーカード」を1枚作成してください。
+
+topicType は、次のいずれかを想定しています：
+- "gakuchika"（学生時代に力を入れたこと）
+- "self_pr"（自己PR）
+- "why_company"（志望動機：企業）
+- "why_industry"（志望動機：業界）
+- どれにも当てはまらなければ "general"
 
 出力は必ず次のJSON形式にしてください:
 
 {
   "title": "経験のタイトル",
-  "topicType": "gakuchika | self_intro | why_industry など",
+  "topicType": "gakuchika | self_pr | why_company | why_industry | general",
   "star": {
     "situation": "...",
     "task": "...",
@@ -111,24 +163,29 @@ export async function POST(req: NextRequest) {
   "learnings": "この経験から得た学び・強みを1〜3文で",
   "axes": ["成長環境", "オーナーシップ"]
 }
-`.trim();
+    `.trim();
 
-    const userPrompt = qaText || "まだログがありません。";
+    const card = await callOpenAI(systemPrompt, qaText);
 
-    const card = await callOpenAI(systemPrompt, userPrompt);
+    let topicType: TopicType = "general";
+    if (isValidTopicType(card.topicType)) {
+      topicType = card.topicType;
+    }
+
+    const axes: string[] = Array.isArray(card.axes) ? card.axes : [];
 
     const row = {
       user_id: userId,
       session_id: sessionId,
       is_sensitive: isSensitive,
-      topic_type: card.topicType ?? "general",
-      title: card.title,
+      topic_type: topicType,
+      title: card.title ?? "面接セッションから生成したストーリー",
       star_situation: card.star?.situation ?? "",
       star_task: card.star?.task ?? "",
       star_action: card.star?.action ?? "",
       star_result: card.star?.result ?? "",
       learnings: card.learnings ?? "",
-      axes: card.axes ?? [],
+      axes,
       last_updated_at: new Date().toISOString(),
     };
 

@@ -3,15 +3,6 @@
 
 import React, { useState } from "react";
 
-type IndustryKey =
-  | "consulting"
-  | "ib"
-  | "pevc"
-  | "trading"
-  | "it"
-  | "manufacturing"
-  | "others";
-
 type ResultTab = "insight" | "questions" | "news";
 
 type InsightResult = {
@@ -20,31 +11,96 @@ type InsightResult = {
   news: string;
 };
 
-const INDUSTRY_LABELS: { key: IndustryKey; label: string }[] = [
-  { key: "consulting", label: "戦略コンサル" },
-  { key: "ib", label: "投資銀行" },
-  { key: "pevc", label: "PE / VC" },
-  { key: "trading", label: "マーケッツ・トレーディング" },
-  { key: "it", label: "IT / メガベンチャー" },
-  { key: "manufacturing", label: "メーカー" },
-  { key: "others", label: "その他" },
+type IndustryGroup = {
+  id: string;
+  label: string;
+  subs: string[];
+};
+
+// キャリタス準拠＋Mentor.AI用に微調整した業界マスタ
+const INDUSTRY_GROUPS: IndustryGroup[] = [
+  {
+    id: "construction_housing_realestate",
+    label: "建設・住宅・不動産",
+    subs: ["建設", "設備・道路", "住宅", "建設機器", "不動産"],
+  },
+  {
+    id: "food_chem_med",
+    label: "食品・化学・医薬",
+    subs: ["食品・飲料", "化学", "医薬品", "化粧品・日用品"],
+  },
+  {
+    id: "materials",
+    label: "素材",
+    subs: ["紙・パルプ", "印刷・インキ", "鉄鋼", "非鉄・金属", "ゴム・ガラス・セメント"],
+  },
+  {
+    id: "electronics_machinery_auto",
+    label: "電機・機械・自動車",
+    subs: ["電機・電子部品・半導体", "機械", "自動車・自動車部品"],
+  },
+  {
+    id: "transport_energy",
+    label: "運輸・エネルギー",
+    subs: ["航空", "海運", "鉄道", "陸運・倉庫", "エネルギー（電力・ガス）"],
+  },
+  {
+    id: "finance",
+    label: "金融",
+    subs: ["銀行", "生保・損保", "証券", "信販・クレカ・リース"],
+  },
+  {
+    id: "trading_distribution",
+    label: "商社・流通",
+    subs: ["商社", "百貨店・スーパー・コンビニ", "専門店"],
+  },
+  {
+    id: "info_media",
+    label: "情報サービス・メディア",
+    subs: [
+      "フードサービス",
+      "旅行・ホテル",
+      "マスコミ",
+      "エンタメ",
+      "教育・人材サービス",
+      "ITサービス",
+      "ソフトウェア",
+      "通信・インターネット",
+    ],
+  },
+  {
+    id: "consulting",
+    label: "コンサルティング",
+    subs: ["戦略コンサル", "総合コンサル（BIG4）", "シンクタンク"],
+  },
+  {
+    id: "finance_advanced",
+    label: "ファイナンス（IBD・PE/VC・M&A）",
+    subs: ["投資銀行（IBD）", "PE/VC", "マーケッツ", "FAS/M&Aアドバイザリー"],
+  },
 ];
 
-// 業界ごとのデモ用サンプル（初期表示）
-const SAMPLE_CONTENT: Record<
-  IndustryKey,
-  {
-    insight: string;
-    questions: string;
-    news: string;
-  }
-> = {
-  consulting: {
+// 「企業の将来性」を一瞬で指定できるショートカットタグ
+const FUTURE_TAGS = [
+  "強み",
+  "弱み",
+  "将来性",
+  "中期リスク",
+  "競争優位性",
+  "ビジネスモデルの課題",
+  "成長余地",
+  "AI/技術変化の影響",
+];
+
+// デモ用サンプル（初期表示）
+// key = `${groupLabel}|${subLabel}`
+const SAMPLE_CONTENT: Record<string, InsightResult> = {
+  "コンサルティング|戦略コンサル": {
     insight: `### 戦略コンサル業界のざっくり構造（サンプル）
 
 - 主要プレーヤー：マッキンゼー、BCG、ベイン、RB、A.T. カーニー など
 - 案件テーマ：全社戦略、事業ポートフォリオ見直し、新規事業立ち上げ、コスト削減、PMI など
-- 求められる視点：クライアントの「意思決定」を支えるための、定量・定性の両面からの示唆出し
+- 価値提供：クライアントの「意思決定」を支えるための示唆出し（定量・定性の両面）
 
 ### 押さえておきたい論点
 
@@ -66,8 +122,8 @@ const SAMPLE_CONTENT: Record<
 
 → 「この変化がクライアント企業のどの意思決定に影響しそうか？」まで言えると評価されやすいです。`,
   },
-  ib: {
-    insight: `### 投資銀行業界のざっくり構造（サンプル）
+  "ファイナンス（IBD・PE/VC・M&A）|投資銀行（IBD）": {
+    insight: `### 投資銀行（IBD）のざっくり構造（サンプル）
 
 - 主な機能：M&A アドバイザリー、ECM（株式）、DCM（債券）、ストラクチャードファイナンス
 - 価値提供：企業価値評価・資本政策・構造改革の選択肢提示とエグゼキューション支援`,
@@ -83,10 +139,11 @@ const SAMPLE_CONTENT: Record<
 - 金利上昇局面における LBO・不動産ファイナンスの潮流
 - スタートアップ〜上場市場（グロース市場等）の動き`,
   },
-  pevc: {
+  "ファイナンス（IBD・PE/VC・M&A）|PE/VC": {
     insight: `### PE / VC の観点（サンプル）
 
-- 投資テーマ：事業承継、カーブアウト、成長投資、ベンチャー投資 など`,
+- 投資テーマ：事業承継、カーブアウト、成長投資、ベンチャー投資 など
+- リターン源泉：EBITDA改善・マルチプル拡大・レバレッジ効果`,
     questions: `### 想定質問例（サンプル）
 
 - どんな産業・テーマで投資機会があると考えているか？
@@ -96,55 +153,43 @@ const SAMPLE_CONTENT: Record<
 - 日本の事業承継問題と PE ファンドの役割
 - 世界的な金利動向と VC マネーの流れ`,
   },
-  trading: {
+  "ファイナンス（IBD・PE/VC・M&A）|マーケッツ": {
     insight: `### マーケッツ・トレーディング（サンプル）
 
-- マクロ指標（金利・為替・インフレ）とマーケットの動きの因果を説明できることが重要。`,
+- 役割：マーケットを通じた資金調達・リスク移転のハブ
+- 重要視される力：マクロ・ミクロの情報を統合し、ポジションを構築・調整する判断力`,
     questions: `### 想定質問例（サンプル）
 
-- 直近 1 週間の相場の動きをどう説明するか？`,
+- 直近 1 週間の相場の動きをどう説明するか？
+- ある金利変動が株式・債券・為替にどう波及すると考えるか？`,
     news: `### ニュースの押さえどころ（サンプル）
 
-- 各国中銀の金融政策と市場への影響`,
-  },
-  it: {
-    insight: `### IT / メガベンチャー（サンプル）
-
-- ビジネスモデル：SaaS / プラットフォーム / 広告 / サブスク など`,
-    questions: `### 想定質問例（サンプル）
-
-- 最近使っているプロダクトの中で、「プロダクトマネージャーならどこを改善するか？」`,
-    news: `### ニュースの押さえどころ（サンプル）
-
-- 生成AI・SaaS・モバイルアプリのトレンド`,
-  },
-  manufacturing: {
-    insight: `### メーカー（サンプル）
-
-- 製造業 × DX / 脱炭素 / サプライチェーン再編 がキーワード。`,
-    questions: `### 想定質問例（サンプル）
-
-- 日本の製造業が持つ強み・弱みは何か？`,
-    news: `### ニュースの押さえどころ（サンプル）
-
-- 自動車・電機・素材など主要産業の構造変化`,
-  },
-  others: {
-    insight: `### その他業界（サンプル）
-
-- 商社・不動産・インフラ・官公庁など、業界ごとに「収益構造」と「規制」を押さえるのが第一歩。`,
-    questions: `### 想定質問例（サンプル）
-
-- なぜこの業界・この会社なのか？を、他業界と比較しながら説明できるか。`,
-    news: `### ニュースの押さえどころ（サンプル）
-
-- マクロ経済・政策動向が当該業界にどう効くか。`,
+- 各国中銀の金融政策と市場への影響
+- インフレ指標のサプライズと市場反応`,
   },
 };
 
+// デフォルトサンプル（上記に該当しないとき用）
+const DEFAULT_SAMPLE: InsightResult = {
+  insight: `### 業界インサイト（サンプル）
+
+- ここには、選択した業界の「構造」「プレーヤー」「収益源」「規制」「トレンド」などが整理されます。
+- 「インサイトを生成する」を押すと、あなたが選んだ業界・企業に合わせた内容に置き換わります。`,
+  questions: `### 想定質問（サンプル）
+
+- ここには、その業界の面接でよく聞かれる質問と答え方のポイントが並びます。`,
+  news: `### 直近ニュース（サンプル）
+
+- ここには、業界に関連する直近1〜2年のニュースと、その面接での語り方のヒントが表示されます。`,
+};
+
 export default function IndustryInsights() {
-  const [selectedIndustry, setSelectedIndustry] =
-    useState<IndustryKey>("consulting");
+  const [selectedGroupId, setSelectedGroupId] = useState<string>(
+    INDUSTRY_GROUPS[0]?.id ?? ""
+  );
+  const [selectedSub, setSelectedSub] = useState<string>(
+    INDUSTRY_GROUPS[0]?.subs[0] ?? ""
+  );
   const [targetCompany, setTargetCompany] = useState("");
   const [focusTopic, setFocusTopic] = useState("");
   const [includeNews, setIncludeNews] = useState(true);
@@ -155,6 +200,10 @@ export default function IndustryInsights() {
 
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+
+  const selectedGroup =
+    INDUSTRY_GROUPS.find((g) => g.id === selectedGroupId) ??
+    INDUSTRY_GROUPS[0];
 
   const handleGenerate = async () => {
     setIsLoading(true);
@@ -168,7 +217,8 @@ export default function IndustryInsights() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          industry: selectedIndustry,
+          industryGroup: selectedGroup.label,
+          industrySub: selectedSub,
           targetCompany: targetCompany || null,
           focusTopic: focusTopic || null,
           includeNews,
@@ -195,10 +245,16 @@ export default function IndustryInsights() {
     }
   };
 
-  const sample = SAMPLE_CONTENT[selectedIndustry];
-
   const getDisplayText = () => {
-    const source: InsightResult = result || sample;
+    const sampleKey = `${selectedGroup.label}|${selectedSub}`;
+    const fallback =
+      SAMPLE_CONTENT[sampleKey] ??
+      (selectedGroup.label === "コンサルティング" &&
+      selectedSub === "戦略コンサル"
+        ? SAMPLE_CONTENT["コンサルティング|戦略コンサル"]
+        : DEFAULT_SAMPLE);
+
+    const source: InsightResult = result || fallback;
 
     if (activeTab === "insight") return source.insight;
     if (activeTab === "questions") return source.questions;
@@ -213,41 +269,84 @@ export default function IndustryInsights() {
           業界別インサイト
         </h1>
         <p className="text-sm text-slate-500">
-          戦略コンサル・投資銀行・PE/VC・商社・IT など、志望業界ごとの
-          「よく聞かれる質問・押さえるべきトピック・直近ニュース」を一度に整理できる画面です。
+          建設・金融・商社・IT・コンサル・投資銀行 など、志望業界ごとの
+          「構造」「想定質問」「直近ニュース」「企業の強み/弱み・将来性」を一度に整理できる画面です。
         </p>
         <p className="mt-1 text-[11px] text-slate-400">
-          志望業界がまだ決まっていない場合は、「戦略コンサル」か「投資銀行」から見ていくと全体像を掴みやすくなります。
+          志望業界がまだ決まっていない場合は、「コンサルティング」や「ファイナンス（IBD・PE/VC・M&A）」から見ていくと全体像を掴みやすくなります。
         </p>
       </div>
 
       {/* 設定パネル */}
       <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 flex flex-col gap-4">
-        {/* 業界タブ */}
+        {/* 業界大分類タブ */}
         <div className="flex flex-wrap gap-2">
-          {INDUSTRY_LABELS.map((item) => (
+          {INDUSTRY_GROUPS.map((group) => (
             <button
-              key={item.key}
+              key={group.id}
               onClick={() => {
-                setSelectedIndustry(item.key);
+                setSelectedGroupId(group.id);
+                setSelectedSub(group.subs[0]); // 大分類切り替え時は最初の小分類にリセット
                 if (!result) {
                   setActiveTab("insight");
                 }
               }}
-              className={`px-3 py-1.5 rounded-full text-sm border transition
+              className={`px-3 py-1.5 rounded-full text-xs md:text-sm border transition
                 ${
-                  selectedIndustry === item.key
+                  selectedGroupId === group.id
                     ? "bg-sky-500 text-white border-sky-500"
                     : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
                 }`}
             >
-              {item.label}
+              {group.label}
+            </button>
+          ))}
+        </div>
+
+        {/* 小分類チップ */}
+        <div className="flex flex-wrap gap-2 mt-1">
+          {selectedGroup.subs.map((sub) => (
+            <button
+              key={sub}
+              onClick={() => setSelectedSub(sub)}
+              className={`px-3 py-1.5 rounded-full text-xs border transition
+                ${
+                  selectedSub === sub
+                    ? "bg-sky-100 text-sky-800 border-sky-300"
+                    : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
+                }`}
+            >
+              {sub}
+            </button>
+          ))}
+        </div>
+
+        {/* 将来性ショートカットチップ */}
+        <div className="flex flex-wrap gap-1.5 mt-2">
+          <span className="text-[11px] text-slate-500 mr-1">
+            ワンタップで深掘りしたい切り口を追加：
+          </span>
+          {FUTURE_TAGS.map((tag) => (
+            <button
+              key={tag}
+              onClick={() =>
+                setFocusTopic((prev) =>
+                  prev.includes(tag)
+                    ? prev
+                    : prev
+                    ? `${prev} ${tag}`
+                    : tag
+                )
+              }
+              className="px-2 py-1 rounded-full text-[11px] border border-slate-200 bg-slate-50 hover:bg-sky-50 hover:border-sky-200"
+            >
+              {tag}
             </button>
           ))}
         </div>
 
         {/* 入力フォーム */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
           <div className="flex flex-col gap-1">
             <label className="text-xs font-medium text-slate-600">
               志望企業（任意）
@@ -255,11 +354,11 @@ export default function IndustryInsights() {
             <input
               value={targetCompany}
               onChange={(e) => setTargetCompany(e.target.value)}
-              placeholder="例）マッキンゼー、ゴールドマン・サックス、三菱商事 など"
+              placeholder="例）三菱商事、トヨタ自動車、マッキンゼー、ゴールドマン・サックス など"
               className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-sky-400 bg-slate-50"
             />
             <span className="text-[11px] text-slate-400">
-              企業名を入れると、その企業の選考で出やすいテーマを優先して整理します。
+              企業名を入れると、その企業の<strong>強み・弱み・将来性</strong>も含めて整理します。
             </span>
           </div>
 
@@ -270,17 +369,17 @@ export default function IndustryInsights() {
             <input
               value={focusTopic}
               onChange={(e) => setFocusTopic(e.target.value)}
-              placeholder="例）ESG投資、再エネ、半導体、地方創生、スタートアップ支援 など"
+              placeholder="例）弱み 将来性 中期リスク 競争優位性 など"
               className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-sky-400 bg-slate-50"
             />
             <span className="text-[11px] text-slate-400">
-              気になっているニューステーマやキーワードがあれば入力してください。
+              「弱み」「将来性」「中期リスク」などを入れると、企業の将来性まで踏み込んだインサイトが生成されます。
             </span>
           </div>
         </div>
 
         {/* オプション＋ボタン */}
-        <div className="flex items-center justify-between gap-4 mt-1">
+        <div className="flex items-center justify-between gap-4 mt-2">
           <label className="flex items-center gap-2 text-xs text-slate-600">
             <input
               type="checkbox"
@@ -300,7 +399,7 @@ export default function IndustryInsights() {
               {isLoading ? "生成中..." : "インサイトを生成する"}
             </button>
             <p className="text-[11px] text-slate-400">
-              ボタンを押してから数秒で、面接に直結するインサイト・想定質問・直近ニュースがタブごとに表示されます。
+              ボタンを押すと、選んだ業界×企業×テーマに合わせて、インサイト・想定質問・直近ニュースがタブごとに表示されます。
             </p>
           </div>
         </div>

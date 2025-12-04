@@ -5,14 +5,26 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
 
-type Database = any;
+type ProfileRow = {
+  id: string;
+  display_name: string | null;
+  affiliation: string | null;
+  university: string | null;
+  faculty: string | null;
+  grade: string | null;
+  status: string | null;
+  interests: string[] | null;
+  values_tags: string[] | null;
+};
 
 export default function ProfilePage() {
   const router = useRouter();
-  const supabase = createClientComponentClient<Database>();
+  const supabase = createClientComponentClient();
 
   const [userId, setUserId] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
+
+  const [saving, setSaving] = useState(false);
 
   const [form, setForm] = useState({
     name: "",
@@ -38,19 +50,24 @@ export default function ProfilePage() {
 
         setUserId(user.id);
 
-        // 既存プロフィールがあれば取得
-        const res = await fetch(`/api/profile/get?userId=${user.id}`);
-        const data = await res.json();
+        const { data: profile, error } = await supabase
+          .from("profiles")
+          .select("*")
+          .eq("id", user.id)
+          .maybeSingle<ProfileRow>();
 
-        if (data.profile) {
+        if (error) {
+          console.error("profile load error:", error);
+        }
+
+        if (profile) {
           setForm({
-            name: data.profile.name || "",
-            university: data.profile.university || "",
-            faculty: data.profile.faculty || "",
-            grade: data.profile.grade || "",
-            interestedIndustries:
-              (data.profile.interested_industries || []).join(", "),
-            valuesTags: (data.profile.values_tags || []).join(", "),
+            name: profile.display_name ?? "",
+            university: profile.university ?? "",
+            faculty: profile.faculty ?? "",
+            grade: profile.grade ?? "",
+            interestedIndustries: (profile.interests ?? []).join(", "),
+            valuesTags: (profile.values_tags ?? []).join(", "),
           });
         }
       } catch (e) {
@@ -69,33 +86,51 @@ export default function ProfilePage() {
       return;
     }
 
-    await fetch("/api/profile/save", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        id: userId, // ✅ ログインユーザーIDで固定
-        name: form.name,
+    setSaving(true);
+
+    const interestsArray =
+      form.interestedIndustries.trim().length > 0
+        ? form.interestedIndustries
+            .replace(/、/g, ",")
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
+
+    const valuesTagsArray =
+      form.valuesTags.trim().length > 0
+        ? form.valuesTags
+            .replace(/、/g, ",")
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
+
+    const { error } = await supabase.from("profiles").upsert(
+      {
+        id: userId,
+        display_name: form.name,
         university: form.university,
         faculty: form.faculty,
         grade: form.grade,
-        interestedIndustries: form.interestedIndustries
-          ? form.interestedIndustries
-              .replace(/、/g, ",")
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
-          : [],
-        valuesTags: form.valuesTags
-          ? form.valuesTags
-              .replace(/、/g, ",")
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
-          : [],
-      }),
-    });
+        interests: interestsArray, // オンボードと共通
+        values_tags: valuesTagsArray,
+        // affiliation も残したい場合：
+        affiliation:
+          form.university || form.faculty
+            ? `${form.university} ${form.faculty}`.trim()
+            : null,
+      },
+      { onConflict: "id" }
+    );
+
+    setSaving(false);
+
+    if (error) {
+      console.error("profile save error:", error);
+      alert("保存に失敗しました…もう一度お試しください。");
+      return;
+    }
 
     alert("プロフィールを保存しました ✅");
   }
@@ -115,31 +150,10 @@ export default function ProfilePage() {
         一般面接AI・週次レポートで使う「前提情報」です。最初に一度だけ埋めればOK。
       </p>
 
-      {/* データ利用に関する注意書き */}
-      <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50/80 px-4 py-3 text-[11px] text-slate-700 space-y-1">
-        <p className="font-semibold text-slate-800 text-xs">
-          プロフィール入力について（安心して使うために）
-        </p>
-        <ul className="list-disc pl-4 space-y-1">
-          <li>
-            本名でなく<strong>ニックネーム</strong>で登録しても問題ありません。
-          </li>
-          <li>
-            <strong>住所・電話番号・マイナンバー</strong>
-            などの連絡先情報は入力しないでください。
-          </li>
-          <li>
-            入力された内容は、
-            <strong>就活サポート・自己分析のためのフィードバック</strong>
-            にのみ利用されます。
-          </li>
-        </ul>
-        <p className="text-[10px] text-slate-500 mt-1">
-          ※ 健康状態・宗教・政治などのセンシティブな内容は、書く場合によく考えてから入力してください。
-        </p>
-      </div>
+      {/* データ利用に関する注意書き（ここはそのまま流用） */}
+      {/* ...（Karinの元コードそのまま貼ってOK）... */}
 
-      {/* USER ID 表示（編集不可） */}
+      {/* USER ID */}
       <div>
         <label className="text-xs text-slate-500">ユーザーID</label>
         <input
@@ -150,6 +164,7 @@ export default function ProfilePage() {
       </div>
 
       <div className="pt-2 space-y-3">
+        {/* 名前 */}
         <div>
           <label className="text-xs text-slate-500">
             名前（ニックネームでもOK）
@@ -161,6 +176,7 @@ export default function ProfilePage() {
           />
         </div>
 
+        {/* 大学 */}
         <div>
           <label className="text-xs text-slate-500">大学</label>
           <input
@@ -172,15 +188,19 @@ export default function ProfilePage() {
           />
         </div>
 
+        {/* 学部 */}
         <div>
           <label className="text-xs text-slate-500">学部</label>
           <input
             className="border p-2 w-full text-sm rounded"
             value={form.faculty}
-            onChange={(e) => setForm({ ...form, faculty: e.target.value })}
+            onChange={(e) =>
+              setForm({ ...form, faculty: e.target.value })
+            }
           />
         </div>
 
+        {/* 学年 */}
         <div>
           <label className="text-xs text-slate-500">学年</label>
           <input
@@ -190,6 +210,7 @@ export default function ProfilePage() {
           />
         </div>
 
+        {/* 興味業界 */}
         <div>
           <label className="text-xs text-slate-500">
             興味業界（カンマ or 、区切り）
@@ -204,6 +225,7 @@ export default function ProfilePage() {
           />
         </div>
 
+        {/* 価値観タグ */}
         <div>
           <label className="text-xs text-slate-500">
             価値観タグ（カンマ or 、区切り）
@@ -221,9 +243,10 @@ export default function ProfilePage() {
 
       <button
         onClick={save}
-        className="mt-2 bg-sky-600 text-white px-4 py-2 rounded-full text-sm font-semibold hover:bg-sky-700"
+        disabled={saving}
+        className="mt-2 bg-sky-600 text-white px-4 py-2 rounded-full text-sm font-semibold hover:bg-sky-700 disabled:opacity-60"
       >
-        保存する
+        {saving ? "保存中..." : "保存する"}
       </button>
     </div>
   );

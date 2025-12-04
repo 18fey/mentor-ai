@@ -10,41 +10,48 @@ type MenuItem = {
   badge?: string;
 };
 
-const menu: MenuItem[] = [
-  { label: "ホーム", path: "/" },
-  { label: "ケース面接AI", path: "/case" },
-  { label: "フェルミ推定AI", path: "/fermi" },
-  { label: "一般面接AI", path: "/general" },
-  { label: "ES添削AI", path: "/es" },
-  { label: "業界インサイト", path: "/industry" },
-  { label: "スコアダッシュボード", path: "/score" },
+type MenuSection = {
+  title?: string;
+  items: MenuItem[];
+};
 
-  // 🔹 AI診断・思考系
+const sections: MenuSection[] = [
   {
-    label: "AI思考タイプ診断",
-    path: "/diagnosis-16type",
-    badge: "NEW",
+    title: "基本",
+    items: [
+      { label: "ホーム", path: "/" },
+      { label: "プロフィール", path: "/profile" },
+      { label: "ストーリーカード作成", path: "/general" }, // まだなければ /general でもOK
+  
+    ],
   },
   {
-    label: "AI思考力トレーニング",
-    path: "/mentor-ai-index",
+    title: "応用ツール",
+    items: [
+      { label: "ケース面接AI", path: "/case" },
+      { label: "フェルミ推定AI", path: "/fermi" },
+      { label: "一般面接AI（模擬）", path: "/general" },
+    　{ label: "ES添削AI", path: "/es" },
+      { label: "業界インサイト", path: "/industry" },
+      { label: "スコアダッシュボード", path: "/score" },
+    ],
   },
-
-  // 🔹 公開情報（銀行・初見ユーザー向け）
   {
-    label: "サービス概要",
-    path: "/service",
+    title: "その他",
+    items: [
+      {
+        label: "AI思考タイプ診断",
+        path: "/diagnosis-16type",
+        badge: "NEW",
+      },
+      { label: "AI思考力トレーニング", path: "/mentor-ai-index" },
+      { label: "サービス概要", path: "/service" },
+      { label: "プラン・料金", path: "/pricing" },
+      { label: "設定", path: "/settings" },
+      { label: "ケースガイド", path: "/case-guide" },
+      { label: "フェルミガイド", path: "/fermi-guide" },
+    ],
   },
-  {
-    label: "プラン・料金",
-    path: "/pricing",
-  },
-
-  // 🔹 各種設定・ガイド
-  { label: "設定", path: "/settings" },
-  { label: "プロフィール", path: "/profile" },
-  { label: "ケースガイド", path: "/case-guide" },
-  { label: "フェルミガイド", path: "/fermi-guide" },
 ];
 
 export default function Sidebar() {
@@ -52,40 +59,55 @@ export default function Sidebar() {
 
   return (
     <aside className="flex h-screen w-64 flex-col border-r border-white/40 bg-white/80 p-6 backdrop-blur-md">
-      {/* ロゴエリア */}
+      {/* ロゴ */}
       <div className="mb-8">
         <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
           Elite Career Platform
         </div>
         <div className="text-2xl font-semibold text-slate-900">Mentor.AI</div>
+        <div className="mt-1 text-[11px] text-slate-400">
+          就活 OS を AI が作る
+        </div>
       </div>
 
       {/* メニュー */}
-      <nav className="flex-1 space-y-1 text-sm">
-        {menu.map((item) => {
-          const active = pathname === item.path;
-          return (
-            <Link
-              key={item.path}
-              href={item.path}
-              className={`flex items-center justify-between rounded-xl px-3 py-2 transition ${
-                active
-                  ? "bg-sky-500 text-white shadow-sm"
-                  : "text-slate-700 hover:bg-slate-100"
-              }`}
-            >
-              <span>{item.label}</span>
-              {item.badge && !active && (
-                <span className="ml-2 rounded-full bg-sky-100 px-1.5 text-[10px] font-semibold text-sky-600">
-                  {item.badge}
-                </span>
-              )}
-            </Link>
-          );
-        })}
+      <nav className="flex-1 space-y-5 text-sm">
+        {sections.map((section, idx) => (
+          <div key={idx} className="space-y-1">
+            {section.title && (
+              <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                {section.title}
+              </p>
+            )}
+            {section.items.map((item) => {
+              const active =
+                pathname === item.path ||
+                (item.path !== "/" && pathname.startsWith(item.path));
+
+              return (
+                <Link
+                  key={item.path}
+                  href={item.path}
+                  className={`flex items-center justify-between rounded-xl px-3 py-2 transition ${
+                    active
+                      ? "bg-sky-500 text-white shadow-sm"
+                      : "text-slate-700 hover:bg-slate-100"
+                  }`}
+                >
+                  <span>{item.label}</span>
+                  {item.badge && !active && (
+                    <span className="ml-2 rounded-full bg-sky-100 px-1.5 text-[10px] font-semibold text-sky-600">
+                      {item.badge}
+                    </span>
+                  )}
+                </Link>
+              );
+            })}
+          </div>
+        ))}
       </nav>
 
-      {/* フッターバージョン表示など */}
+      {/* フッター */}
       <div className="mt-auto text-[11px] text-slate-400">
         Nモード / v0.1.0
       </div>

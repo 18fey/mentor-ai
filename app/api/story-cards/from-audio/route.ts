@@ -1,5 +1,6 @@
 // app/api/story-cards/from-audio/route.ts
 import { NextRequest, NextResponse } from "next/server";
+import type { TopicType } from "@/lib/types/story";
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -7,6 +8,17 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
 const TABLE_NAME = "story_cards";
 
 type QA = { question: string; answer: string };
+
+// TopicType ガード
+const isValidTopicType = (v: unknown): v is TopicType => {
+  return (
+    v === "gakuchika" ||
+    v === "self_pr" ||
+    v === "why_company" ||
+    v === "why_industry" ||
+    v === "general"
+  );
+};
 
 async function supabaseFetch(path: string, init: RequestInit = {}) {
   const url = `${SUPABASE_URL}/rest/v1/${path}`;
@@ -27,11 +39,27 @@ async function supabaseFetch(path: string, init: RequestInit = {}) {
   return res;
 }
 
-async function callOpenAI(payload: {
+type OpenAIPayload = {
   qaList: QA[];
   personaId?: string;
   profile?: any;
-}) {
+  topicType?: TopicType; // ← 共通型を利用
+};
+
+type OpenAICard = {
+  title?: string;
+  topicType?: TopicType | string;
+  star?: {
+    situation?: string;
+    task?: string;
+    action?: string;
+    result?: string;
+  };
+  learnings?: string;
+  axes?: string[];
+};
+
+async function callOpenAI(payload: OpenAIPayload): Promise<OpenAICard> {
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -49,6 +77,10 @@ async function callOpenAI(payload: {
 与えられた「10問の模擬面接のQ&Aログ」と「候補者プロフィール」から、
 就活でそのまま使える「STAR形式のストーリーカード」を1枚だけ作成してください。
 
+※ リクエストに "topicType" が含まれている場合は、その種類
+   ("gakuchika" | "self_pr" | "why_company" | "why_industry")
+   を最優先の分類候補として扱ってください。
+
 出力フォーマットは必ず次のJSONオブジェクト1つにしてください：
 
 {
@@ -63,7 +95,7 @@ async function callOpenAI(payload: {
   "learnings": "この経験から得た学び・強みを1〜3文で",
   "axes": ["主体性 / オーナーシップ", "チームワーク / 巻き込み力"]
 }
-          `.trim(),
+        `.trim(),
         },
         {
           role: "user",
@@ -80,15 +112,15 @@ async function callOpenAI(payload: {
   }
 
   const json = await res.json();
-
   const text = json?.choices?.[0]?.message?.content;
+
   if (!text || typeof text !== "string") {
     console.error("OpenAI from-audio invalid response:", json);
     throw new Error("invalid OpenAI response");
   }
 
   try {
-    return JSON.parse(text);
+    return JSON.parse(text) as OpenAICard;
   } catch (e) {
     console.error("OpenAI from-audio JSON.parse error:", text);
     throw e;
@@ -97,7 +129,17 @@ async function callOpenAI(payload: {
 
 export async function POST(req: NextRequest) {
   try {
-    const { userId, personaId, qaList, profile } = await req.json();
+    const body = await req.json();
+
+    const {
+      userId,
+      personaId,
+      qaList,
+      profile,
+      topicType, // ← 任意（gakuchika/self_pr/...）
+      isSensitive,
+      sessionId,
+    } = body ?? {};
 
     if (!userId || !Array.isArray(qaList) || qaList.length === 0) {
       return NextResponse.json(
@@ -111,14 +153,23 @@ export async function POST(req: NextRequest) {
       qaList,
       personaId,
       profile,
+      topicType,
     });
+
+    // TopicType の確定（優先度：リクエスト > OpenAI返却 > デフォルト）
+    let effectiveTopicType: TopicType = "gakuchika";
+
+    if (isValidTopicType(topicType)) {
+      effectiveTopicType = topicType;
+    } else if (isValidTopicType(card.topicType)) {
+      effectiveTopicType = card.topicType;
+    }
 
     // 2. Supabase に保存
     const row = {
       user_id: userId,
-      // 音声版は「session_id なし」で保存する想定（カラムが NOT NULL ならここを修正）
-      session_id: null,
-      topic_type: card.topicType ?? "gakuchika",
+      session_id: sessionId ?? null,
+      topic_type: effectiveTopicType,
       title: card.title ?? "音声面接から生成したストーリー",
       star_situation: card.star?.situation ?? "",
       star_task: card.star?.task ?? "",
@@ -126,6 +177,7 @@ export async function POST(req: NextRequest) {
       star_result: card.star?.result ?? "",
       learnings: card.learnings ?? "",
       axes: Array.isArray(card.axes) ? card.axes : [],
+      is_sensitive: !!isSensitive,
       last_updated_at: new Date().toISOString(),
     };
 
@@ -142,7 +194,10 @@ export async function POST(req: NextRequest) {
   } catch (e: any) {
     console.error("from-audio POST failed:", e);
     return NextResponse.json(
-      { error: "story_card_from_audio_failed", detail: String(e?.message ?? e) },
+      {
+        error: "story_card_from_audio_failed",
+        detail: String(e?.message ?? e),
+      },
       { status: 500 }
     );
   }

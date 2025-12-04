@@ -1,3 +1,4 @@
+// app/api/story-cards/route.ts
 import { NextRequest, NextResponse } from "next/server";
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
@@ -56,6 +57,5 @@ export async function GET(req: NextRequest) {
 }
 
 /**
- * ✅ 既存の POST はそのまま（generate / from-audio）
- * 他ファイルで分けてるならここに書かなくてOK
+ * ✅ 既存の POST は別ファイル（generate / from-audio）で定義
  */

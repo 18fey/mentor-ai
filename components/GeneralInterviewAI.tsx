@@ -3,8 +3,7 @@
 
 import React, { useState, useMemo, useEffect } from "react";
 import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
-
-type TopicType = "gakuchika" | "self_pr" | "why_company" | "why_industry";
+import type { TopicType } from "@/lib/types/story";
 
 type ChatMessage = {
   id: string;
@@ -36,17 +35,15 @@ const TOPIC_LABEL: Record<TopicType, string> = {
   self_pr: "自己PR",
   why_company: "志望動機（企業）",
   why_industry: "志望動機（業界）",
+  general: ""
 };
 
 const INITIAL_QUESTION: Record<TopicType, string> = {
-  gakuchika:
-    "学生時代に『一番時間とエネルギーをかけた経験』を、まずはざっくり1〜2行で教えてください。",
-  self_pr:
-    "あなたが『自分の強み』だと思うものを、エピソードに関係なく素直な言葉で教えてください。",
-  why_company:
-    "その企業（または第1志望企業）に惹かれている理由を、思いつくままに3つほど挙げてください。",
-  why_industry:
-    "その業界を志望している理由を、最初に思いつくままに教えてください。",
+  gakuchika: "学生時代に『一番時間とエネルギーをかけた経験』を、まずはざっくり1〜2行で教えてください。",
+  self_pr: "あなたが『自分の強み』だと思うものを、エピソードに関係なく素直な言葉で教えてください。",
+  why_company: "その企業（または第1志望企業）に惹かれている理由を、思いつくままに3つほど挙げてください。",
+  why_industry: "その業界を志望している理由を、最初に思いつくままに教えてください。",
+  general: ""
 };
 
 const FOLLOW_UP_QUESTIONS = [
@@ -139,7 +136,7 @@ export const GeneralInterviewAI: React.FC = () => {
           const mapped: StoredStoryCard[] = data.storyCards.map((row: any) => ({
             dbId: row.id,
             createdAt: row.created_at,
-            topicType: row.topic_type,
+            topicType: row.topic_type as TopicType,
             title: row.title,
             star: {
               situation: row.star_situation ?? "",
@@ -379,7 +376,7 @@ export const GeneralInterviewAI: React.FC = () => {
         const stored: StoredStoryCard = {
           dbId: row.id,
           createdAt: row.created_at,
-          topicType: row.topic_type,
+          topicType: row.topic_type as TopicType,
           title: row.title,
           star: {
             situation: row.star_situation ?? "",
