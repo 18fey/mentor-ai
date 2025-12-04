@@ -3,11 +3,13 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { isClassroom } from "@/lib/featureFlags";
 
 type MenuItem = {
   label: string;
   path: string;
   badge?: string;
+  hideInClassroom?: boolean; // 授業では隠したいものだけ true
 };
 
 type MenuSection = {
@@ -21,8 +23,7 @@ const sections: MenuSection[] = [
     items: [
       { label: "ホーム", path: "/" },
       { label: "プロフィール", path: "/profile" },
-      { label: "ストーリーカード作成", path: "/general" }, // まだなければ /general でもOK
-  
+      { label: "ストーリーカード作成", path: "/general" },
     ],
   },
   {
@@ -31,7 +32,7 @@ const sections: MenuSection[] = [
       { label: "ケース面接AI", path: "/case" },
       { label: "フェルミ推定AI", path: "/fermi" },
       { label: "一般面接AI（模擬）", path: "/general" },
-    　{ label: "ES添削AI", path: "/es" },
+      { label: "ES添削AI", path: "/es" },
       { label: "業界インサイト", path: "/industry" },
       { label: "スコアダッシュボード", path: "/score" },
     ],
@@ -45,9 +46,25 @@ const sections: MenuSection[] = [
         badge: "NEW",
       },
       { label: "AI思考力トレーニング", path: "/mentor-ai-index" },
-      { label: "サービス概要", path: "/service" },
-      { label: "プラン・料金", path: "/pricing" },
-      { label: "設定", path: "/settings" },
+
+      // ↓↓↓ ここ3つは授業では隠す ↓↓↓
+      {
+        label: "サービス概要",
+        path: "/service",
+        hideInClassroom: true,
+      },
+      {
+        label: "プラン・料金",
+        path: "/pricing",
+        hideInClassroom: true,
+      },
+      {
+        label: "設定",
+        path: "/settings",
+        hideInClassroom: true,
+      },
+      // ↑↑↑ ここまで授業では非表示 ↑↑↑
+
       { label: "ケースガイド", path: "/case-guide" },
       { label: "フェルミガイド", path: "/fermi-guide" },
     ],
@@ -56,6 +73,14 @@ const sections: MenuSection[] = [
 
 export default function Sidebar() {
   const pathname = usePathname();
+
+  // 授業モードのときは hideInClassroom が true の item を除外
+  const visibleSections: MenuSection[] = sections.map((section) => ({
+    ...section,
+    items: section.items.filter(
+      (item) => !(isClassroom && item.hideInClassroom)
+    ),
+  }));
 
   return (
     <aside className="flex h-screen w-64 flex-col border-r border-white/40 bg-white/80 p-6 backdrop-blur-md">
@@ -72,7 +97,7 @@ export default function Sidebar() {
 
       {/* メニュー */}
       <nav className="flex-1 space-y-5 text-sm">
-        {sections.map((section, idx) => (
+        {visibleSections.map((section, idx) => (
           <div key={idx} className="space-y-1">
             {section.title && (
               <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">

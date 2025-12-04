@@ -1,5 +1,7 @@
+// app/api/profile/save/route.ts （パスは今までのままでOK）
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabase-server";
+import { appMode } from "@/lib/featureFlags";
 
 // DB 行のざっくり型（完全じゃなくてOK）
 type UserProfileRow = {
@@ -13,6 +15,7 @@ type UserProfileRow = {
   values_tags: string[] | null;
   plan: string | null;
   beta_user: boolean | null;
+  cohort: string | null;
 };
 
 // いまは query/body から渡してるけど、
@@ -71,6 +74,7 @@ export async function GET(req: NextRequest) {
         valuesTags: data.values_tags ?? [],
         plan: data.plan ?? "free",
         betaUser: data.beta_user ?? false,
+        cohort: data.cohort ?? null,
       },
     });
   } catch (e) {
@@ -109,7 +113,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const rowToUpsert = {
+    // upsert 用の行
+    const rowToUpsert: any = {
       auth_user_id: authUserId,
       name: body.name ?? null,
       university: body.university ?? null,
@@ -119,6 +124,12 @@ export async function POST(req: NextRequest) {
       values_tags: body.valuesTags ?? [],
       // plan / beta_user / usage_reset_at 等は他 API から更新
     };
+
+    // 🧠 授業モードから保存されたユーザーには cohort を付与
+    // 本番モードからの保存では cohort を触らない（上書きしない）ようにする
+    if (appMode === "classroom") {
+      rowToUpsert.cohort = "keio_fujita_2024_fujita_seminar";
+    }
 
     const { error } = await supabaseServer
       .from("users_profile")

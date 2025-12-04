@@ -1,7 +1,7 @@
 export default function FermiGuidePage() {
   return (
     <div className="max-w-4xl space-y-8">
-      <h1 className="text-2xl font-semibold mb-2">フェルミ推定ガイド（本番版）</h1>
+      <h1 className="text-2xl font-semibold mb-2">フェルミ推定とは？（はじめての人向けガイド）</h1>
       <p className="text-sm text-slate-600">
         「センス」ではなく「型」で解けるようにするための、超実践ガイドです。
         出題パターンごとに解き方と例題をまとめています。

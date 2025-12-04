@@ -1,7 +1,7 @@
 export default function CaseGuidePage() {
   return (
     <div className="max-w-4xl space-y-8">
-      <h1 className="text-2xl font-semibold mb-2">ケース面接ガイド（本番版）</h1>
+      <h1 className="text-2xl font-semibold mb-2">ケース面接ガイド（はじめての人向けガイド）</h1>
       <p className="text-sm text-slate-600">
         ケース面接でよく出るパターンと、その考え方の型をまとめたガイドです。
         「何から話せばいいか分からない」をなくします。
