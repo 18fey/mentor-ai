@@ -4,14 +4,20 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+
 import { AITypeIntro } from "@/components/ai-typing/AITypeIntro";
 import { AITypeDiagnosis } from "@/components/ai-typing/AITypeDiagnosis";
 import { AITypologyResult } from "@/components/ai-typing/AITypologyResult";
-import { AITypeKey } from "@/lib/aiTypologyData";
+import { AITypeKey, aiTypologyTypes } from "@/lib/aiTypologyData";
 
 type Database = any;
-
 type Stage = "intro" | "questions" | "result";
+
+type ProfileRow = {
+  id: string;
+  ai_type_key: AITypeKey | null;
+  ai_type_name: string | null;
+};
 
 export default function AIThinkingOnboardingPage() {
   const supabase = createClientComponentClient<Database>();
@@ -33,8 +39,32 @@ export default function AIThinkingOnboardingPage() {
         return;
       }
 
-      // ここで profiles を見て、すでにタイプがあれば result 表示にしてもOK
-      setChecking(false);
+      try {
+        // すでにAIタイプが保存されているかチェック
+        const { data: profile, error } = await supabase
+          .from("profiles")
+          .select("id, ai_type_key, ai_type_name")
+          .eq("id", user.id)
+          .maybeSingle<ProfileRow>();
+
+        if (error) {
+          console.error("load profile for ai-typing error:", error);
+        }
+
+        if (profile && profile.ai_type_key) {
+          // ✅ 既に診断済み → 最初から結果画面へ
+          setResultKey(profile.ai_type_key);
+          setStage("result");
+        } else {
+          // 未診断 → イントロから
+          setStage("intro");
+        }
+      } catch (e) {
+        console.error("ai-typing init error:", e);
+        setStage("intro");
+      } finally {
+        setChecking(false);
+      }
     };
 
     run();
@@ -54,8 +84,6 @@ export default function AIThinkingOnboardingPage() {
       } = await supabase.auth.getUser();
 
       if (user) {
-        // ⚠ profiles テーブルに ai_type_key / ai_type_name カラムを用意しておくと保存される
-        // まだ作ってなければ、この更新はエラーになってもUI自体は動きます
         await supabase
           .from("profiles")
           .update({
@@ -77,6 +105,7 @@ export default function AIThinkingOnboardingPage() {
   };
 
   const handleRetake = () => {
+    // 「もう一度診断する」→ 質問画面に戻す
     setResultKey(null);
     setStage("questions");
   };
@@ -124,9 +153,7 @@ export default function AIThinkingOnboardingPage() {
   );
 }
 
-// ラベル用の簡単なヘルパー（DBに日本語名を入れたい場合など）
-import { aiTypologyTypes } from "@/lib/aiTypologyData";
-
+// DBに日本語名を入れる用のヘルパー
 function aiTypologyLabelFor(key: AITypeKey): string {
   return aiTypologyTypes[key]?.nameJa ?? key;
 }

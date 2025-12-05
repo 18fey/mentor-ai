@@ -377,7 +377,7 @@ function BaseStepCard({ step }: { step: BaseStep }) {
   return (
     <div className="flex flex-col justify-between rounded-2xl bg-white/90 p-4 shadow-sm shadow-sky-100">
       <div className="space-y-1">
-        <div className="mb-1 flex items中心 justify-between">
+        <div className="mb-1 flex items-center justify-between">
           <p className="text-[11px] font-semibold text-sky-500">
             STEP {step.id}
           </p>

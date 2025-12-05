@@ -1,7 +1,7 @@
 // app/auth/AuthInner.tsx
 "use client";
 
-import { useState, FormEvent } from "react";
+import { useState, useEffect, FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
@@ -25,6 +25,28 @@ export function AuthInner() {
 
   const router = useRouter();
   const supabase = createClientComponentClient();
+
+  // ✅ URLクエリから Supabase 認証エラーを拾う（otp_expired など）
+  useEffect(() => {
+    const urlError = searchParams.get("error");
+    const errorCode = searchParams.get("error_code");
+    const errorDescription = searchParams.get("error_description");
+
+    if (errorCode === "otp_expired") {
+      setError(
+        "メールの認証リンクの有効期限が切れています。お手数ですが、もう一度ログインまたは新規登録からメールを受け取り直してください。"
+      );
+      setTab("login");
+      return;
+    }
+
+    if (urlError) {
+      const desc = errorDescription
+        ? decodeURIComponent(errorDescription.replace(/\+/g, " "))
+        : "認証に失敗しました。もう一度お試しください。";
+      setError(desc);
+    }
+  }, [searchParams]);
 
   const handleLogin = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -50,8 +72,8 @@ export function AuthInner() {
       return;
     }
 
-    // ログイン成功 → ダッシュボードへ
-    router.push("/");
+    // ログイン成功 → ダッシュボードへ（戻るで/authに戻らないよう replace）
+    router.replace("/");
   };
 
   const handleSignup = async (e: FormEvent<HTMLFormElement>) => {
@@ -82,10 +104,18 @@ export function AuthInner() {
     setLoading(false);
 
     if (error) {
-      setError(
-        error.message ||
-          "登録に失敗しました。もう一度お試しください。"
-      );
+      // すでに登録済みのメールアドレスなどを少し優しく案内
+      if (error.message?.toLowerCase().includes("already registered")) {
+        setError(
+          "このメールアドレスはすでに登録されています。ログインからお進みください。"
+        );
+        setTab("login");
+      } else {
+        setError(
+          error.message ||
+            "登録に失敗しました。もう一度お試しください。"
+        );
+      }
       return;
     }
 
@@ -94,7 +124,7 @@ export function AuthInner() {
       router.push(`/auth/email-sent?email=${encodeURIComponent(email)}`);
     } else {
       // まれに即時確認される場合はそのままトップへ
-      router.push("/");
+      router.replace("/");
     }
   };
 
@@ -219,20 +249,22 @@ export function AuthInner() {
       {/* 利用規約モーダル */}
       {showTerms && (
         <LegalModal
-                  title="利用規約"
-                  body={TERMS_TEXT}
-                  onClose={() => setShowTerms(false)}
-                  linkHref="/terms" linkLabel={""}
+          title="利用規約"
+          body={TERMS_TEXT}
+          onClose={() => setShowTerms(false)}
+          linkHref="/terms"
+          linkLabel=""
         />
       )}
 
       {/* プライバシーポリシーモーダル */}
       {showPrivacy && (
         <LegalModal
-                  title="プライバシーポリシー"
-                  body={PRIVACY_TEXT}
-                  onClose={() => setShowPrivacy(false)}
-                  linkHref="/privacy" linkLabel={""}        
+          title="プライバシーポリシー"
+          body={PRIVACY_TEXT}
+          onClose={() => setShowPrivacy(false)}
+          linkHref="/privacy"
+          linkLabel=""
         />
       )}
     </>
@@ -467,7 +499,6 @@ function LegalModal({
   );
 }
 
-/* ------------------ テキスト本体 ------------------ */
 
 // ここに送ってくれた原稿をそのままプレーンテキストで入れているよ
 const TERMS_TEXT = `

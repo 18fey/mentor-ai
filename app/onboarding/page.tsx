@@ -168,7 +168,8 @@ export default function OnboardingPage() {
             <span className="text-slate-300">—</span>
             <StepDot active={step >= 2}>目的</StepDot>
             <span className="text-slate-300">—</span>
-            <StepDot active={step >= 3}>戦略の粒度</StepDot>
+            {/* 質問内容に合わせて名称を調整 */}
+            <StepDot active={step >= 3}>目標・フィールド</StepDot>
           </div>
           <span>Step {step} / 3</span>
         </div>
@@ -364,14 +365,22 @@ function Step2Purpose({
   setWorkRole: (v: string) => void;
   toggleInterest: (v: string) => void;
 }) {
+  // 業界タイプを拡張（限定的すぎないように）
   const interestOptions = [
     "戦略コンサル",
+    "総合コンサル",
     "投資銀行（IB）",
-    "PE/VC",
-    "マーケッツ/トレーディング",
-    "ITメガベンチャー",
+    "マーケット／トレーディング",
+    "アセットマネジメント",
+    "PEファンド",
+    "VC",
+    "ヘッジファンド",
     "総合商社",
-    "メーカー",
+    "専門商社",
+    "メーカー（自動車・消費財など）",
+    "ITメガベンチャー",
+    "スタートアップ",
+    "官公庁・国際機関",
     "その他",
   ];
 

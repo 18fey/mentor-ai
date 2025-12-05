@@ -1,11 +1,13 @@
+// app/diagnosis-16type/page.tsx
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
 import { CareerGapSectionMulti } from "@/components/CareerGapSectionMulti";
 
 // ============================
 // Mentor.AI 16タイプ診断
-// Stage1 : 直感アンケート（10問）
 // ============================
 
 type AxisKey = "strategic" | "analytical" | "intuitive" | "creative";
@@ -52,6 +54,21 @@ type TypeProfile = {
   recommended: string[];
 };
 
+// Supabase用プロフィール型（16タイプの結果だけ見る）
+type ProfileRow = {
+  id: string;
+  ai16_type_id: TypeId | null;
+  ai16_axis_score: AxisScore | null;
+};
+
+// 初期スコア
+const INITIAL_SCORE: AxisScore = {
+  strategic: 0,
+  analytical: 0,
+  intuitive: 0,
+  creative: 0,
+};
+
 // ーーー 直感アンケート10問 ーーー
 
 const QUESTIONS: Question[] = [
@@ -73,18 +90,30 @@ const QUESTIONS: Question[] = [
         text: "原因を分析してプロンプトを修正する",
         score: { analytical: 2, strategic: 1 },
       },
-      { text: "とりあえずもう一度、違う角度で聞いてみる", score: { intuitive: 2 } },
+      {
+        text: "とりあえずもう一度、違う角度で聞いてみる",
+        score: { intuitive: 2 },
+      },
       { text: "自分の方で編集してしまう", score: { creative: 2 } },
-      { text: "ゴールとのズレを指摘して方向性を戻す", score: { strategic: 2 } },
+      {
+        text: "ゴールとのズレを指摘して方向性を戻す",
+        score: { strategic: 2 },
+      },
     ],
   },
   {
     id: 3,
     text: "新しいプロジェクトでAIを使うとしたら、まず何をする？",
     options: [
-      { text: "全体の進め方・役割分担を設計する", score: { strategic: 2 } },
+      {
+        text: "全体の進め方・役割分担を設計する",
+        score: { strategic: 2 },
+      },
       { text: "前提情報・制約条件を整理する", score: { analytical: 2 } },
-      { text: "どんなアウトプットが面白いかイメージする", score: { creative: 2 } },
+      {
+        text: "どんなアウトプットが面白いかイメージする",
+        score: { creative: 2 },
+      },
       { text: "まず軽く聞いて感触をつかむ", score: { intuitive: 2 } },
     ],
   },
@@ -97,8 +126,14 @@ const QUESTIONS: Question[] = [
         text: "比喩やトーンの指定が多い",
         score: { creative: 2, intuitive: 1 },
       },
-      { text: "誰が・何のために使うかを強く意識する", score: { strategic: 2 } },
-      { text: "その場のノリで書きながら調整する", score: { intuitive: 2 } },
+      {
+        text: "誰が・何のために使うかを強く意識する",
+        score: { strategic: 2 },
+      },
+      {
+        text: "その場のノリで書きながら調整する",
+        score: { intuitive: 2 },
+      },
     ],
   },
   {
@@ -107,7 +142,10 @@ const QUESTIONS: Question[] = [
     options: [
       { text: "優秀な右腕・コ・パイロット", score: { strategic: 2 } },
       { text: "冷静な分析担当の同僚", score: { analytical: 2 } },
-      { text: "アイデア出しをしてくれるクリエイター", score: { creative: 2 } },
+      {
+        text: "アイデア出しをしてくれるクリエイター",
+        score: { creative: 2 },
+      },
       { text: "自分の感覚を支えてくれる相棒", score: { intuitive: 2 } },
     ],
   },
@@ -117,7 +155,10 @@ const QUESTIONS: Question[] = [
     options: [
       { text: "ストーリーラインや構成案", score: { strategic: 2 } },
       { text: "データ整理・ロジックチェック", score: { analytical: 2 } },
-      { text: "表現・コピー・ビジュアルの方向性", score: { creative: 2 } },
+      {
+        text: "表現・コピー・ビジュアルの方向性",
+        score: { creative: 2 },
+      },
       { text: "仮説出しや視点の広げ方", score: { intuitive: 2 } },
     ],
   },
@@ -130,16 +171,28 @@ const QUESTIONS: Question[] = [
         score: { strategic: 2, analytical: 1 },
       },
       { text: "ロジックを積み上げていく", score: { analytical: 2 } },
-      { text: "直感で方向性を決めてから詰める", score: { intuitive: 2 } },
-      { text: "まず広げてから、あとで整理する", score: { creative: 2 } },
+      {
+        text: "直感で方向性を決めてから詰める",
+        score: { intuitive: 2 },
+      },
+      {
+        text: "まず広げてから、あとで整理する",
+        score: { creative: 2 },
+      },
     ],
   },
   {
     id: 8,
     text: "AIの回答に「違うんだよな」と感じたとき、最初にするのは？",
     options: [
-      { text: "ズレている前提・条件を特定する", score: { analytical: 2 } },
-      { text: "ゴールとの距離感を言語化して伝え直す", score: { strategic: 2 } },
+      {
+        text: "ズレている前提・条件を特定する",
+        score: { analytical: 2 },
+      },
+      {
+        text: "ゴールとの距離感を言語化して伝え直す",
+        score: { strategic: 2 },
+      },
       {
         text: "「もっとこんな雰囲気で」と感覚的に修正する",
         score: { intuitive: 2, creative: 1 },
@@ -158,8 +211,14 @@ const QUESTIONS: Question[] = [
         text: "自分一人では組めない戦略・構造が見えたとき",
         score: { strategic: 2, analytical: 1 },
       },
-      { text: "ロジックや数字が綺麗にそろったとき", score: { analytical: 2 } },
-      { text: "想像していなかった切り口が出てきたとき", score: { intuitive: 2 } },
+      {
+        text: "ロジックや数字が綺麗にそろったとき",
+        score: { analytical: 2 },
+      },
+      {
+        text: "想像していなかった切り口が出てきたとき",
+        score: { intuitive: 2 },
+      },
       {
         text: "表現や世界観が一気に立ち上がったとき",
         score: { creative: 2 },
@@ -170,10 +229,22 @@ const QUESTIONS: Question[] = [
     id: 10,
     text: "これからAIと付き合っていくうえで、伸ばしたいと思うのは？",
     options: [
-      { text: "AIとの役割分担やワークフロー設計", score: { strategic: 2 } },
-      { text: "プロンプトの正確さ・再現性", score: { analytical: 2 } },
-      { text: "AIとの対話を通じた洞察・直感力", score: { intuitive: 2 } },
-      { text: "AIを使った表現・企画の幅", score: { creative: 2 } },
+      {
+        text: "AIとの役割分担やワークフロー設計",
+        score: { strategic: 2 },
+      },
+      {
+        text: "プロンプトの正確さ・再現性",
+        score: { analytical: 2 },
+      },
+      {
+        text: "AIとの対話を通じた洞察・直感力",
+        score: { intuitive: 2 },
+      },
+      {
+        text: "AIを使った表現・企画の幅",
+        score: { creative: 2 },
+      },
     ],
   },
 ];
@@ -346,7 +417,7 @@ const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
     id: "delegation_optimizer",
     nameEn: "Delegation Optimizer",
     nameJa: "H：委任オプティマイザー型",
-    tagLine: "AIに“何を・どこ까지”任せるかのライン設計が上手いタイプ。",
+    tagLine: "AIに“何を・どこまで”任せるかのライン設計が上手いタイプ。",
     summary:
       "AIを部下や外注のように扱い、「任せる領域」と「自分で判断する領域」を切り分けるのが得意なタイプです。マネジメント視点でのAI活用に向いています。",
     strengths: [
@@ -579,17 +650,15 @@ const AXIS_TYPE_GROUPS: Record<AxisKey, TypeId[]> = {
   ],
 };
 
-// 初期スコア
-const INITIAL_SCORE: AxisScore = {
-  strategic: 0,
-  analytical: 0,
-  intuitive: 0,
-  creative: 0,
-};
-
 // ーーー メインコンポーネント ーーー
 
 export default function Diagnosis16TypePage() {
+  const router = useRouter();
+  const supabase = createClientComponentClient();
+
+  const [checking, setChecking] = useState(true);
+  const [saving, setSaving] = useState(false);
+
   const [currentIndex, setCurrentIndex] = useState(0);
   const [score, setScore] = useState<AxisScore>(INITIAL_SCORE);
   const [resultId, setResultId] = useState<TypeId | null>(null);
@@ -597,30 +666,95 @@ export default function Diagnosis16TypePage() {
 
   const totalQuestions = QUESTIONS.length;
 
+  // ✅ 既に診断済みなら最初から結果画面にする
+  useEffect(() => {
+    const run = async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user) {
+        router.push("/auth");
+        return;
+      }
+
+      try {
+        const { data: profile, error } = await supabase
+          .from("profiles")
+          .select("id, ai16_type_id, ai16_axis_score")
+          .eq("id", user.id)
+          .maybeSingle<ProfileRow>();
+
+        if (error) {
+          console.error("load 16type profile error:", error);
+        }
+
+        if (profile && profile.ai16_type_id) {
+          setResultId(profile.ai16_type_id);
+          if (profile.ai16_axis_score) {
+            setScore(profile.ai16_axis_score);
+          }
+          setCurrentIndex(totalQuestions); // progress 100%
+        }
+      } catch (e) {
+        console.error("init 16type error:", e);
+      } finally {
+        setChecking(false);
+      }
+    };
+
+    run();
+  }, [supabase, router, totalQuestions]);
+
+  const finalizeDiagnosis = async (finalScore: AxisScore) => {
+    const typeId = decideType(finalScore);
+    setScore(finalScore);
+    setResultId(typeId);
+    setCurrentIndex(totalQuestions);
+
+    // Supabase に保存（profiles に ai16_type_id / ai16_axis_score カラムを用意）
+    setSaving(true);
+    try {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (user) {
+        await supabase
+          .from("profiles")
+          .update({
+            ai16_type_id: typeId,
+            ai16_axis_score: finalScore,
+          })
+          .eq("id", user.id);
+      }
+    } catch (e) {
+      console.error("save 16type result error:", e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleSelect = (option: QuestionOption) => {
-    setScore((prev) => ({
-      strategic: prev.strategic + (option.score.strategic ?? 0),
-      analytical: prev.analytical + (option.score.analytical ?? 0),
-      intuitive: prev.intuitive + (option.score.intuitive ?? 0),
-      creative: prev.creative + (option.score.creative ?? 0),
-    }));
+    const newScore: AxisScore = {
+      strategic: score.strategic + (option.score.strategic ?? 0),
+      analytical: score.analytical + (option.score.analytical ?? 0),
+      intuitive: score.intuitive + (option.score.intuitive ?? 0),
+      creative: score.creative + (option.score.creative ?? 0),
+    };
 
     const next = currentIndex + 1;
+
     if (next >= totalQuestions) {
-      // 診断計算
-      const typeId = decideType({
-        strategic: score.strategic + (option.score.strategic ?? 0),
-        analytical: score.analytical + (option.score.analytical ?? 0),
-        intuitive: score.intuitive + (option.score.intuitive ?? 0),
-        creative: score.creative + (option.score.creative ?? 0),
-      });
-      setResultId(typeId);
+      finalizeDiagnosis(newScore);
     } else {
+      setScore(newScore);
       setCurrentIndex(next);
     }
   };
 
   const handleRestart = () => {
+    // 「もう一度診断する」→ 再診断（上書き）
     setCurrentIndex(0);
     setScore(INITIAL_SCORE);
     setResultId(null);
@@ -633,7 +767,7 @@ export default function Diagnosis16TypePage() {
     const url =
       typeof window !== "undefined"
         ? window.location.origin + "/diagnosis-16type"
-        : "https://mentor.ai";
+        : "https://mentor-ai.net";
 
     const text = `Mentor.AI 16タイプ診断の結果は「${profile.nameEn}（${profile.nameJa}）」でした🧠✨\nAIとの付き合い方が可視化される診断。\n${url}`;
 
@@ -644,6 +778,16 @@ export default function Diagnosis16TypePage() {
       });
     }
   };
+
+  if (checking) {
+    return (
+      <main className="flex min-h-screen items-center justify-center">
+        <div className="rounded-3xl bg-white/70 px-6 py-4 text-sm text-slate-600 shadow">
+          診断を準備しています…
+        </div>
+      </main>
+    );
+  }
 
   const progress = resultId
     ? 100
@@ -694,6 +838,12 @@ export default function Diagnosis16TypePage() {
           onCopyShare={handleCopyShare}
           copied={copied}
         />
+      )}
+
+      {saving && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-slate-900/80 px-4 py-1.5 text-[11px] text-slate-100 shadow-lg">
+          診断結果を保存しています…
+        </div>
       )}
     </main>
   );

@@ -115,7 +115,6 @@ export default function ProfilePage() {
         grade: form.grade,
         interests: interestsArray, // オンボードと共通
         values_tags: valuesTagsArray,
-        // affiliation も残したい場合：
         affiliation:
           form.university || form.faculty
             ? `${form.university} ${form.faculty}`.trim()
@@ -149,9 +148,6 @@ export default function ProfilePage() {
       <p className="text-sm text-slate-600">
         一般面接AI・週次レポートで使う「前提情報」です。最初に一度だけ埋めればOK。
       </p>
-
-      {/* データ利用に関する注意書き（ここはそのまま流用） */}
-      {/* ...（Karinの元コードそのまま貼ってOK）... */}
 
       {/* USER ID */}
       <div>
