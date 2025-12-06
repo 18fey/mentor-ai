@@ -8,6 +8,10 @@ import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
 
 type AuthTab = "login" | "signup";
 
+// 本番URL（env があればそっち優先）
+const SITE_URL =
+  process.env.NEXT_PUBLIC_SITE_URL || "https://mentor-ai-2rw9.vercel.app";
+
 export function AuthInner() {
   const searchParams = useSearchParams();
 
@@ -72,8 +76,8 @@ export function AuthInner() {
       return;
     }
 
-    // ログイン成功 → ダッシュボードへ（戻るで/authに戻らないよう replace）
-    router.replace("/");
+    // ログイン成功 → 共通のコールバックへ
+    router.replace("/auth/callback");
   };
 
   const handleSignup = async (e: FormEvent<HTMLFormElement>) => {
@@ -96,8 +100,8 @@ export function AuthInner() {
       email,
       password,
       options: {
-        // SupabaseのAuth設定で許可したURLと合わせる
-        emailRedirectTo: `${location.origin}/`,
+        // ✅ メールの認証後は必ず /auth/callback に戻す
+        emailRedirectTo: `${SITE_URL}/auth/callback`,
       },
     });
 
@@ -123,8 +127,8 @@ export function AuthInner() {
     if (data.user && !data.user.confirmed_at) {
       router.push(`/auth/email-sent?email=${encodeURIComponent(email)}`);
     } else {
-      // まれに即時確認される場合はそのままトップへ
-      router.replace("/");
+      // まれに即時確認される場合はそのままコールバックへ
+      router.replace("/auth/callback");
     }
   };
 
@@ -498,6 +502,8 @@ function LegalModal({
     </div>
   );
 }
+
+
 
 
 // ここに送ってくれた原稿をそのままプレーンテキストで入れているよ

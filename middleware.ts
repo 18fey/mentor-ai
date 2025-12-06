@@ -13,7 +13,10 @@ export async function middleware(req: NextRequest) {
 
   const { pathname } = req.nextUrl;
 
+  // /auth 全体
   const isAuthRoute = pathname.startsWith("/auth");
+  // ルートの /auth だけを指すフラグ
+  const isAuthRoot = pathname === "/auth";
 
   // ✅ ログイン不要で見せたい公開ページをここに全部並べる
   const isPublicRoute =
@@ -25,6 +28,7 @@ export async function middleware(req: NextRequest) {
     pathname.startsWith("/api");
 
   // 🔐 未ログイン → /auth へリダイレクト（公開ページを除く）
+  // /auth/* はログインしていなくても通す
   if (!session && !isAuthRoute && !isPublicRoute) {
     const url = req.nextUrl.clone();
     url.pathname = "/auth";
@@ -32,8 +36,9 @@ export async function middleware(req: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  // ✅ ログイン済みで /auth に来たら / に戻す
-  if (session && isAuthRoute) {
+  // ✅ ログイン済みで「/auth ルート」に来たときだけ / に戻す
+  // /auth/callback や /auth/email-sent などはそのまま通す
+  if (session && isAuthRoot) {
     const url = req.nextUrl.clone();
     url.pathname = "/";
     return NextResponse.redirect(url);

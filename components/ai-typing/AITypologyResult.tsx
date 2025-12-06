@@ -1,7 +1,11 @@
 // components/ai-typing/AITypologyResult.tsx
 "use client";
 
+import { useEffect, useRef } from "react";
+import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
 import { AITypeKey, aiTypologyTypes } from "@/lib/aiTypologyData";
+
+type Database = any;
 
 type Props = {
   resultKey: AITypeKey;
@@ -11,6 +15,55 @@ type Props = {
 
 export function AITypologyResult({ resultKey, onGoDashboard, onRetake }: Props) {
   const t = aiTypologyTypes[resultKey];
+
+  // Supabase クライアント
+  const supabase = createClientComponentClient<Database>();
+
+  // 二重保存防止用フラグ
+  const hasSavedRef = useRef(false);
+
+  useEffect(() => {
+    // すでに保存済みなら何もしない
+    if (hasSavedRef.current) return;
+
+    const saveResult = async () => {
+      try {
+        const {
+          data: { user },
+          error: userError,
+        } = await supabase.auth.getUser();
+
+        if (userError) {
+          console.error("Failed to get user:", userError);
+          return;
+        }
+        if (!user) {
+          console.warn("No authenticated user. Skip saving AI typology.");
+          return;
+        }
+
+        const { error } = await supabase
+          .from("profiles")
+          .update({
+            ai_type_key: resultKey,
+            ai_typology_completed: true,
+            ai_type_version: 1,
+          })
+          .eq("id", user.id);
+
+        if (error) {
+          console.error("Failed to save AI typology result:", error);
+          return;
+        }
+
+        hasSavedRef.current = true;
+      } catch (e) {
+        console.error("Unexpected error while saving AI typology:", e);
+      }
+    };
+
+    void saveResult();
+  }, [resultKey, supabase]);
 
   return (
     <div className="w-full max-w-3xl rounded-3xl border border-white/40 bg-white/80 p-8 shadow-[0_18px_45px_rgba(15,23,42,0.12)] backdrop-blur-[30px]">
@@ -66,8 +119,7 @@ function Section({
   items: string[];
   tone?: "warn" | "normal";
 }) {
-  const bulletColor =
-    tone === "warn" ? "bg-rose-300" : "bg-sky-300";
+  const bulletColor = tone === "warn" ? "bg-rose-300" : "bg-sky-300";
 
   return (
     <div>
@@ -75,7 +127,9 @@ function Section({
       <ul className="space-y-1.5 text-[11px] text-slate-600">
         {items.map((item, i) => (
           <li key={i} className="flex items-start gap-2">
-            <span className={`mt-[5px] h-1.5 w-1.5 rounded-full ${bulletColor}`} />
+            <span
+              className={`mt-[5px] h-1.5 w-1.5 rounded-full ${bulletColor}`}
+            />
             <span>{item}</span>
           </li>
         ))}
