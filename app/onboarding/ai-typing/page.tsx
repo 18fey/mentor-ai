@@ -1,9 +1,8 @@
-// app/onboarding/ai-typing/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import { createBrowserClient } from "@supabase/ssr";
 
 import { AITypeIntro } from "@/components/ai-typing/AITypeIntro";
 import { AITypeDiagnosis } from "@/components/ai-typing/AITypeDiagnosis";
@@ -11,23 +10,34 @@ import { AITypologyResult } from "@/components/ai-typing/AITypologyResult";
 import { AITypeKey, aiTypologyTypes } from "@/lib/aiTypologyData";
 
 type Database = any;
+
 type Stage = "intro" | "questions" | "result";
 
 type ProfileRow = {
   id: string;
   ai_type_key: AITypeKey | null;
-  ai_type_name: string | null;
 };
 
 export default function AIThinkingOnboardingPage() {
-  const supabase = createClientComponentClient<Database>();
   const router = useRouter();
+
+  const supabase = useMemo(
+    () =>
+      createBrowserClient<Database>(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      ),
+    []
+  );
 
   const [checking, setChecking] = useState(true);
   const [stage, setStage] = useState<Stage>("intro");
   const [resultKey, setResultKey] = useState<AITypeKey | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // -------------------------------
+  // 初期ロード：すでに診断済みかチェック
+  // -------------------------------
   useEffect(() => {
     const run = async () => {
       const {
@@ -39,77 +49,89 @@ export default function AIThinkingOnboardingPage() {
         return;
       }
 
-      try {
-        // すでにAIタイプが保存されているかチェック
-        const { data: profile, error } = await supabase
-          .from("profiles")
-          .select("id, ai_type_key, ai_type_name")
-          .eq("id", user.id)
-          .maybeSingle<ProfileRow>();
+      const { data: profile, error } = await supabase
+        .from("profiles")
+        .select("id, ai_type_key")
+        .eq("id", user.id)
+        .maybeSingle<ProfileRow>();
 
-        if (error) {
-          console.error("load profile for ai-typing error:", error);
-        }
-
-        if (profile && profile.ai_type_key) {
-          // ✅ 既に診断済み → 最初から結果画面へ
-          setResultKey(profile.ai_type_key);
-          setStage("result");
-        } else {
-          // 未診断 → イントロから
-          setStage("intro");
-        }
-      } catch (e) {
-        console.error("ai-typing init error:", e);
-        setStage("intro");
-      } finally {
-        setChecking(false);
+      if (error) {
+        console.error("Failed to load profile:", error);
       }
+
+      if (profile?.ai_type_key) {
+        // すでに診断済み → 結果画面へ
+        setResultKey(profile.ai_type_key);
+        setStage("result");
+      } else {
+        // 未診断 →イントロへ
+        setStage("intro");
+      }
+
+      setChecking(false);
     };
 
     run();
   }, [supabase, router]);
 
-  const handleSkip = () => {
-    router.push("/"); // スキップ → ダッシュボード
-  };
-
+  // -------------------------------
+  // 診断完了 → 結果保存
+  // -------------------------------
   const handleComplete = async (key: AITypeKey) => {
     setSaving(true);
     setResultKey(key);
 
-    try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
 
-      if (user) {
-        await supabase
-          .from("profiles")
-          .update({
-            ai_type_key: key,
-            ai_type_name: aiTypologyLabelFor(key),
-          })
-          .eq("id", user.id);
+    if (user) {
+      const { error } = await supabase
+        .from("profiles")
+        .update({ ai_type_key: key })
+        .eq("id", user.id);
+
+      if (error) {
+        console.error("Failed to save ai_type_key:", error);
       }
-    } catch (e) {
-      console.error("Failed to save ai type", e);
-    } finally {
-      setSaving(false);
-      setStage("result");
     }
+
+    setSaving(false);
+    setStage("result");
   };
 
+  // -------------------------------
+  // ダッシュボードへ
+  // -------------------------------
   const handleGoDashboard = () => {
     router.push("/");
   };
 
-  const handleRetake = () => {
-    // 「もう一度診断する」→ 質問画面に戻す
+  // -------------------------------
+  // 再受験（結果を破棄して質問に戻す）
+  // -------------------------------
+  const handleRetake = async () => {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (user) {
+      // DB の値もリセットしておく
+      await supabase
+        .from("profiles")
+        .update({ ai_type_key: null })
+        .eq("id", user.id);
+    }
+
     setResultKey(null);
     setStage("questions");
   };
 
+  const handleSkip = () => router.push("/start");
+
+  // -------------------------------
+  // ローディング
+  // -------------------------------
   if (checking) {
     return (
       <main className="flex min-h-screen items-center justify-center">
@@ -151,9 +173,4 @@ export default function AIThinkingOnboardingPage() {
       )}
     </main>
   );
-}
-
-// DBに日本語名を入れる用のヘルパー
-function aiTypologyLabelFor(key: AITypeKey): string {
-  return aiTypologyTypes[key]?.nameJa ?? key;
 }

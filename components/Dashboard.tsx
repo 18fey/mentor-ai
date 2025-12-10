@@ -3,9 +3,15 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import { createBrowserClient } from "@supabase/ssr";
 
-type Database = any;
+// Supabase Client v8（component用）
+function createClientSupabase() {
+  return createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
 
 type DashboardProps = {
   onNavigate?: (tab: string) => void;
@@ -63,7 +69,7 @@ type WeeklyReport = {
 
 export default function Dashboard({ onNavigate }: DashboardProps) {
   const router = useRouter();
-  const supabase = createClientComponentClient<Database>();
+  const supabase = createClientSupabase();
 
   const [userId, setUserId] = useState<string | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -156,7 +162,8 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
     "これまでの面接・ケース・ESのデータをもとに、あなたの強み・弱み・就活の軸をここに要約して表示します。";
 
   const nextSuggestions =
-    weekly?.report?.aiComments?.nextWeekSuggestions && weekly.report.aiComments.nextWeekSuggestions.length > 0
+    weekly?.report?.aiComments?.nextWeekSuggestions &&
+    weekly.report.aiComments.nextWeekSuggestions.length > 0
       ? weekly.report.aiComments.nextWeekSuggestions
       : [
           "ガクチカ1本をSTARで話す練習をしてみましょう。",
@@ -213,7 +220,6 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
               </h2>
               <p className="mt-1 text-sm text-slate-500">
                 プロフィール・面接AI・ケースAI・ES添削の結果が自動的にここへ集約されます。
-                まだデータが少ない場合は、一部サンプル文が表示されます。
               </p>
             </div>
             <div className="flex flex-wrap gap-3 md:justify-end">
@@ -232,21 +238,6 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
             </div>
           </div>
 
-          <div className="flex flex-wrap gap-3 text-xs md:text-sm text-slate-500">
-            <span className="inline-flex items-center gap-2 rounded-full bg-slate-50 px-3 py-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />
-              スコア・履歴をユーザーごとに保存
-            </span>
-            <span className="inline-flex items-center gap-2 rounded-full bg-slate-50 px-3 py-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-              週次レポートで自己分析を自動生成
-            </span>
-            <span className="inline-flex items-center gap-2 rounded-full bg-slate-50 px-3 py-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-violet-400" />
-              ストーリーカードとESテンプレを一元管理
-            </span>
-          </div>
-
           {loading && (
             <p className="text-xs text-slate-400">
               データを読み込んでいます…
@@ -258,7 +249,7 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
         </div>
       </section>
 
-      {/* 上部4カード：完全個別スコア */}
+      {/* ステータスカード */}
       <section className="mb-8 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         <DashboardStatCard
           label="総合スコア（最新）"
@@ -292,43 +283,27 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
         />
       </section>
 
-      {/* グラフ + 軸分析 */}
+      {/* 軸分析 + サマリー */}
       <section className="grid grid-cols-1 gap-6 xl:grid-cols-2 mb-8">
         {/* 自己分析サマリー */}
         <div className="rounded-3xl border border-white/70 bg-white/80 p-6 shadow-sm backdrop-blur-sm">
-          <div className="mb-4 flex items-center justify-between">
-            <div>
-              <h3 className="text-sm font-medium text-slate-900">
-                今のあなたのプロフィール
-              </h3>
-              <p className="text-xs text-slate-500 mt-1">
-                直近のストーリーカードと面接ログからAIが要約したプロフィールです。
-              </p>
-            </div>
-          </div>
-
-          <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-line">
+          <h3 className="mb-2 text-sm font-medium text-slate-900">
+            今のあなたのプロフィール
+          </h3>
+          <p className="text-sm text-slate-700 whitespace-pre-line">
             {profileSummary}
           </p>
         </div>
 
-        {/* 就活の軸 / 重点分野 */}
+        {/* 軸分析 */}
         <div className="rounded-3xl border border-white/70 bg-white/80 p-6 shadow-sm backdrop-blur-sm">
-          <div className="mb-4 flex items-center justify-between">
-            <div>
-              <h3 className="text-sm font-medium text-slate-900">
-                就活の軸・強みマップ
-              </h3>
-              <p className="text-xs text-slate-500 mt-1">
-                ストーリーカードから抽出された「軸」と、それを支えるエピソード。
-              </p>
-            </div>
-          </div>
+          <h3 className="mb-2 text-sm font-medium text-slate-900">
+            就活の軸・強みマップ
+          </h3>
 
           {axes.length === 0 ? (
             <p className="text-xs text-slate-500">
               まだストーリーカードが少ないため、軸分析はこれから表示されます。
-              一般面接AIやケースAIを使うと、ここに自動で溜まっていきます。
             </p>
           ) : (
             <div className="space-y-3 text-xs">
@@ -357,16 +332,13 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
         </div>
       </section>
 
-      {/* 下部：おすすめ & セッション履歴 */}
+      {/* おすすめ / 最近のセッション */}
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* 今日のおすすめ対策（週次レポートの提案） */}
+        {/* 今日のおすすめ対策 */}
         <div className="rounded-3xl border border-white/70 bg-white/80 p-6 shadow-sm backdrop-blur-sm">
           <h3 className="text-sm font-medium text-slate-900 mb-2">
             今日のおすすめ対策
           </h3>
-          <p className="text-xs text-slate-500 mb-4">
-            週次レポートのコメントをもとに、今週やると良いアクションをリストアップしました。
-          </p>
           <ul className="space-y-3 text-sm">
             {nextSuggestions.map((s, i) => (
               <li
@@ -387,18 +359,15 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
           </ul>
         </div>
 
-        {/* 直近のセッション履歴（完全個別） */}
+        {/* 直近のセッション履歴 */}
         <div className="rounded-3xl border border-white/70 bg-white/80 p-6 shadow-sm backdrop-blur-sm">
           <h3 className="text-sm font-medium text-slate-900 mb-2">
             直近のセッション履歴
           </h3>
-          <p className="text-xs text-slate-500 mb-4">
-            あなたが実際に実行したトレーニングセッションの履歴です。
-          </p>
           <div className="space-y-3 text-sm">
             {recentSessions.length === 0 ? (
               <p className="text-xs text-slate-500">
-                まだセッション履歴がありません。ケース面接AIや一般面接AIを使い始めると、ここに履歴が表示されます。
+                まだセッション履歴がありません。
               </p>
             ) : (
               recentSessions.slice(0, 3).map((s) => (
@@ -445,24 +414,6 @@ function DashboardStatCard({
         <p className="mt-1 text-2xl font-semibold text-slate-900">{value}</p>
         <p className="mt-1 text-[11px] text-slate-400">{helper}</p>
       </div>
-    </div>
-  );
-}
-
-type LegendProps = {
-  label: string;
-  value: string;
-  colorClass: string;
-};
-
-function LegendItem({ label, value, colorClass }: LegendProps) {
-  return (
-    <div className="flex items-center justify-between">
-      <div className="flex items-center gap-2">
-        <span className={`h-2.5 w-2.5 rounded-full ${colorClass}`} />
-        <span className="text-xs text-slate-600">{label}</span>
-      </div>
-      <span className="text-[11px] text-slate-400">{value}</span>
     </div>
   );
 }

@@ -1,5 +1,7 @@
 // app/api/career-gap/route.ts
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
 import {
   CAREER_FIT_MAP,
   INDUSTRIES,
@@ -7,6 +9,9 @@ import {
   FitSymbol,
   ThinkingTypeId,
 } from "@/lib/careerFitMap";
+import {
+  requireAndConsumeMetaIfNeeded,
+} from "@/lib/payment/featureGate";
 
 // 「◎ / ○ / △ / ✕」の意味を文章にする
 const FIT_SYMBOL_DESC: Record<FitSymbol, string> = {
@@ -94,6 +99,7 @@ type CareerGapRequestBody = {
   desiredIndustryIds?: IndustryId[];
   userReason?: string;
   userExperienceSummary?: string;
+  mode?: "basic" | "deep"; // Fast / Deep 切り替え
 };
 
 export async function POST(req: Request) {
@@ -113,6 +119,7 @@ export async function POST(req: Request) {
 
     const userReason = body.userReason ?? "";
     const userExperienceSummary = body.userExperienceSummary ?? "";
+    const mode: "basic" | "deep" = body.mode ?? "basic";
 
     if (!thinkingTypeId) {
       return NextResponse.json(
@@ -126,6 +133,29 @@ export async function POST(req: Request) {
         { error: "desiredIndustryIds is required" },
         { status: 400 }
       );
+    }
+
+    // Deep モードは課金ゲート＋Meta消費
+    if (mode === "deep") {
+      const gate = await requireAndConsumeMetaIfNeeded(
+        "career_gap_deep",
+        1 // 1回につき Meta 1枚
+      );
+      if (!gate.ok) {
+        if (gate.status === 401) {
+          return NextResponse.json(
+            { error: "ログインが必要です。" },
+            { status: 401 }
+          );
+        }
+        return NextResponse.json(
+          {
+            error:
+              "キャリア相性レポートのDeep版は有料機能です。MetaコインまたはProプランをご利用ください。",
+          },
+          { status: 402 }
+        );
+      }
     }
 
     // このタイプの業界相性マップを取得
@@ -151,6 +181,11 @@ export async function POST(req: Request) {
       })
       .join("\n");
 
+    const modeHint =
+      mode === "deep"
+        ? `これは Deep モードです。各業界ごとのマッチ / ギャップ / 3ヶ月アクションを、面接やESでそのまま使えるレベルの具体性で書いてください。`
+        : `これはライトモードです。全体の方向性がつかめるように、要点をコンパクトにまとめてください。`;
+
     const userPrompt = `
 [Thinking Type]
 ID: ${thinkingTypeId}
@@ -175,9 +210,10 @@ ${userExperienceSummary || "（未入力）"}
 ▼タスク
 上記を踏まえて、「キャリア相性レポート」を作成してください。
 志望業界ごとに、マッチ度・ギャップ・3ヶ月アクションプランまで具体的に書いてください。
+
+${modeHint}
 `;
 
-    // 🔥 SDK を使わず fetch で直接 OpenAI を叩く
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       console.error("OPENAI_API_KEY is not set");
@@ -195,7 +231,8 @@ ${userExperienceSummary || "（未入力）"}
       },
       body: JSON.stringify({
         model: "gpt-4.1-mini",
-        temperature: 0.6,
+        temperature: mode === "deep" ? 0.8 : 0.6,
+        max_tokens: mode === "deep" ? 1400 : 900,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: userPrompt },
@@ -216,7 +253,105 @@ ${userExperienceSummary || "（未入力）"}
     const content =
       data.choices?.[0]?.message?.content ?? "生成に失敗しました。";
 
-    return NextResponse.json({ result: content });
+    // 🧠 ここから：career_gap_logs ＋ growth_logs 保存（失敗してもレスポンスは返す）
+    try {
+      const cookieStore = await cookies();
+
+      const supabase = createServerClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!,
+        {
+          cookies: {
+            getAll() {
+              return cookieStore.getAll();
+            },
+            setAll(cookiesToSet) {
+              try {
+                cookiesToSet.forEach(({ name, value, options }) =>
+                  cookieStore.set(name, value, options)
+                );
+              } catch {
+                // Route Handler など、読み取り専用のコンテキストでは無視
+              }
+            },
+          },
+        }
+      );
+
+      const {
+        data: { user },
+        error: authError,
+      } = await supabase.auth.getUser();
+
+      if (authError) {
+        console.error("career-gap auth error for logging:", authError);
+      }
+
+      if (user) {
+        const selectedLabels = desiredIndustryIds.map((id) => {
+          const meta = INDUSTRIES.find((i) => i.id === id);
+          return meta?.labelJa ?? id;
+        });
+
+        // career_gap_logs に保存
+        const { data: inserted, error: insertError } = await supabase
+          .from("career_gap_logs")
+          .insert({
+            user_id: user.id,
+            thinking_type_id: thinkingTypeId,
+            selected_industries: desiredIndustryIds,
+            mode,
+            motivation_text: userReason || null,
+            gakuchika_text: userExperienceSummary || null,
+            result_text: content,
+          })
+          .select("id")
+          .single();
+
+        if (insertError) {
+          console.error("career_gap_logs insert error:", insertError);
+        }
+
+        const gapLogId = inserted?.id;
+
+        const titleBase =
+          selectedLabels.length > 0
+            ? `キャリア相性レポート（${selectedLabels.join(" × ")}）`
+            : "キャリア相性レポート";
+
+        const title =
+          mode === "deep" ? `${titleBase} [Deep]` : titleBase;
+
+        const description =
+          mode === "deep"
+            ? "志望業界との相性をDeepレベルで分析しました。"
+            : "志望業界とのマッチ・ギャップをライト版で確認しました。";
+
+        const { error: growthError } = await supabase
+          .from("growth_logs")
+          .insert({
+            user_id: user.id,
+            source: "career_gap",
+            title,
+            description,
+            metadata: {
+              thinking_type_id: thinkingTypeId,
+              mode,
+              desired_industries: desiredIndustryIds,
+              career_gap_log_id: gapLogId ?? null,
+            },
+          });
+
+        if (growthError) {
+          console.error("growth_logs insert error (career_gap):", growthError);
+        }
+      }
+    } catch (logErr) {
+      console.error("career-gap logging error:", logErr);
+    }
+
+    // mode も返しておくとフロントで判別しやすい
+    return NextResponse.json({ result: content, mode });
   } catch (e) {
     console.error(e);
     return NextResponse.json({ error: "Server error" }, { status: 500 });

@@ -3,7 +3,8 @@
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+// v7 → v8: auth-helpers を廃止し、@supabase/ssr のブラウザクライアントに変更
+import { createBrowserClient } from "@supabase/ssr";
 import { PayjpCheckoutButton } from "@/components/PayjpCheckoutButton";
 
 // プラン型
@@ -41,8 +42,18 @@ type UsageSummaryResponse = {
   };
 };
 
+/* -------------------------------
+   v8 Supabase Client（Component用）
+-------------------------------- */
+function createClientSupabase() {
+  return createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
+
 const Settings: React.FC = () => {
-  const supabase = createClientComponentClient();
+  const supabase = createClientSupabase();
 
   const [plan, setPlan] = useState<AppPlan>("free");
   const [loadingProfile, setLoadingProfile] = useState(true);
@@ -552,7 +563,7 @@ const Settings: React.FC = () => {
               </p>
             </div>
 
-            {/* 🎯 月額 2,900 円 に設定 */}
+            {/* 🎯 月額 2,900 円 に設定（amount=3980 は必要に応じて修正してね） */}
             <div className="flex flex-col items-start gap-1">
               <PayjpCheckoutButton
                 amount={3980}

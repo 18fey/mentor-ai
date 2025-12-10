@@ -2,10 +2,8 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import { createBrowserClient } from "@supabase/ssr";
 import { AITypeKey, aiTypologyTypes } from "@/lib/aiTypologyData";
-
-type Database = any;
 
 type Props = {
   resultKey: AITypeKey;
@@ -13,11 +11,22 @@ type Props = {
   onRetake: () => void;
 };
 
-export function AITypologyResult({ resultKey, onGoDashboard, onRetake }: Props) {
+function createClientSupabase() {
+  return createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
+
+export function AITypologyResult({
+  resultKey,
+  onGoDashboard,
+  onRetake,
+}: Props) {
   const t = aiTypologyTypes[resultKey];
 
   // Supabase クライアント
-  const supabase = createClientComponentClient<Database>();
+  const supabase = createClientSupabase();
 
   // 二重保存防止用フラグ
   const hasSavedRef = useRef(false);

@@ -46,6 +46,11 @@ const sections: MenuSection[] = [
         badge: "NEW",
       },
       { label: "AI思考力トレーニング", path: "/mentor-ai-index" },
+       {
+        label: "Growth Inbox",
+        path: "/growth",
+      },
+
 
       // ↓↓↓ ここ3つは授業では隠す ↓↓↓
       {

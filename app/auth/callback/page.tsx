@@ -3,11 +3,15 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import { createBrowserClient } from "@supabase/ssr";
+
+const supabase = createBrowserClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
 
 export default function AuthCallbackPage() {
   const router = useRouter();
-  const supabase = createClientComponentClient();
 
   useEffect(() => {
     const run = async () => {
@@ -51,7 +55,7 @@ export default function AuthCallbackPage() {
     };
 
     run();
-  }, [router, supabase]);
+  }, [router]);
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-slate-950 px-6">

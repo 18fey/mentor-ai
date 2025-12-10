@@ -1,4 +1,4 @@
-// app/api/career-gap-multi/route.ts
+// app/api/career-gap/route.ts
 import { NextResponse } from "next/server";
 import {
   CAREER_FIT_MAP,
@@ -7,9 +7,9 @@ import {
   FitSymbol,
   ThinkingTypeId,
 } from "@/lib/careerFitMap";
-
-// 以下は、さっき貼ってくれた career-gap の中身を丸ごとコピペ
-// （FIT_SYMBOL_DESC, SYSTEM_PROMPT, CareerGapRequestBody, POST 関数 全部）
+import {
+  requireAndConsumeMetaIfNeeded,
+} from "@/lib/payment/featureGate";
 
 // 「◎ / ○ / △ / ✕」の意味を文章にする
 const FIT_SYMBOL_DESC: Record<FitSymbol, string> = {
@@ -97,6 +97,7 @@ type CareerGapRequestBody = {
   desiredIndustryIds?: IndustryId[];
   userReason?: string;
   userExperienceSummary?: string;
+  mode?: "basic" | "deep"; // ★ 追加：Fast / Deep 切り替え
 };
 
 export async function POST(req: Request) {
@@ -116,6 +117,7 @@ export async function POST(req: Request) {
 
     const userReason = body.userReason ?? "";
     const userExperienceSummary = body.userExperienceSummary ?? "";
+    const mode: "basic" | "deep" = body.mode ?? "basic";
 
     if (!thinkingTypeId) {
       return NextResponse.json(
@@ -129,6 +131,29 @@ export async function POST(req: Request) {
         { error: "desiredIndustryIds is required" },
         { status: 400 }
       );
+    }
+
+    // Deep モードは課金ゲート＋Meta消費
+    if (mode === "deep") {
+      const gate = await requireAndConsumeMetaIfNeeded(
+        "career_gap_deep",
+        1 // 1回につき Meta 1枚
+      );
+      if (!gate.ok) {
+        if (gate.status === 401) {
+          return NextResponse.json(
+            { error: "ログインが必要です。" },
+            { status: 401 }
+          );
+        }
+        return NextResponse.json(
+          {
+            error:
+              "キャリア相性レポートのDeep版は有料機能です。MetaコインまたはProプランをご利用ください。",
+          },
+          { status: 402 }
+        );
+      }
     }
 
     // このタイプの業界相性マップを取得
@@ -154,6 +179,11 @@ export async function POST(req: Request) {
       })
       .join("\n");
 
+    const modeHint =
+      mode === "deep"
+        ? `これは Deep モードです。各業界ごとのマッチ / ギャップ / 3ヶ月アクションを、面接やESでそのまま使えるレベルの具体性で書いてください。`
+        : `これはライトモードです。全体の方向性がつかめるように、要点をコンパクトにまとめてください。`;
+
     const userPrompt = `
 [Thinking Type]
 ID: ${thinkingTypeId}
@@ -178,6 +208,8 @@ ${userExperienceSummary || "（未入力）"}
 ▼タスク
 上記を踏まえて、「キャリア相性レポート」を作成してください。
 志望業界ごとに、マッチ度・ギャップ・3ヶ月アクションプランまで具体的に書いてください。
+
+${modeHint}
 `;
 
     const apiKey = process.env.OPENAI_API_KEY;
@@ -197,7 +229,8 @@ ${userExperienceSummary || "（未入力）"}
       },
       body: JSON.stringify({
         model: "gpt-4.1-mini",
-        temperature: 0.6,
+        temperature: mode === "deep" ? 0.8 : 0.6,
+        max_tokens: mode === "deep" ? 1400 : 900,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: userPrompt },
@@ -218,7 +251,8 @@ ${userExperienceSummary || "（未入力）"}
     const content =
       data.choices?.[0]?.message?.content ?? "生成に失敗しました。";
 
-    return NextResponse.json({ result: content });
+    // mode も返しておくとフロントで判別しやすい
+    return NextResponse.json({ result: content, mode });
   } catch (e) {
     console.error(e);
     return NextResponse.json({ error: "Server error" }, { status: 500 });

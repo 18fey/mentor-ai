@@ -1,9 +1,9 @@
 // app/onboarding/page.tsx
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import { createBrowserClient } from "@supabase/ssr";
 
 type Step = 1 | 2 | 3;
 type Purpose = "job_hunting" | "thinking_training";
@@ -14,16 +14,24 @@ type ProfileRow = {
   status: string | null;
   purpose: Purpose | null;
   interests: string[] | null;
-  job_stage: string | null;
-  work_industry: string | null;
-  work_role: string | null;
   target_companies: string[] | null;
   onboarding_completed: boolean | null;
 };
 
+type Database = any;
+
 export default function OnboardingPage() {
-  const supabase = createClientComponentClient();
   const router = useRouter();
+
+  // ✅ 新SDK：createBrowserClient をそのまま使用
+  const supabase = useMemo(
+    () =>
+      createBrowserClient<Database>(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      ),
+    []
+  );
 
   const [step, setStep] = useState<Step>(1);
   const [loading, setLoading] = useState(true);
@@ -35,9 +43,6 @@ export default function OnboardingPage() {
   const [status, setStatus] = useState("");
   const [purpose, setPurpose] = useState<Purpose | null>(null);
   const [interests, setInterests] = useState<string[]>([]);
-  const [jobStage, setJobStage] = useState("");
-  const [workIndustry, setWorkIndustry] = useState("");
-  const [workRole, setWorkRole] = useState("");
   const [targetCompanyInput, setTargetCompanyInput] = useState("");
   const [targetCompanies, setTargetCompanies] = useState<string[]>([]);
 
@@ -53,7 +58,7 @@ export default function OnboardingPage() {
       const { data: profile, error } = await supabase
         .from("profiles")
         .select(
-          "affiliation,status,purpose,interests,job_stage,work_industry,work_role,target_companies,onboarding_completed"
+          "affiliation,status,purpose,interests,target_companies,onboarding_completed"
         )
         .eq("id", auth.user.id)
         .maybeSingle<ProfileRow>();
@@ -63,7 +68,7 @@ export default function OnboardingPage() {
       }
 
       if (profile?.onboarding_completed) {
-        router.push("/");
+        router.push("/start");
         return;
       }
 
@@ -72,9 +77,6 @@ export default function OnboardingPage() {
         setStatus(profile.status ?? "");
         setPurpose(profile.purpose ?? null);
         setInterests(profile.interests ?? []);
-        setJobStage(profile.job_stage ?? "");
-        setWorkIndustry(profile.work_industry ?? "");
-        setWorkRole(profile.work_role ?? "");
         setTargetCompanies(profile.target_companies ?? []);
       }
 
@@ -86,9 +88,7 @@ export default function OnboardingPage() {
 
   const handleToggleInterest = (value: string) => {
     setInterests((prev) =>
-      prev.includes(value)
-        ? prev.filter((v) => v !== value)
-        : [...prev, value]
+      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value]
     );
   };
 
@@ -105,7 +105,7 @@ export default function OnboardingPage() {
     setTargetCompanies((prev) => prev.filter((c) => c !== name));
   };
 
-  // 👇 最終保存だけやる関数
+  // 👇 最終保存
   const handleSave = async () => {
     setError(null);
     setSaving(true);
@@ -125,9 +125,6 @@ export default function OnboardingPage() {
         status,
         purpose,
         interests, // text[]
-        job_stage: jobStage,
-        work_industry: workIndustry,
-        work_role: workRole,
         target_companies: targetCompanies, // text[]
         onboarding_completed: true,
       },
@@ -145,7 +142,8 @@ export default function OnboardingPage() {
     }
 
     setSaving(false);
-    router.push("/onboarding/ai-typing");
+    // プロフィール完了 → 16タイプ診断へ
+    router.push("/diagnosis-16type");
   };
 
   if (loading) {
@@ -166,9 +164,8 @@ export default function OnboardingPage() {
           <div className="flex items-center gap-2">
             <StepDot active={step >= 1}>基本情報</StepDot>
             <span className="text-slate-300">—</span>
-            <StepDot active={step >= 2}>目的</StepDot>
+            <StepDot active={step >= 2}>目的・興味</StepDot>
             <span className="text-slate-300">—</span>
-            {/* 質問内容に合わせて名称を調整 */}
             <StepDot active={step >= 3}>目標・フィールド</StepDot>
           </div>
           <span>Step {step} / 3</span>
@@ -194,13 +191,7 @@ export default function OnboardingPage() {
           <Step2Purpose
             purpose={purpose}
             interests={interests}
-            jobStage={jobStage}
-            workIndustry={workIndustry}
-            workRole={workRole}
             setPurpose={setPurpose}
-            setJobStage={setJobStage}
-            setWorkIndustry={setWorkIndustry}
-            setWorkRole={setWorkRole}
             toggleInterest={handleToggleInterest}
           />
         )}
@@ -345,27 +336,15 @@ function Step1Basic({
 function Step2Purpose({
   purpose,
   interests,
-  jobStage,
-  workIndustry,
-  workRole,
   setPurpose,
-  setJobStage,
-  setWorkIndustry,
-  setWorkRole,
   toggleInterest,
 }: {
   purpose: Purpose | null;
   interests: string[];
-  jobStage: string;
-  workIndustry: string;
-  workRole: string;
   setPurpose: (p: Purpose) => void;
-  setJobStage: (v: string) => void;
-  setWorkIndustry: (v: string) => void;
-  setWorkRole: (v: string) => void;
   toggleInterest: (v: string) => void;
 }) {
-  // 業界タイプを拡張（限定的すぎないように）
+  // 業界タイプ（interests に入れる）
   const interestOptions = [
     "戦略コンサル",
     "総合コンサル",
@@ -456,62 +435,6 @@ function Step2Purpose({
             ))}
           </div>
         </div>
-
-        {purpose === "job_hunting" && (
-          <div>
-            <label className="mb-2 block font-medium text-slate-700">
-              就活状況
-            </label>
-            <div className="grid gap-2 md:grid-cols-2">
-              {[
-                "これから本格的に始める",
-                "インターン選考中",
-                "本選考のES・面接対策中",
-                "内定済み（横移動を検討中）",
-              ].map((opt) => (
-                <button
-                  key={opt}
-                  type="button"
-                  onClick={() => setJobStage(opt)}
-                  className={`rounded-2xl border px-3 py-2 text-left ${
-                    jobStage === opt
-                      ? "border-sky-400 bg-sky-50"
-                      : "border-slate-200 bg-white hover:bg-slate-50"
-                  }`}
-                >
-                  <span className="text-[11px] text-slate-700">{opt}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {purpose === "thinking_training" && (
-          <div className="grid gap-4 md:grid-cols-2">
-            <div>
-              <label className="mb-1 block font-medium text-slate-700">
-                現在の業界
-              </label>
-              <input
-                value={workIndustry}
-                onChange={(e) => setWorkIndustry(e.target.value)}
-                className="w-full rounded-2xl border border-slate-200 bg-white/80 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                placeholder="IT / 金融 / コンサル / メーカー など"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block font-medium text-slate-700">
-                現在の立場
-              </label>
-              <input
-                value={workRole}
-                onChange={(e) => setWorkRole(e.target.value)}
-                className="w-full rounded-2xl border border-slate-200 bg-white/80 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                placeholder="新人〜若手 / 中堅 / マネージャー / 経営層 など"
-              />
-            </div>
-          </div>
-        )}
       </div>
     </>
   );

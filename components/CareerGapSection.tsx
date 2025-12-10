@@ -17,7 +17,7 @@ export const CareerGapSection: React.FC<Props> = ({
   thinkingTypeNameJa,
   thinkingTypeNameEn,
   typeDescription,
-  initialDesiredIndustryId
+  initialDesiredIndustryId,
 }) => {
   const [desiredIndustryId, setDesiredIndustryId] = useState<IndustryId>(
     initialDesiredIndustryId ?? "consulting"
@@ -41,21 +41,25 @@ export const CareerGapSection: React.FC<Props> = ({
           thinkingTypeNameJa,
           thinkingTypeNameEn,
           typeDescription,
-          desiredIndustryId,
+          // 👇 ここを新仕様に合わせて「配列」で送る
+          desiredIndustryIds: [desiredIndustryId],
           userReason: reason,
-          userExperienceSummary: experience
-        })
+          userExperienceSummary: experience,
+        }),
       });
 
       if (!res.ok) {
-        throw new Error("API error");
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error || "API error");
       }
 
       const data = await res.json();
-      setResult(data.result);
+      setResult(data.result ?? null);
     } catch (e) {
       console.error(e);
-      setError("ギャップ分析の生成に失敗しました。時間をおいて再度お試しください。");
+      setError(
+        "ギャップ分析の生成に失敗しました。時間をおいて再度お試しください。"
+      );
     } finally {
       setLoading(false);
     }
@@ -81,7 +85,9 @@ export const CareerGapSection: React.FC<Props> = ({
           </label>
           <select
             value={desiredIndustryId}
-            onChange={(e) => setDesiredIndustryId(e.target.value as IndustryId)}
+            onChange={(e) =>
+              setDesiredIndustryId(e.target.value as IndustryId)
+            }
             className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
           >
             {INDUSTRIES.map((ind) => (

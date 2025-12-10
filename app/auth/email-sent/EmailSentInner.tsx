@@ -4,14 +4,18 @@
 import { useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import { createBrowserClient } from "@supabase/ssr";
+
+const supabase = createBrowserClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
 
 export function EmailSentInner() {
   const searchParams = useSearchParams();
   const email = searchParams.get("email") || "";
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const supabase = createClientComponentClient();
   const router = useRouter();
 
   const handleResend = async () => {
@@ -28,7 +32,7 @@ export function EmailSentInner() {
       type: "signup",
       email,
       options: {
-        emailRedirectTo: `${location.origin}/`,
+        emailRedirectTo: `${location.origin}/auth/callback`,
       },
     });
 

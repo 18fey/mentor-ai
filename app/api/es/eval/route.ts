@@ -1,5 +1,6 @@
 // app/api/es/eval/route.ts
 import { NextResponse } from "next/server";
+import { supabaseServer } from "@/lib/supabase-server";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
@@ -37,11 +38,12 @@ export async function POST(req: Request) {
       );
     }
 
-    const { text, company, qType, limit } = body as {
+    const { text, company, qType, limit, userId } = body as {
       text?: string;
       company?: string;
       qType?: string;
       limit?: number;
+      userId?: string; // ★ 任意：渡されればログに使う
     };
 
     // ===== 入力バリデーション =====
@@ -157,7 +159,7 @@ ${truncatedText}
       );
     }
 
-    let parsed;
+    let parsed: any;
     try {
       parsed = JSON.parse(content);
     } catch (e) {
@@ -185,6 +187,58 @@ ${truncatedText}
         },
         { status: 500 }
       );
+    }
+
+    // 🔢 スコアから平均などを計算（es_logs用）
+    const s = parsed.score;
+    const avgScore = Math.round(
+      (s.structure + s.logic + s.clarity + s.companyFit + s.lengthFit) / 5
+    );
+
+    // 🧠 userId があれば es_logs / growth_logs にも保存（任意）
+    if (userId) {
+      try {
+        const { error: esLogError } = await supabaseServer
+          .from("es_logs")
+          .insert({
+            user_id: userId,
+            company_name: safeCompany || null,
+            es_question: safeQType,
+            es_before: truncatedText,
+            es_after: null,
+            mode: "eval",
+            score: avgScore,
+          });
+
+        if (esLogError) {
+          console.error("es_logs insert error (eval):", esLogError);
+        }
+
+        const titleBase = safeCompany
+          ? `ES評価：${safeCompany}`
+          : "ES評価";
+
+        const { error: growthError } = await supabaseServer
+          .from("growth_logs")
+          .insert({
+            user_id: userId,
+            source: "es",
+            title: `${titleBase} [Score]`,
+            description: "ESのスコアリングとフィードバックを実施しました。",
+            metadata: {
+              mode: "eval",
+              company: safeCompany || null,
+              qType: safeQType,
+              score: parsed.score,
+            },
+          });
+
+        if (growthError) {
+          console.error("growth_logs insert error (es_eval):", growthError);
+        }
+      } catch (logErr) {
+        console.error("logging error in /api/es/eval:", logErr);
+      }
     }
 
     // そのままフロントに返す（score + feedback）

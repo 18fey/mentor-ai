@@ -2,9 +2,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
-
-type Database = any;
+import { createBrowserClient } from "@supabase/ssr";
 
 type SessionType = "case" | "fermi" | "interview" | "es";
 
@@ -39,8 +37,18 @@ const HISTORY = [
   { label: "今週", value: 89 },
 ];
 
+/* -------------------------------
+   v8 Supabase Client（Component用）
+-------------------------------- */
+function createClientSupabase() {
+  return createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
+
 export default function ScoreDashboard() {
-  const supabase = createClientComponentClient<Database>();
+  const supabase = createClientSupabase();
 
   const [userId, setUserId] = useState<string | null>(null);
   const [data, setData] = useState<ScoreSummary | null>(null);

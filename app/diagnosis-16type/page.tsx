@@ -3,12 +3,18 @@
 
 import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import { createBrowserClient } from "@supabase/ssr";
 import { CareerGapSectionMulti } from "@/components/CareerGapSectionMulti";
 
 // ============================
 // Mentor.AI 16タイプ診断
 // ============================
+
+// ✅ クライアント用 Supabase インスタンス
+const supabase = createBrowserClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
 
 type AxisKey = "strategic" | "analytical" | "intuitive" | "creative";
 
@@ -57,8 +63,17 @@ type TypeProfile = {
 // Supabase用プロフィール型（16タイプの結果だけ見る）
 type ProfileRow = {
   id: string;
-  ai16_type_id: TypeId | null;
+  ai_type_key : TypeId | null;
   ai16_axis_score: AxisScore | null;
+};
+
+// Deepレポート用
+type SubscriptionRow = {
+  status: string | null;
+};
+
+type MetaWalletRow = {
+  balance: number | null;
 };
 
 // 初期スコア
@@ -654,7 +669,6 @@ const AXIS_TYPE_GROUPS: Record<AxisKey, TypeId[]> = {
 
 export default function Diagnosis16TypePage() {
   const router = useRouter();
-  const supabase = createClientComponentClient();
 
   const [checking, setChecking] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -666,7 +680,7 @@ export default function Diagnosis16TypePage() {
 
   const totalQuestions = QUESTIONS.length;
 
-  // ✅ 既に診断済みなら最初から結果画面にする
+  // ✅ すでに16タイプ診断済みなら最初から結果画面へ
   useEffect(() => {
     const run = async () => {
       const {
@@ -681,7 +695,7 @@ export default function Diagnosis16TypePage() {
       try {
         const { data: profile, error } = await supabase
           .from("profiles")
-          .select("id, ai16_type_id, ai16_axis_score")
+          .select("id, ai_type_key,ai16_axis_score")
           .eq("id", user.id)
           .maybeSingle<ProfileRow>();
 
@@ -689,8 +703,8 @@ export default function Diagnosis16TypePage() {
           console.error("load 16type profile error:", error);
         }
 
-        if (profile && profile.ai16_type_id) {
-          setResultId(profile.ai16_type_id);
+        if (profile && profile.ai_type_key ) {
+          setResultId(profile.ai_type_key );
           if (profile.ai16_axis_score) {
             setScore(profile.ai16_axis_score);
           }
@@ -704,36 +718,47 @@ export default function Diagnosis16TypePage() {
     };
 
     run();
-  }, [supabase, router, totalQuestions]);
+  }, [router, totalQuestions]);
 
   const finalizeDiagnosis = async (finalScore: AxisScore) => {
-    const typeId = decideType(finalScore);
-    setScore(finalScore);
-    setResultId(typeId);
-    setCurrentIndex(totalQuestions);
+  const typeId = decideType(finalScore);
+  setScore(finalScore);
+  setResultId(typeId);
+  setCurrentIndex(totalQuestions);
 
-    // Supabase に保存（profiles に ai16_type_id / ai16_axis_score カラムを用意）
-    setSaving(true);
-    try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+  setSaving(true);
+  try {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
 
-      if (user) {
-        await supabase
-          .from("profiles")
-          .update({
-            ai16_type_id: typeId,
-            ai16_axis_score: finalScore,
-          })
-          .eq("id", user.id);
-      }
-    } catch (e) {
-      console.error("save 16type result error:", e);
-    } finally {
-      setSaving(false);
+    if (!user) {
+      console.error("no user when saving 16type");
+      return;
     }
-  };
+
+    const { data, error } = await supabase
+      .from("profiles")
+      .update({
+        ai_type_key: typeId,
+        ai16_axis_score: finalScore,
+      })
+      .eq("id", user.id)
+      .select("id, ai_type_key, ai16_axis_score")
+      .single();
+
+    if (error) {
+      console.error("save 16type result error:", error);
+    } else {
+      console.log("16type saved:", data);
+    }
+  } catch (e) {
+    console.error("save 16type result unexpected error:", e);
+  } finally {
+    setSaving(false);
+  }
+};
+
 
   const handleSelect = (option: QuestionOption) => {
     const newScore: AxisScore = {
@@ -804,6 +829,15 @@ export default function Diagnosis16TypePage() {
         </h1>
         <p className="text-sm text-slate-600">
           直感アンケート10問で、あなたの「AIとの付き合い方」と「思考スタイル」を16タイプにマッピングします。
+          <br />
+          このページでは、
+          <span className="font-semibold">
+            無料のライト版結果（タイプ＋簡易フィードバック）
+          </span>
+          を見られます。
+          より詳しい企業・業界マッチングや深掘りレポートは、下部の
+          <span className="font-semibold">Deepレポート</span>
+          で解放予定です。
         </p>
       </header>
 
@@ -812,7 +846,7 @@ export default function Diagnosis16TypePage() {
         <div className="flex items-center justify-between text-xs text-slate-500">
           <span>
             {resultId
-              ? "診断完了"
+              ? "診断完了（ライト版結果を表示中）"
               : `Question ${currentIndex + 1} / ${totalQuestions}`}
           </span>
           <span>{progress}%</span>
@@ -924,7 +958,13 @@ function ResultSection({
 
   return (
     <>
+      {/* ライト版：無料で見られる基本結果 */}
       <section className="rounded-2xl border border-sky-100 bg-white/90 p-6 shadow-sm shadow-sky-100 backdrop-blur">
+        <div className="mb-3 inline-flex items-center gap-2 rounded-full bg-sky-50 px-3 py-1 text-[10px] font-semibold text-sky-700">
+          <span>Light Result（無料）</span>
+          <span className="text-slate-400">タイプ＋簡易フィードバック</span>
+        </div>
+
         <p className="text-xs font-semibold uppercase tracking-[0.25em] text-sky-500">
           Result
         </p>
@@ -935,7 +975,7 @@ function ResultSection({
         <p className="mt-3 text-sm text-slate-700">{profile.tagLine}</p>
         <p className="mt-2 text-xs text-slate-600">{profile.summary}</p>
 
-        {/* Axis radar (simple bars) */}
+        {/* Axis bars */}
         <div className="mt-5 space-y-2 text-[11px] text-slate-600">
           <p className="font-semibold text-slate-700">あなたの思考バランス</p>
           <AxisBar label="Strategic / 戦略" value={pct(score.strategic)} />
@@ -980,7 +1020,7 @@ function ResultSection({
           </ul>
         </div>
 
-        {/* Buttons */}
+        {/* シェア / 再診断ボタン */}
         <div className="mt-6 flex flex-col gap-3 border-t border-slate-100 pt-4 text-[11px] md:flex-row md:items-center md:justify-between">
           <div className="flex flex-wrap gap-2">
             <button
@@ -999,25 +1039,35 @@ function ResultSection({
             </button>
           </div>
           <div className="text-[10px] text-slate-400">
-            実務でのAI活用を「練習」したい人は、
-            <a
-              href="/mentor-ai-index"
-              className="font-semibold text-sky-600 underline-offset-2 hover:underline"
-            >
-              Mentor.AI Index（AI思考トレーニング）
-            </a>
-            へ。
+            「このタイプでどう戦うか？」を深く知りたい人は、
+            下のDeepレポートもチェックしてみてください。
           </div>
         </div>
       </section>
 
-      {/* ▶ 診断タイプ × 志望業界のマッチ・ギャップセクション */}
-      <CareerGapSectionMulti
-        thinkingTypeId={typeId}
-        thinkingTypeNameJa={profile.nameJa}
-        thinkingTypeNameEn={profile.nameEn}
-        typeSummary={profile.summary}
-      />
+      {/* ▶ 診断タイプ × 志望業界のライト版ギャップ分析（無料） */}
+      <section className="space-y-3 rounded-2xl border border-slate-100 bg-white/90 p-4 text-[11px] text-slate-700 shadow-sm">
+        <div className="mb-2 flex items-center justify-between">
+          <div className="flex flex-col gap-0.5">
+            <p className="text-[11px] font-semibold text-slate-800">
+              志望業界とのフィット感（ライト版）
+            </p>
+            <p className="text-[10px] text-slate-500">
+              あなたの16タイプと、興味のありそうな業界との「ざっくりフィット」を可視化します。
+              詳細な企業別マッチングはDeepで解放予定です。
+            </p>
+          </div>
+        </div>
+        <CareerGapSectionMulti
+          thinkingTypeId={typeId}
+          thinkingTypeNameJa={profile.nameJa}
+          thinkingTypeNameEn={profile.nameEn}
+          typeDescription={profile.summary}
+        />
+      </section>
+
+      {/* ▶ Deepレポート：有料・Meta/Pro向け */}
+      <DeepReportLockSection typeId={typeId} profile={profile} />
     </>
   );
 }
@@ -1038,5 +1088,197 @@ function AxisBar({ label, value }: { label: string; value: number }) {
         />
       </div>
     </div>
+  );
+}
+
+// =========================
+// Deepレポート ロックセクション
+// =========================
+
+function DeepReportLockSection({
+  typeId,
+  profile,
+}: {
+  typeId: TypeId;
+  profile: TypeProfile;
+}) {
+  const [sub, setSub] = useState<SubscriptionRow | null>(null);
+  const [wallet, setWallet] = useState<MetaWalletRow | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const requiredMeta = 500; // Deepレポート解放に必要なMeta量（仮）
+
+  useEffect(() => {
+    const run = async () => {
+      try {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user) {
+          setLoading(false);
+          return;
+        }
+
+        const { data: subRow } = await supabase
+          .from("subscriptions")
+          .select("status")
+          .eq("user_id", user.id)
+          .maybeSingle<SubscriptionRow>();
+
+        const { data: walletRow } = await supabase
+          .from("meta_wallet")
+          .select("balance")
+          .eq("user_id", user.id)
+          .maybeSingle<MetaWalletRow>();
+
+        setSub(subRow ?? { status: null });
+        setWallet(walletRow ?? { balance: 0 });
+      } catch (e) {
+        console.error("deep report load error:", e);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    run();
+  }, []);
+
+  if (loading) {
+    return (
+      <section className="rounded-2xl border bg-white/70 p-4 text-[11px] text-slate-600">
+        Deepレポートの状態を確認しています…
+      </section>
+    );
+  }
+
+  const isPro = sub?.status === "active";
+  const metaBalance = wallet?.balance ?? 0;
+
+  const handleGenerate = () => {
+    alert(
+      "ここに「16タイプDeepレポート（企業マッチング含む）」生成APIをつなぐ予定です。"
+    );
+  };
+
+  // Proユーザー：常に解放
+  if (isPro) {
+    return (
+      <section className="space-y-3 rounded-2xl border border-emerald-300 bg-emerald-50/80 p-4 text-[11px] text-emerald-800">
+        <div className="mb-1 flex items-center justify-between">
+          <p className="text-[11px] font-semibold">
+            🔓 Deepレポート（Proプランで解放中）
+          </p>
+          <span className="rounded-full bg-white/60 px-2 py-0.5 text-[10px] font-semibold">
+            ProユーザーはMeta消費なし
+          </span>
+        </div>
+        <p className="text-[11px] text-emerald-900">
+          あなたの16タイプ
+          <span className="font-semibold">
+            「{profile.nameEn} / {profile.nameJa}」
+          </span>
+          をもとに、
+          <br />
+          ・より詳しい行動特性・思考のクセ
+          <br />
+          ・志望業界・企業とのマッチング（詳細コメント）
+          <br />
+          ・ガクチカ/職務経歴との「戦い方の組み立て方」
+          <br />
+          などをまとめたDeepレポートを生成できます。
+        </p>
+        <button
+          type="button"
+          onClick={handleGenerate}
+          className="mt-2 inline-flex items-center rounded-full bg-emerald-600 px-4 py-1.5 text-[11px] font-semibold text-white shadow-sm hover:bg-emerald-700"
+        >
+          Deepレポートを生成する（β） →
+        </button>
+      </section>
+    );
+  }
+
+  // Meta残高が足りている場合：Metaで一時解放
+  if (metaBalance >= requiredMeta) {
+    return (
+      <section className="space-y-3 rounded-2xl border border-amber-300 bg-amber-50/80 p-4 text-[11px] text-amber-900">
+        <div className="flex items-center justify-between">
+          <p className="text-[11px] font-semibold">
+            🔑 Deepレポート（Metaで一時解放）
+          </p>
+          <span className="text-[10px]">
+            残高: {metaBalance} Meta / 必要: {requiredMeta} Meta
+          </span>
+        </div>
+        <p className="text-[11px]">
+          16タイプ × 志望業界 × あなたの経験をもとに、
+          <span className="font-semibold">より具体的な戦い方レポート</span>
+          を生成できます。
+          <br />
+          一度解放すると、その診断結果に紐づくDeepレポートを閲覧できる想定です。
+        </p>
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <button
+            type="button"
+            onClick={handleGenerate}
+            className="inline-flex items-center rounded-full bg-amber-500 px-4 py-1.5 text-[11px] font-semibold text-white shadow-sm hover:bg-amber-600"
+          >
+            Metaを使ってDeepレポートを解放 →
+          </button>
+          <span className="text-[10px] text-amber-900/80">
+            ※実際のMeta消費APIは後で接続します。
+          </span>
+        </div>
+        <p className="mt-2 border-t border-amber-100 pt-2 text-[10px] text-slate-600">
+          Proプランなら、Metaを使わずにいつでもDeepレポートを閲覧できます。
+          <a href="/plans" className="ml-1 underline">
+            プランを見る
+          </a>
+        </p>
+      </section>
+    );
+  }
+
+  // Proでもなく、Metaも足りない場合：完全ロック（案内のみ）
+  return (
+    <section className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-[11px] text-slate-700">
+      <div className="flex items-center gap-2">
+        <span className="text-sm">🔒</span>
+        <div>
+          <p className="text-[11px] font-semibold text-slate-800">
+            Deepレポート（有料機能）
+          </p>
+          <p className="text-[10px] text-slate-500">
+            16タイプ診断の結果をもとに、
+            <span className="font-semibold">
+              「企業・業界とのギャップ」「攻め方・守り方」
+            </span>
+            まで踏み込んだレポートを生成する有料機能です。
+          </p>
+        </div>
+      </div>
+      <ul className="list-disc pl-5 text-[11px] text-slate-700">
+        <li>あなたの16タイプの「さらに深い説明」</li>
+        <li>志望業界・企業ごとのフィット感とギャップの言語化</li>
+        <li>選考でどう見せるか（プロンプト例付き）</li>
+      </ul>
+      <div className="flex flex-wrap gap-2 pt-1">
+        <a
+          href="/plans"
+          className="inline-flex items-center rounded-full bg-sky-500 px-4 py-1.5 text-[11px] font-semibold text-white shadow-sm hover:bg-sky-600"
+        >
+          Proプランを見る →
+        </a>
+        <a
+          href="/meta"
+          className="inline-flex items-center rounded-full border border-sky-200 px-4 py-1.5 text-[11px] font-semibold text-sky-600 hover:bg-sky-50"
+        >
+          Metaをチャージする →
+        </a>
+      </div>
+      <p className="text-[10px] text-slate-500">
+        ※まずは上のライト版結果と業界フィット感をベースに、無料機能だけでも十分に就活設計が可能です。
+      </p>
+    </section>
   );
 }

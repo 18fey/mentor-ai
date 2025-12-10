@@ -122,7 +122,7 @@ export async function POST(req: NextRequest) {
       questionType,
     });
 
-    // 4. Supabase に履歴を保存（常に full を保存）
+    // 4. Supabase に履歴を保存（既存テーブル）
     const { error: insertError } = await supabaseServer
       .from("es_corrections")
       .insert({
@@ -139,7 +139,59 @@ export async function POST(req: NextRequest) {
       console.error("es_corrections insert error:", insertError);
     }
 
-    // 5. レスポンスをプラン別に出し分け
+    // 5. 新：es_logs / growth_logs にも保存（失敗してもレスポンスには影響させない）
+    try {
+      // es_logs
+      const { error: esLogError } = await supabaseServer
+        .from("es_logs")
+        .insert({
+          user_id: userId,
+          company_name: company ?? null,
+          es_question: questionType ?? null,
+          es_before: esText,
+          es_after: plan === "pro" ? full.sampleRewrite : null,
+          mode: plan === "pro" ? "pro_correct" : "lite_correct",
+          score: null,
+        });
+
+      if (esLogError) {
+        console.error("es_logs insert error:", esLogError);
+      }
+
+      // growth_logs
+      const titleBase = company ? `ES添削：${company}` : "ES添削";
+      const title =
+        plan === "pro" ? `${titleBase} [PRO]` : `${titleBase} [Lite]`;
+
+      const description =
+        plan === "pro"
+          ? "PROプランとしてES添削（改善案＆書き換え例）を生成しました。"
+          : "ES添削の一部フィードバックを生成しました。（詳細はPRO限定）";
+
+      const { error: growthError } = await supabaseServer
+        .from("growth_logs")
+        .insert({
+          user_id: userId,
+          source: "es",
+          title,
+          description,
+          metadata: {
+            mode: plan,
+            locked: plan !== "pro",
+            company: company ?? null,
+            questionType: questionType ?? null,
+            story_card_id: storyCardId ?? null,
+          },
+        });
+
+      if (growthError) {
+        console.error("growth_logs insert error (es_correct):", growthError);
+      }
+    } catch (logErr) {
+      console.error("es_logs / growth_logs logging error:", logErr);
+    }
+
+    // 6. レスポンスをプラン別に出し分け
 
     if (plan === "pro") {
       // PROはフルで返す

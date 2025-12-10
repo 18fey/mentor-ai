@@ -1,22 +1,23 @@
 // lib/careerFitMap.ts
 
+// Diagnosis16Type の TypeId と同じIDで揃える
 export type ThinkingTypeId =
   | "strategic_copilot"
   | "cognitive_architect"
-  | "dialogue_orchestrator"
-  | "insight_synthesizer"
-  | "task_dispatcher"
-  | "system_optimizer"
-  | "process_automator"
-  | "quality_overseer"
-  | "data_diver"
-  | "hypothesis_challenger"
-  | "pattern_spotter"
-  | "scenario_modeler"
-  | "empathy_connector"
-  | "culture_translator"
-  | "resilience_balancer"
-  | "learning_explorer";
+  | "adaptive_visionary"
+  | "precision_operator"
+  | "intuitive_navigator"
+  | "systemic_thinker"
+  | "creative_divergent"
+  | "delegation_optimizer"
+  | "analytical_executor"
+  | "reflective_synthesizer"
+  | "scenario_designer"
+  | "collaborative_strategist"
+  | "experimental_improver"
+  | "efficiency_engineer"
+  | "contextual_interpreter"
+  | "digital_philosopher";
 
 export type IndustryId =
   | "consulting"
@@ -46,17 +47,19 @@ export const INDUSTRIES: { id: IndustryId; labelJa: string }[] = [
   { id: "sales_b2b", labelJa: "法人営業" },
   { id: "backoffice", labelJa: "バックオフィス" },
   { id: "public_sector", labelJa: "官公庁・公共" },
-  { id: "startup", labelJa: "スタートアップ / 起業" }
+  { id: "startup", labelJa: "スタートアップ / 起業" },
 ];
 
 // ーーーーーーーーーーーーーーーーーーーーーーー
-// ここに16タイプ × 12業界の適性マップ（完全版）
+// 16タイプ × 12業界の適性マップ
+// （旧マップを新16タイプに概念的に対応させて移植）
 // ーーーーーーーーーーーーーーーーーーーーーーー
 
 export const CAREER_FIT_MAP: Record<
   ThinkingTypeId,
   Record<IndustryId, FitSymbol>
 > = {
+  // 1. Strategic Co-Pilot（旧 strategic_copilot）
   strategic_copilot: {
     consulting: "◎",
     investment_banking: "◎",
@@ -69,8 +72,10 @@ export const CAREER_FIT_MAP: Record<
     sales_b2b: "○",
     backoffice: "△",
     public_sector: "○",
-    startup: "◎"
+    startup: "◎",
   },
+
+  // 2. Cognitive Architect（旧 cognitive_architect）
   cognitive_architect: {
     consulting: "◎",
     investment_banking: "○",
@@ -83,23 +88,11 @@ export const CAREER_FIT_MAP: Record<
     sales_b2b: "△",
     backoffice: "○",
     public_sector: "○",
-    startup: "○"
+    startup: "○",
   },
-  dialogue_orchestrator: {
-    consulting: "◎",
-    investment_banking: "△",
-    corporate_planning: "○",
-    general_trading: "○",
-    manufacturer: "○",
-    it_saas: "○",
-    marketing_ad: "◎",
-    hr: "◎",
-    sales_b2b: "◎",
-    backoffice: "△",
-    public_sector: "○",
-    startup: "○"
-  },
-  insight_synthesizer: {
+
+  // 3. Adaptive Visionary（旧 insight_synthesizer をベース）
+  adaptive_visionary: {
     consulting: "◎",
     investment_banking: "○",
     corporate_planning: "◎",
@@ -111,51 +104,11 @@ export const CAREER_FIT_MAP: Record<
     sales_b2b: "○",
     backoffice: "△",
     public_sector: "○",
-    startup: "◎"
+    startup: "◎",
   },
-  task_dispatcher: {
-    consulting: "○",
-    investment_banking: "○",
-    corporate_planning: "◎",
-    general_trading: "○",
-    manufacturer: "◎",
-    it_saas: "◎",
-    marketing_ad: "○",
-    hr: "○",
-    sales_b2b: "○",
-    backoffice: "◎",
-    public_sector: "○",
-    startup: "○"
-  },
-  system_optimizer: {
-    consulting: "◎",
-    investment_banking: "○",
-    corporate_planning: "◎",
-    general_trading: "○",
-    manufacturer: "◎",
-    it_saas: "◎",
-    marketing_ad: "○",
-    hr: "○",
-    sales_b2b: "△",
-    backoffice: "◎",
-    public_sector: "○",
-    startup: "○"
-  },
-  process_automator: {
-    consulting: "○",
-    investment_banking: "△",
-    corporate_planning: "○",
-    general_trading: "△",
-    manufacturer: "◎",
-    it_saas: "◎",
-    marketing_ad: "△",
-    hr: "○",
-    sales_b2b: "△",
-    backoffice: "◎",
-    public_sector: "○",
-    startup: "○"
-  },
-  quality_overseer: {
+
+  // 4. Precision Operator（旧 quality_overseer をベース）
+  precision_operator: {
     consulting: "△",
     investment_banking: "○",
     corporate_planning: "○",
@@ -167,37 +120,11 @@ export const CAREER_FIT_MAP: Record<
     sales_b2b: "△",
     backoffice: "◎",
     public_sector: "◎",
-    startup: "△"
+    startup: "△",
   },
-  data_diver: {
-    consulting: "◎",
-    investment_banking: "◎",
-    corporate_planning: "◎",
-    general_trading: "○",
-    manufacturer: "○",
-    it_saas: "◎",
-    marketing_ad: "◎",
-    hr: "△",
-    sales_b2b: "△",
-    backoffice: "◎",
-    public_sector: "○",
-    startup: "○"
-  },
-  hypothesis_challenger: {
-    consulting: "◎",
-    investment_banking: "◎",
-    corporate_planning: "◎",
-    general_trading: "○",
-    manufacturer: "○",
-    it_saas: "◎",
-    marketing_ad: "○",
-    hr: "△",
-    sales_b2b: "○",
-    backoffice: "△",
-    public_sector: "○",
-    startup: "◎"
-  },
-  pattern_spotter: {
+
+  // 5. Intuitive Navigator（旧 pattern_spotter をベース）
+  intuitive_navigator: {
     consulting: "◎",
     investment_banking: "○",
     corporate_planning: "○",
@@ -209,51 +136,11 @@ export const CAREER_FIT_MAP: Record<
     sales_b2b: "◎",
     backoffice: "○",
     public_sector: "○",
-    startup: "○"
+    startup: "○",
   },
-  scenario_modeler: {
-    consulting: "◎",
-    investment_banking: "◎",
-    corporate_planning: "◎",
-    general_trading: "○",
-    manufacturer: "○",
-    it_saas: "○",
-    marketing_ad: "△",
-    hr: "○",
-    sales_b2b: "△",
-    backoffice: "◎",
-    public_sector: "◎",
-    startup: "○"
-  },
-  empathy_connector: {
-    consulting: "○",
-    investment_banking: "△",
-    corporate_planning: "○",
-    general_trading: "○",
-    manufacturer: "○",
-    it_saas: "○",
-    marketing_ad: "◎",
-    hr: "◎",
-    sales_b2b: "◎",
-    backoffice: "△",
-    public_sector: "◎",
-    startup: "○"
-  },
-  culture_translator: {
-    consulting: "◎",
-    investment_banking: "○",
-    corporate_planning: "○",
-    general_trading: "◎",
-    manufacturer: "○",
-    it_saas: "◎",
-    marketing_ad: "◎",
-    hr: "○",
-    sales_b2b: "○",
-    backoffice: "△",
-    public_sector: "○",
-    startup: "◎"
-  },
-  resilience_balancer: {
+
+  // 6. Systemic Thinker（旧 resilience_balancer をベース）
+  systemic_thinker: {
     consulting: "○",
     investment_banking: "△",
     corporate_planning: "○",
@@ -265,9 +152,11 @@ export const CAREER_FIT_MAP: Record<
     sales_b2b: "○",
     backoffice: "◎",
     public_sector: "◎",
-    startup: "○"
+    startup: "○",
   },
-  learning_explorer: {
+
+  // 7. Creative Divergent（旧 learning_explorer をベース）
+  creative_divergent: {
     consulting: "○",
     investment_banking: "○",
     corporate_planning: "○",
@@ -279,6 +168,150 @@ export const CAREER_FIT_MAP: Record<
     sales_b2b: "○",
     backoffice: "△",
     public_sector: "○",
-    startup: "◎"
-  }
+    startup: "◎",
+  },
+
+  // 8. Delegation Optimizer（旧 task_dispatcher をベース）
+  delegation_optimizer: {
+    consulting: "○",
+    investment_banking: "○",
+    corporate_planning: "◎",
+    general_trading: "○",
+    manufacturer: "◎",
+    it_saas: "◎",
+    marketing_ad: "○",
+    hr: "○",
+    sales_b2b: "○",
+    backoffice: "◎",
+    public_sector: "○",
+    startup: "○",
+  },
+
+  // 9. Analytical Executor（旧 data_diver をベース）
+  analytical_executor: {
+    consulting: "◎",
+    investment_banking: "◎",
+    corporate_planning: "◎",
+    general_trading: "○",
+    manufacturer: "○",
+    it_saas: "◎",
+    marketing_ad: "◎",
+    hr: "△",
+    sales_b2b: "△",
+    backoffice: "◎",
+    public_sector: "○",
+    startup: "○",
+  },
+
+  // 10. Reflective Synthesizer（旧 dialogue_orchestrator をベース）
+  reflective_synthesizer: {
+    consulting: "◎",
+    investment_banking: "△",
+    corporate_planning: "○",
+    general_trading: "○",
+    manufacturer: "○",
+    it_saas: "○",
+    marketing_ad: "◎",
+    hr: "◎",
+    sales_b2b: "◎",
+    backoffice: "△",
+    public_sector: "○",
+    startup: "○",
+  },
+
+  // 11. Scenario Designer（旧 scenario_modeler をベース）
+  scenario_designer: {
+    consulting: "◎",
+    investment_banking: "◎",
+    corporate_planning: "◎",
+    general_trading: "○",
+    manufacturer: "○",
+    it_saas: "○",
+    marketing_ad: "△",
+    hr: "○",
+    sales_b2b: "△",
+    backoffice: "◎",
+    public_sector: "◎",
+    startup: "○",
+  },
+
+  // 12. Collaborative Strategist（旧 culture_translator をベース）
+  collaborative_strategist: {
+    consulting: "◎",
+    investment_banking: "○",
+    corporate_planning: "○",
+    general_trading: "◎",
+    manufacturer: "○",
+    it_saas: "◎",
+    marketing_ad: "◎",
+    hr: "○",
+    sales_b2b: "○",
+    backoffice: "△",
+    public_sector: "○",
+    startup: "◎",
+  },
+
+  // 13. Experimental Improver（旧 process_automator をベース）
+  experimental_improver: {
+    consulting: "○",
+    investment_banking: "△",
+    corporate_planning: "○",
+    general_trading: "△",
+    manufacturer: "◎",
+    it_saas: "◎",
+    marketing_ad: "△",
+    hr: "○",
+    sales_b2b: "△",
+    backoffice: "◎",
+    public_sector: "○",
+    startup: "○",
+  },
+
+  // 14. Efficiency Engineer（旧 system_optimizer をベース）
+  efficiency_engineer: {
+    consulting: "◎",
+    investment_banking: "○",
+    corporate_planning: "◎",
+    general_trading: "○",
+    manufacturer: "◎",
+    it_saas: "◎",
+    marketing_ad: "○",
+    hr: "○",
+    sales_b2b: "△",
+    backoffice: "◎",
+    public_sector: "○",
+    startup: "○",
+  },
+
+  // 15. Contextual Interpreter（旧 empathy_connector をベース）
+  contextual_interpreter: {
+    consulting: "○",
+    investment_banking: "△",
+    corporate_planning: "○",
+    general_trading: "○",
+    manufacturer: "○",
+    it_saas: "○",
+    marketing_ad: "◎",
+    hr: "◎",
+    sales_b2b: "◎",
+    backoffice: "△",
+    public_sector: "◎",
+    startup: "○",
+  },
+
+  // 16. Digital Philosopher（旧 hypothesis_challenger をベース）
+  digital_philosopher: {
+    consulting: "◎",
+    investment_banking: "◎",
+    corporate_planning: "◎",
+    general_trading: "○",
+    manufacturer: "○",
+    it_saas: "◎",
+    marketing_ad: "○",
+    hr: "△",
+    sales_b2b: "○",
+    backoffice: "△",
+    public_sector: "○",
+    startup: "◎",
+  },
 };

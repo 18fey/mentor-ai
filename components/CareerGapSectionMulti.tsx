@@ -1,179 +1,285 @@
-// components/CareerGapSectionMulti.tsx
 "use client";
 
 import React, { useState } from "react";
 import {
   INDUSTRIES,
   IndustryId,
+  ThinkingTypeId,
 } from "@/lib/careerFitMap";
-import { CareerGapResult } from "./CareerGapResult";
+import { CareerGapResult } from "@/components/CareerGapResult";
 
 type Props = {
-  // 診断側の TypeId と union が違っても渡せるよう、string にしておく
-  thinkingTypeId: string;
+  thinkingTypeId: ThinkingTypeId;
   thinkingTypeNameJa: string;
   thinkingTypeNameEn: string;
-  typeSummary: string;
+  typeDescription: string;
 };
+
+type Mode = "basic" | "deep";
 
 export const CareerGapSectionMulti: React.FC<Props> = ({
   thinkingTypeId,
   thinkingTypeNameJa,
   thinkingTypeNameEn,
-  typeSummary,
+  typeDescription,
+  
 }) => {
-  const [selectedIds, setSelectedIds] = useState<(IndustryId | "")[]>([
-    "",
-    "",
-    "",
-  ]);
+  const [industry1, setIndustry1] = useState<IndustryId | "">("");
+  const [industry2, setIndustry2] = useState<IndustryId | "">("");
+  const [industry3, setIndustry3] = useState<IndustryId | "">("");
+
   const [userReason, setUserReason] = useState("");
-  const [userExperience, setUserExperience] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [userExperienceSummary, setUserExperienceSummary] = useState("");
+
+  const [loadingMode, setLoadingMode] = useState<Mode | null>(null);
+  const [resultMarkdown, setResultMarkdown] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<string>("");
+  const [needsUpgrade, setNeedsUpgrade] = useState(false);
+  const [lastMode, setLastMode] = useState<Mode | null>(null);
 
-  const handleSelectChange = (index: number, value: string) => {
-    const next = [...selectedIds];
-    next[index] = (value || "") as IndustryId | "";
-    setSelectedIds(next);
-  };
+  const desiredIndustryOptions = INDUSTRIES;
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const selectedIndustryIds = [
+    industry1 || null,
+    industry2 || null,
+    industry3 || null,
+  ].filter((v): v is IndustryId => Boolean(v));
+
+  const disabledSubmit = selectedIndustryIds.length === 0 || !!loadingMode;
+
+  const handleSubmit = async (mode: Mode) => {
+    setLoadingMode(mode);
     setError(null);
-    setResult("");
-
-    const ids = selectedIds.filter((v): v is IndustryId => Boolean(v));
-
-    if (ids.length === 0) {
-      setError("少なくとも1つは志望業界を選んでください。");
-      return;
-    }
+    setNeedsUpgrade(false);
 
     try {
-      setLoading(true);
+      if (selectedIndustryIds.length === 0) {
+        setError("志望業界を1つ以上選んでください。");
+        return;
+      }
 
       const res = await fetch("/api/career-gap", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           thinkingTypeId,
           thinkingTypeNameJa,
           thinkingTypeNameEn,
-          typeDescription: typeSummary,
-          desiredIndustryIds: ids,
+          typeDescription,
+          desiredIndustryIds: selectedIndustryIds,
           userReason,
-          userExperienceSummary: userExperience,
+          userExperienceSummary,
+          mode,
         }),
       });
 
+      if (res.status === 401) {
+        setError("キャリア相性レポートを見るにはログインが必要です。");
+        return;
+      }
+
+      if (res.status === 402) {
+        setNeedsUpgrade(true);
+        const data = await res.json().catch(() => null);
+        setError(
+          data?.error ||
+            "キャリア相性レポートのDeep版は有料機能です。"
+        );
+        return;
+      }
+
       if (!res.ok) {
         const data = await res.json().catch(() => null);
-        throw new Error(data?.error || "サーバーエラーが発生しました。");
+        throw new Error(data?.error || "API error");
       }
 
       const data = await res.json();
-      setResult(data.result ?? "");
-    } catch (err: any) {
-      console.error(err);
-      setError(err.message || "エラーが発生しました。");
+      setResultMarkdown(data.result ?? "");
+      setLastMode(mode);
+    } catch (e) {
+      console.error(e);
+      setError(
+        "キャリア相性レポートの生成に失敗しました。時間をおいて再度お試しください。"
+      );
     } finally {
-      setLoading(false);
+      setLoadingMode(null);
     }
   };
 
   return (
-    <section className="mt-8 rounded-2xl border border-sky-100 bg-sky-50/60 p-5 shadow-sm shadow-sky-100">
-      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-600">
-        Career Match (Beta)
-      </p>
-      <h3 className="mt-2 text-sm font-semibold text-slate-900">
-        志望業界との「マッチ・ギャップ」と作戦をAIに出してもらう
-      </h3>
-      <p className="mt-1 text-xs text-slate-600">
-        あなたは
-        <span className="font-semibold">
-          {thinkingTypeNameJa}（{thinkingTypeNameEn}）
-        </span>
-        タイプです。このタイプの特徴と、志望業界のカルチャーを突き合わせて、
-        マッチ度・ギャップ・今からの打ち手をまとめます。
-      </p>
-
-      <form onSubmit={handleSubmit} className="mt-4 space-y-4">
-        {/* 志望業界セレクト */}
-        <div className="grid gap-3 md:grid-cols-3">
-          {selectedIds.map((value, idx) => (
-            <div key={idx} className="space-y-1">
-              <label className="text-[11px] font-medium text-slate-600">
-                志望業界 {idx + 1}
-                {idx === 0 && <span className="text-rose-500">（必須）</span>}
-              </label>
-              <select
-                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 shadow-sm focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-200"
-                value={value}
-                onChange={(e) => handleSelectChange(idx, e.target.value)}
-              >
-                <option value="">選択しない</option>
-                {INDUSTRIES.map((ind) => (
-                  <option key={ind.id} value={ind.id}>
-                    {ind.labelJa}
-                  </option>
-                ))}
-              </select>
-            </div>
-          ))}
+    <section className="mt-10 rounded-3xl border border-slate-100 bg-white/90 p-6 shadow-sm shadow-slate-100">
+      <div className="mb-5 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-600">
+            Career Match (BETA)
+          </p>
+          <h3 className="mt-1 text-sm font-semibold text-slate-900">
+            志望業界との「マッチ・ギャップ」と作戦を出してもらう
+          </h3>
+          <p className="mt-1 text-xs text-slate-500">
+            あなたの思考タイプ「{thinkingTypeNameJa}
+            ({thinkingTypeNameEn})」と、最大3つまでの志望業界を掛け合わせて、
+            マッチ度とギャップ、これからの打ち手プランを整理します。
+          </p>
         </div>
 
-        {/* 志望理由 */}
+        <div className="flex items-center gap-2 rounded-2xl bg-sky-50 px-3 py-2 text-xs text-sky-700">
+          <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-sky-600 text-[10px] font-semibold text-white">
+            i
+          </span>
+          <span>
+            ライト版は無料 / Deep版は Meta または Pro プランで利用できます。
+          </span>
+        </div>
+      </div>
+
+      {/* 志望業界選択 */}
+      <div className="grid gap-4 md:grid-cols-3">
         <div className="space-y-1">
-          <label className="text-[11px] font-medium text-slate-600">
+          <label className="text-xs font-medium text-slate-700">
+            志望業界 1 <span className="text-rose-500">(必須)</span>
+          </label>
+          <select
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-0 focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+            value={industry1}
+            onChange={(e) => setIndustry1(e.target.value as IndustryId | "")}
+          >
+            <option value="">選択しない</option>
+            {desiredIndustryOptions.map((ind) => (
+              <option key={ind.id} value={ind.id}>
+                {ind.labelJa}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs font-medium text-slate-700">
+            志望業界 2 <span className="text-slate-400">(任意)</span>
+          </label>
+          <select
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-0 focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+            value={industry2}
+            onChange={(e) => setIndustry2(e.target.value as IndustryId | "")}
+          >
+            <option value="">選択しない</option>
+            {desiredIndustryOptions.map((ind) => (
+              <option key={ind.id} value={ind.id}>
+                {ind.labelJa}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs font-medium text-slate-700">
+            志望業界 3 <span className="text-slate-400">(任意)</span>
+          </label>
+          <select
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-0 focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+            value={industry3}
+            onChange={(e) => setIndustry3(e.target.value as IndustryId | "")}
+          >
+            <option value="">選択しない</option>
+            {desiredIndustryOptions.map((ind) => (
+              <option key={ind.id} value={ind.id}>
+                {ind.labelJa}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* 志望理由・ガクチカ */}
+      <div className="mt-5 grid gap-4 md:grid-cols-2">
+        <div className="space-y-1">
+          <label className="text-xs font-medium text-slate-700">
             志望理由（ざっくりでOK）
           </label>
           <textarea
-            className="min-h-[80px] w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 shadow-sm focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-200"
-            placeholder="例）IBで大きなお金が動く現場を見たい／事業会社のM&Aに関わりたい など"
+            className="min-h-[96px] w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-0 focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+            placeholder="例）IBで大きなお金が動く現場を見たい / 事業会社のM&Aに関わりたい など"
             value={userReason}
             onChange={(e) => setUserReason(e.target.value)}
           />
         </div>
-
-        {/* ガクチカ・経験 */}
         <div className="space-y-1">
-          <label className="text-[11px] font-medium text-slate-600">
+          <label className="text-xs font-medium text-slate-700">
             ガクチカ・これまでの経験（任意）
           </label>
           <textarea
-            className="min-h-[80px] w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 shadow-sm focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-200"
-            placeholder="例）長期インターン／サークル運営／ゼミでの活動 など、簡単に箇条書きでもOK"
-            value={userExperience}
-            onChange={(e) => setUserExperience(e.target.value)}
+            className="min-h-[96px] w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-0 focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+            placeholder="例）長期インターン / サークル運営 / ボランティア など、簡単に箇条書きでもOK"
+            value={userExperienceSummary}
+            onChange={(e) => setUserExperienceSummary(e.target.value)}
           />
         </div>
+      </div>
 
-        {error && (
-          <p className="text-[11px] text-rose-600">
-            {error}
+      {/* ボタン群 */}
+      <div className="mt-5 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={disabledSubmit}
+            onClick={() => handleSubmit("basic")}
+            className="inline-flex items-center justify-center rounded-full bg-slate-900 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-slate-800 disabled:opacity-60"
+          >
+            {loadingMode === "basic"
+              ? "ライト版を生成中…"
+              : "ライト版でマッチ・ギャップを見る"}
+          </button>
+
+          <button
+            type="button"
+            disabled={disabledSubmit}
+            onClick={() => handleSubmit("deep")}
+            className="inline-flex items-center justify-center rounded-full bg-sky-600 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-sky-700 disabled:opacity-60"
+          >
+            {loadingMode === "deep"
+              ? "Deepレポート生成中…"
+              : "Deepレポート（有料機能）を出す"}
+          </button>
+        </div>
+
+        {lastMode && resultMarkdown && (
+          <p className="text-[11px] text-slate-500">
+            表示中のレポート：{" "}
+            <span className="font-semibold text-slate-800">
+              {lastMode === "basic" ? "ライト版" : "Deep版"}
+            </span>
           </p>
         )}
+      </div>
 
-        <div className="flex flex-wrap items-center gap-3 border-t border-sky-100 pt-3">
-          <button
-            type="submit"
-            disabled={loading}
-            className="inline-flex items-center gap-1 rounded-full bg-sky-500 px-4 py-1.5 text-[11px] font-medium text-white shadow-sm shadow-sky-200 hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {loading ? "分析中…" : "志望業界とのマッチ・ギャップを見る"}
-          </button>
-          <p className="text-[10px] text-slate-500">
-            ※ β版なので、内容はあくまで「作戦会議のたたき台」として使ってください。
-          </p>
+      {/* エラー & 課金導線 */}
+      {error && (
+        <div className="mt-4 rounded-2xl border border-rose-100 bg-rose-50/70 px-3 py-2 text-xs text-rose-700">
+          <p>{error}</p>
+          {needsUpgrade && (
+            <p className="mt-1">
+              <a
+                href="/pricing"
+                className="font-semibold text-rose-700 underline underline-offset-2"
+              >
+                プランを見る
+              </a>
+              <span className="mx-1 text-rose-400">/</span>
+              <a
+                href="/pricing#meta"
+                className="font-semibold text-rose-700 underline underline-offset-2"
+              >
+                Metaコインをチャージする
+              </a>
+            </p>
+          )}
         </div>
-      </form>
+      )}
 
-      {result && <CareerGapResult markdown={result} />}
+      {/* 結果表示エリア */}
+      {resultMarkdown && (
+        <div className="mt-6">
+          <CareerGapResult markdown={resultMarkdown} />
+        </div>
+      )}
     </section>
   );
 };

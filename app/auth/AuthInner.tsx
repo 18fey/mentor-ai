@@ -4,13 +4,19 @@
 import { useState, useEffect, FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import { createBrowserClient } from "@supabase/ssr";
 
 type AuthTab = "login" | "signup";
 
 // 本番URL（env があればそっち優先）
 const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL || "https://mentor-ai-2rw9.vercel.app";
+
+// クライアント用 Supabase インスタンス
+const supabase = createBrowserClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
 
 export function AuthInner() {
   const searchParams = useSearchParams();
@@ -28,7 +34,6 @@ export function AuthInner() {
   const [showPrivacy, setShowPrivacy] = useState(false);
 
   const router = useRouter();
-  const supabase = createClientComponentClient();
 
   // ✅ URLクエリから Supabase 認証エラーを拾う（otp_expired など）
   useEffect(() => {
@@ -261,7 +266,7 @@ export function AuthInner() {
         />
       )}
 
-      {/* プライバシーポリシーモーダル */}
+      {/* プライバシーポリシー・モーダル */}
       {showPrivacy && (
         <LegalModal
           title="プライバシーポリシー"
@@ -503,11 +508,15 @@ function LegalModal({
   );
 }
 
+// ここは元ファイルにあった定数をそのまま使ってね（長文なので省略していた場合は元のを残してOK）
+
+
+
 
 
 
 // ここに送ってくれた原稿をそのままプレーンテキストで入れているよ
-const TERMS_TEXT = `
+declare const TERMS_TEXT:string;`
 Mentor.AI 利用規約
 
 本利用規約（以下「本規約」といいます）は、Mentor.AI（以下「当社」といいます）が提供する AI 診断・面接支援サービス（以下「本サービス」といいます）の利用条件を定めるものです。個人ユーザー、企業ユーザー、OEM パートナー、API 利用者その他本サービスを利用するすべての者（以下「ユーザー」といいます）は、本規約に同意したうえで本サービスを利用するものとします。
@@ -590,7 +599,7 @@ Mentor.AI 利用規約
 日本法を準拠法とし、東京都を管轄する裁判所を第一審の専属管轄裁判所とします。
 `;
 
-const PRIVACY_TEXT = `
+declare const PRIVACY_TEXT: string; `
 Mentor.AI プライバシーポリシー
 
 制定日：2025年11月25日

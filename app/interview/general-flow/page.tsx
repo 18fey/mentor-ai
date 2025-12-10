@@ -1,9 +1,9 @@
 // app/interview/general-flow/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import { createBrowserClient } from "@supabase/ssr";
 
 type Database = any;
 
@@ -11,7 +11,16 @@ type Message = { role: "ai" | "user"; content: string };
 
 export default function GeneralFlowPage() {
   const router = useRouter();
-  const supabase = createClientComponentClient<Database>();
+
+  // ✅ 新SDK：createBrowserClient をそのまま使用
+  const supabase = useMemo(
+    () =>
+      createBrowserClient<Database>(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      ),
+    []
+  );
 
   const [userId, setUserId] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);

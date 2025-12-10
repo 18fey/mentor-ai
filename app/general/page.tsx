@@ -5,10 +5,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { StatCard } from "@/components/StatCard";
 import { InterviewRecorder } from "@/components/InterviewRecorder";
 import { useRouter } from "next/navigation";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import { createBrowserClient } from "@supabase/ssr";
 import type { TopicType } from "@/lib/types/story";
-
-type Database = any;
 
 type QA = { question: string; answer: string };
 
@@ -54,7 +52,7 @@ const TOPIC_LABEL: Record<TopicType, string> = {
   self_pr: "自己PR",
   why_company: "志望動機（企業）",
   why_industry: "志望動機（業界）",
-  general: ""
+  general: "",
 };
 
 type Step = "idle" | "asking" | "thinking" | "evaluating" | "finished";
@@ -119,15 +117,32 @@ function buildQuestions(profile: Profile | null): string[] {
 
 export default function InterviewPage() {
   const router = useRouter();
-  const supabase = createClientComponentClient<Database>();
+
+  // ✅ 新SDK：createBrowserClient をそのまま使用
+  const supabase = useMemo(
+    () =>
+      createBrowserClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      ),
+    []
+  );
 
   const [userId, setUserId] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
 
   // 上部カード（※ここは将来 /api/score-dashboard に差し替え可）
   const stats = [
-    { label: "模擬面接回数", value: "—", helper: "これまでのセッション数（あなた専用）" },
-    { label: "平均評価", value: "—", helper: "5点満点の平均レビュー（あなた専用）" },
+    {
+      label: "模擬面接回数",
+      value: "—",
+      helper: "これまでのセッション数（あなた専用）",
+    },
+    {
+      label: "平均評価",
+      value: "—",
+      helper: "5点満点の平均レビュー（あなた専用）",
+    },
     {
       label: "累計練習時間",
       value: "—",
@@ -342,11 +357,11 @@ export default function InterviewPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId,         // ログインユーザーごとに保存
-          personaId,      // どの面接官人格で聞いたか
+          userId, // ログインユーザーごとに保存
+          personaId, // どの面接官人格で聞いたか
           qaList,
           profile,
-          topicType,      // ★ このセッションをどのタブのカードとして保存するか
+          topicType, // ★ このセッションをどのタブのカードとして保存するか
         }),
       });
 

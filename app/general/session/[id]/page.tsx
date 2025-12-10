@@ -1,16 +1,23 @@
-// app/session/[id]/page.tsx など
+// app/session/[id]/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
-
-type Database = any;
+import { createBrowserClient } from "@supabase/ssr";
 
 export default function SessionPage() {
   const { id: sessionId } = useParams();
   const router = useRouter();
-  const supabase = createClientComponentClient<Database>();
+
+  // ✅ 新SDK：createBrowserClient をそのまま使用
+  const supabase = useMemo(
+    () =>
+      createBrowserClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      ),
+    []
+  );
 
   const [userId, setUserId] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);

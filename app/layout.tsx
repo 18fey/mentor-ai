@@ -6,6 +6,7 @@ import Sidebar from "../components/Sidebar";
 import BetaFeedbackBox from "../components/BetaFeedbackBox";
 import { Footer } from "../components/Footer";
 import { AppHeader } from "../components/AppHeader";
+import { MobileNav } from "../components/MobileNav"; // ← 追加！
 
 export const metadata: Metadata = {
   title: "Mentor.AI",
@@ -19,14 +20,14 @@ export default function RootLayout({
 }) {
   return (
     <html lang="ja">
-      <body className="min-h-screen bg-gradient-to-br from-white via-[#F0F7FD] to-white">
-        {/* 🔹GMO向け：運営者情報バー（全ページ共通で上部に出す） */}
+      <body className="min-h-[100dvh] bg-gradient-to-br from-white via-[#F0F7FD] to-white">
+        {/* 🔹運営者情報バー */}
         <div className="w-full border-b bg-white/90 py-2 text-center text-[11px] text-slate-600">
           運営：渡邉 花鈴（屋号：Mentor.AI）｜所在地：〒104-0061 東京都中央区銀座一丁目22番11号 銀座大竹ビジデンス 2F｜
           お問い合わせ：support@mentor-ai.net
         </div>
 
-        {/* 背景のブラーグラデーション */}
+        {/* 背景のブラーグラデーション（元のまま） */}
         <div className="pointer-events-none fixed inset-0 opacity-15">
           <div
             className="absolute left-1/4 top-0 h-96 w-96 rounded-full blur-3xl mix-blend-multiply animate-blob"
@@ -42,23 +43,30 @@ export default function RootLayout({
           />
         </div>
 
-        {/* メインレイアウト（コンテンツ＋フッター） */}
-        <div className="relative z-10 flex min-h-screen flex-col">
-          {/* サイドバー＋ページ本体 */}
+        {/* メインレイアウト */}
+        <div className="relative z-10 flex min-h-[100dvh] flex-col">
           <div className="flex flex-1">
-            <Sidebar />
+            {/* 🖥 PC/タブレット以上だけ Sidebar を表示 */}
+            <aside className="hidden md:block">
+              <Sidebar />
+            </aside>
+
             {/* 右側：ヘッダー + コンテンツ */}
-            <div className="flex min-h-screen flex-1 flex-col">
+            <div className="flex min-h-[100dvh] flex-1 flex-col">
               <AppHeader />
-              <main className="flex-1 p-8 lg:p-12 xl:p-16">{children}</main>
+              {/* 📱 モバイルでは下タブ分の余白(padding-bottom)を確保 */}
+              <main className="flex-1 p-4 pb-20 md:p-8 md:pb-8 lg:p-12 xl:p-16">
+                {children}
+              </main>
             </div>
           </div>
 
-          {/* 共通フッター */}
           <Footer />
         </div>
 
-        {/* β版フィードバックボックス（画面右下固定） */}
+        {/* 📱 iPhone / モバイル専用の下ナビ */}
+        <MobileNav />
+
         <BetaFeedbackBox />
       </body>
     </html>

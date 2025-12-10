@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useState, useMemo, useEffect } from "react";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import { createBrowserClient } from "@supabase/ssr";
 import type { TopicType } from "@/lib/types/story";
 
 type ChatMessage = {
@@ -35,15 +35,19 @@ const TOPIC_LABEL: Record<TopicType, string> = {
   self_pr: "自己PR",
   why_company: "志望動機（企業）",
   why_industry: "志望動機（業界）",
-  general: ""
+  general: "",
 };
 
 const INITIAL_QUESTION: Record<TopicType, string> = {
-  gakuchika: "学生時代に『一番時間とエネルギーをかけた経験』を、まずはざっくり1〜2行で教えてください。",
-  self_pr: "あなたが『自分の強み』だと思うものを、エピソードに関係なく素直な言葉で教えてください。",
-  why_company: "その企業（または第1志望企業）に惹かれている理由を、思いつくままに3つほど挙げてください。",
-  why_industry: "その業界を志望している理由を、最初に思いつくままに教えてください。",
-  general: ""
+  gakuchika:
+    "学生時代に『一番時間とエネルギーをかけた経験』を、まずはざっくり1〜2行で教えてください。",
+  self_pr:
+    "あなたが『自分の強み』だと思うものを、エピソードに関係なく素直な言葉で教えてください。",
+  why_company:
+    "その企業（または第1志望企業）に惹かれている理由を、思いつくままに3つほど挙げてください。",
+  why_industry:
+    "その業界を志望している理由を、最初に思いつくままに教えてください。",
+  general: "",
 };
 
 const FOLLOW_UP_QUESTIONS = [
@@ -65,8 +69,18 @@ const DEEP_DIVE_QUESTIONS: string[] = [
   "他のガクチカ / 自己PRエピソードと比べて、この経験ならではのユニークさは何ですか？",
 ];
 
+/* -------------------------------
+   v8 Supabase Client（Component用）
+-------------------------------- */
+function createClientSupabase() {
+  return createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
+
 export const GeneralInterviewAI: React.FC = () => {
-  const supabase = createClientComponentClient();
+  const supabase = createClientSupabase();
 
   const [authLoading, setAuthLoading] = useState(true);
   const [userId, setUserId] = useState<string | null>(null);
@@ -89,7 +103,7 @@ export const GeneralInterviewAI: React.FC = () => {
   const [isSensitive, setIsSensitive] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
 
-  // -------- 認証ユーザー取得（B仕様の心臓部）--------
+  // -------- 認証ユーザー取得 --------
   useEffect(() => {
     const fetchUser = async () => {
       setAuthLoading(true);
@@ -205,7 +219,9 @@ export const GeneralInterviewAI: React.FC = () => {
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         console.error("session/start error", res.status, body);
-        setStartError("セッションの作成に失敗しました。時間をおいて再度お試しください。");
+        setStartError(
+          "セッションの作成に失敗しました。時間をおいて再度お試しください。"
+        );
         return;
       }
 
@@ -251,7 +267,9 @@ export const GeneralInterviewAI: React.FC = () => {
       setFixedCard(null);
     } catch (e) {
       console.error(e);
-      setStartError("ネットワークエラーにより、セッションを開始できませんでした。");
+      setStartError(
+        "ネットワークエラーにより、セッションを開始できませんでした。"
+      );
     }
   };
 
