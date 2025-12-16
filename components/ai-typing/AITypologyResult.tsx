@@ -3,11 +3,12 @@
 
 import { useEffect, useRef } from "react";
 import { createBrowserClient } from "@supabase/ssr";
+import { useRouter } from "next/navigation";
 import { AITypeKey, aiTypologyTypes } from "@/lib/aiTypologyData";
 
 type Props = {
   resultKey: AITypeKey;
-  onGoDashboard: () => void;
+  onGoDashboard?: () => void; // ← 任意に変更
   onRetake: () => void;
 };
 
@@ -24,6 +25,9 @@ export function AITypologyResult({
   onRetake,
 }: Props) {
   const t = aiTypologyTypes[resultKey];
+
+  // Router
+  const router = useRouter();
 
   // Supabase クライアント
   const supabase = createClientSupabase();
@@ -74,6 +78,15 @@ export function AITypologyResult({
     void saveResult();
   }, [resultKey, supabase]);
 
+  const handleGoDashboard = () => {
+    // 親に何かさせたい場合はここで
+    if (onGoDashboard) {
+      onGoDashboard();
+    }
+    // /start に遷移
+    router.push("/start");
+  };
+
   return (
     <div className="w-full max-w-3xl rounded-3xl border border-white/40 bg-white/80 p-8 shadow-[0_18px_45px_rgba(15,23,42,0.12)] backdrop-blur-[30px]">
       <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.25em] text-sky-500">
@@ -101,7 +114,7 @@ export function AITypologyResult({
       <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <button
           type="button"
-          onClick={onGoDashboard}
+          onClick={handleGoDashboard}
           className="inline-flex items-center justify-center rounded-full bg-sky-500 px-6 py-2 text-xs font-semibold text-white shadow-sm hover:bg-sky-600"
         >
           あなた専用のダッシュボードを開く →

@@ -1,18 +1,45 @@
 // app/api/es/correct/route.ts
 import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
 import { getUserPlan } from "@/lib/plan";
 import { supabaseServer } from "@/lib/supabase-server";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
 
 type Plan = "free" | "beta" | "pro";
 
 type EsFeedback = {
-  summary: string;        // 全体の要約コメント
-  strengths: string[];    // 良い点
-  improvements: string[]; // 改善ポイント
-  sampleRewrite: string;  // 書き直し例（Pro用）
+  summary: string;
+  strengths: string[];
+  improvements: string[];
+  sampleRewrite: string;
 };
+
+async function createSupabaseFromCookies() {
+  const cookieStore = await cookies();
+
+  return createServerClient<any>(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value;
+        },
+        set(name: string, value: string, options: any) {
+          cookieStore.set({ name, value, ...options });
+        },
+        remove(name: string, options: any) {
+          cookieStore.set({ name, value: "", ...options });
+        },
+      },
+    }
+  );
+}
 
 // OpenAI で ES 添削してもらう関数
 async function callOpenAIForES(input: {
@@ -45,12 +72,9 @@ async function callOpenAIForES(input: {
   "improvements": ["改善ポイント1", "改善ポイント2", "改善ポイント3"],
   "sampleRewrite": "400〜600字程度の書き直し例（同じ内容だが表現と構成を整えたもの）"
 }
-        `.trim(),
+          `.trim(),
         },
-        {
-          role: "user",
-          content: JSON.stringify(input, null, 2),
-        },
+        { role: "user", content: JSON.stringify(input, null, 2) },
       ],
     }),
   });
@@ -69,28 +93,32 @@ async function callOpenAIForES(input: {
     throw new Error("ES添削AIのレスポンスが不正です。");
   }
 
-  const parsed = JSON.parse(text);
+  let parsed: any = {};
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    console.error("ES correct JSON.parse failed:", text);
+    throw new Error("ES添削AIのJSON解析に失敗しました。");
+  }
 
-  const feedback: EsFeedback = {
+  return {
     summary: parsed.summary ?? "",
     strengths: Array.isArray(parsed.strengths) ? parsed.strengths : [],
     improvements: Array.isArray(parsed.improvements) ? parsed.improvements : [],
     sampleRewrite: parsed.sampleRewrite ?? "",
   };
-
-  return feedback;
 }
 
-// プロファイル→profile_id を取る（es_corrections 用）
-async function getProfileByAuthUserId(userId: string) {
+// profiles から profile_id を取る（FK用）
+async function getProfileByAuthUserId(authUserId: string) {
   const { data, error } = await supabaseServer
-    .from("users_profile")
+    .from("profiles")
     .select("id, plan")
-    .eq("auth_user_id", userId)
+    .eq("auth_user_id", authUserId)
     .maybeSingle();
 
   if (error || !data) {
-    console.error("users_profile not found:", error);
+    console.error("profiles not found:", error);
     throw new Error("ユーザープロファイルが見つかりません。");
   }
 
@@ -99,30 +127,40 @@ async function getProfileByAuthUserId(userId: string) {
 
 export async function POST(req: NextRequest) {
   try {
-    const { userId, esText, company, questionType, storyCardId } =
-      await req.json();
+    // 0) auth 確定（cookie session）
+    const supabase = await createSupabaseFromCookies();
+    const { data: auth, error: authErr } = await supabase.auth.getUser();
+    const user = auth?.user ?? null;
 
-    if (!userId || !esText) {
+    if (authErr || !user?.id) {
       return NextResponse.json(
-        { error: "invalid_request", message: "userId と esText は必須です。" },
+        { error: "unauthorized", message: "ログインが必要です。" },
+        { status: 401 }
+      );
+    }
+
+    const authUserId = user.id;
+
+    // 1) body（userIdは受け取らない）
+    const { esText, company, questionType, storyCardId } = await req.json();
+
+    if (!esText) {
+      return NextResponse.json(
+        { error: "invalid_request", message: "esText は必須です。" },
         { status: 400 }
       );
     }
 
-    // 1. プラン取得（free / beta / pro）
-    const plan = (await getUserPlan(userId)) as Plan;
+    // 2) プラン取得（free/beta/pro）
+    const plan = (await getUserPlan(authUserId)) as Plan;
 
-    // 2. profile_id を取得（es_corrections のFK用）
-    const profile = await getProfileByAuthUserId(userId);
+    // 3) profile 取得（FK用）
+    const profile = await getProfileByAuthUserId(authUserId);
 
-    // 3. OpenAI でフルフィードバック生成
-    const full: EsFeedback = await callOpenAIForES({
-      esText,
-      company,
-      questionType,
-    });
+    // 4) OpenAI
+    const full = await callOpenAIForES({ esText, company, questionType });
 
-    // 4. Supabase に履歴を保存（既存テーブル）
+    // 5) es_corrections 保存
     const { error: insertError } = await supabaseServer
       .from("es_corrections")
       .insert({
@@ -131,7 +169,7 @@ export async function POST(req: NextRequest) {
         company_name: company ?? null,
         question: questionType ?? null,
         original_text: esText,
-        ai_feedback: full, // JSONB でそのまま保存
+        ai_feedback: full,
         ai_rewrite: plan === "pro" ? full.sampleRewrite : null,
       });
 
@@ -139,50 +177,40 @@ export async function POST(req: NextRequest) {
       console.error("es_corrections insert error:", insertError);
     }
 
-    // 5. 新：es_logs / growth_logs にも保存（失敗してもレスポンスには影響させない）
+    // 6) es_logs / growth_logs（失敗しても表は返す）
     try {
-      // es_logs
-      const { error: esLogError } = await supabaseServer
-        .from("es_logs")
-        .insert({
-          user_id: userId,
-          company_name: company ?? null,
-          es_question: questionType ?? null,
-          es_before: esText,
-          es_after: plan === "pro" ? full.sampleRewrite : null,
-          mode: plan === "pro" ? "pro_correct" : "lite_correct",
-          score: null,
-        });
+      const { error: esLogError } = await supabaseServer.from("es_logs").insert({
+        profile_id: profile.id,
+        company_name: company ?? null,
+        es_question: questionType ?? null,
+        es_before: esText,
+        es_after: plan === "pro" ? full.sampleRewrite : null,
+        mode: plan === "pro" ? "pro_correct" : "lite_correct",
+        score: null,
+      });
+      if (esLogError) console.error("es_logs insert error:", esLogError);
 
-      if (esLogError) {
-        console.error("es_logs insert error:", esLogError);
-      }
-
-      // growth_logs
       const titleBase = company ? `ES添削：${company}` : "ES添削";
-      const title =
-        plan === "pro" ? `${titleBase} [PRO]` : `${titleBase} [Lite]`;
-
+      const title = plan === "pro" ? `${titleBase} [PRO]` : `${titleBase} [Lite]`;
       const description =
         plan === "pro"
           ? "PROプランとしてES添削（改善案＆書き換え例）を生成しました。"
           : "ES添削の一部フィードバックを生成しました。（詳細はPRO限定）";
 
-      const { error: growthError } = await supabaseServer
-        .from("growth_logs")
-        .insert({
-          user_id: userId,
-          source: "es",
-          title,
-          description,
-          metadata: {
-            mode: plan,
-            locked: plan !== "pro",
-            company: company ?? null,
-            questionType: questionType ?? null,
-            story_card_id: storyCardId ?? null,
-          },
-        });
+      // ※ growth_logs の user_id が auth user id 前提でOK
+      const { error: growthError } = await supabaseServer.from("growth_logs").insert({
+        user_id: authUserId,
+        source: "es",
+        title,
+        description,
+        metadata: {
+          mode: plan,
+          locked: plan !== "pro",
+          company: company ?? null,
+          questionType: questionType ?? null,
+          story_card_id: storyCardId ?? null,
+        },
+      });
 
       if (growthError) {
         console.error("growth_logs insert error (es_correct):", growthError);
@@ -191,33 +219,25 @@ export async function POST(req: NextRequest) {
       console.error("es_logs / growth_logs logging error:", logErr);
     }
 
-    // 6. レスポンスをプラン別に出し分け
-
+    // 7) plan別レスポンス
     if (plan === "pro") {
-      // PROはフルで返す
-      return NextResponse.json({
-        plan,
-        locked: false,
-        feedback: full,
-      });
+      return NextResponse.json({ plan, locked: false, feedback: full });
     }
 
-    // FREE/BETA：一部だけ見せる & アップセル
     const partial: EsFeedback = {
       summary: full.summary,
-      strengths: full.strengths.slice(0, 1), // 最初の1個だけ表示
-      improvements: [], // 改善案は非表示
+      strengths: full.strengths.slice(0, 1),
+      improvements: [],
       sampleRewrite:
-        full.sampleRewrite?.slice(0, 80) +
-        (full.sampleRewrite && full.sampleRewrite.length > 80 ? "…" : ""),
+        (full.sampleRewrite ?? "").slice(0, 80) +
+        ((full.sampleRewrite ?? "").length > 80 ? "…" : ""),
     };
 
     return NextResponse.json({
       plan,
       locked: true,
       feedback: partial,
-      message:
-        "ES添削の詳細な改善案・書き換え例は PRO プラン限定です。続きは PRO でご覧いただけます。",
+      message: "ES添削の詳細な改善案・書き換え例は PRO プラン限定です。続きは PRO でご覧いただけます。",
     });
   } catch (e) {
     console.error("[/api/es/correct] server_error:", e);

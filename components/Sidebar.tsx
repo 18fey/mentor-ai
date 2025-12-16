@@ -34,7 +34,6 @@ const sections: MenuSection[] = [
       { label: "一般面接AI（模擬）", path: "/general" },
       { label: "ES添削AI", path: "/es" },
       { label: "業界インサイト", path: "/industry" },
-      { label: "スコアダッシュボード", path: "/score" },
     ],
   },
   {

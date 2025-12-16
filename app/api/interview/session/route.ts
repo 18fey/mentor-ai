@@ -1,8 +1,34 @@
 // app/api/interview/session/route.ts
 import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+
+async function createSupabaseFromCookies() {
+  const cookieStore = await cookies();
+  return createServerClient<any>(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value;
+        },
+        set(name: string, value: string, options: any) {
+          cookieStore.set({ name, value, ...options });
+        },
+        remove(name: string, options: any) {
+          cookieStore.set({ name, value: "", ...options });
+        },
+      },
+    }
+  );
+}
 
 async function supabaseFetch(path: string, init: RequestInit = {}) {
   const url = `${SUPABASE_URL}/rest/v1/${path}`;
@@ -24,17 +50,31 @@ async function supabaseFetch(path: string, init: RequestInit = {}) {
 
 export async function POST(req: NextRequest) {
   try {
-    const { userId, topic } = await req.json();
+    // auth 確定
+    const supabase = await createSupabaseFromCookies();
+    const { data: auth, error: authErr } = await supabase.auth.getUser();
+    const user = auth?.user ?? null;
 
-    if (!userId || !topic) {
+    if (authErr || !user?.id) {
       return NextResponse.json(
-        { error: "userId and topic are required" },
+        { error: "unauthorized" },
+        { status: 401 }
+      );
+    }
+
+    const authUserId = user.id;
+
+    const { topic } = await req.json();
+
+    if (!topic) {
+      return NextResponse.json(
+        { error: "topic is required" },
         { status: 400 }
       );
     }
 
     const row = {
-      user_id: userId,
+      user_id: authUserId,
       topic,
     };
 
@@ -50,9 +90,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ session });
   } catch (e) {
     console.error(e);
-    return NextResponse.json(
-      { error: "session_create_failed" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "session_create_failed" }, { status: 500 });
   }
 }

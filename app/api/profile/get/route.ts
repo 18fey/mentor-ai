@@ -7,7 +7,7 @@ import { supabaseServer } from "@/lib/supabase-server";
  *
  * B. 完全プロダクト仕様：
  * ・userId には Supabase auth.user.id を渡す
- * ・users_profile.auth_user_id 単位でプロファイルを取得
+ * ・profiles 単位でプロファイルを取得
  */
 export async function GET(req: NextRequest) {
   try {
@@ -24,7 +24,7 @@ export async function GET(req: NextRequest) {
 
     // auth_user_id ベースで検索（完全個別化）
     const { data, error } = await supabaseServer
-      .from("users_profile")
+      .from("profiles")
       .select("*")
       .eq("auth_user_id", userId)
       .maybeSingle();

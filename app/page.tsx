@@ -135,7 +135,7 @@ export default function HomePage() {
           },
           {
             id: 2,
-            title: "AI思考タイプ診断（ライト版）",
+            title: "AI思考タイプ診断",
             description:
               "直感アンケート10問で、あなたの「AIとの付き合い方」と思考スタイルを16タイプにマッピングします（オンボーディングで実施した診断をいつでも見直せます）。",
             href: "/onboarding/ai-typing",

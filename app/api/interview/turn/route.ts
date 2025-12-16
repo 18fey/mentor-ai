@@ -1,5 +1,34 @@
 // app/api/interview/turn/route.ts
 import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+// =======================
+// Auth (cookie session)
+// =======================
+async function createSupabaseFromCookies() {
+  const cookieStore = await cookies();
+  return createServerClient<any>(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value;
+        },
+        set(name: string, value: string, options: any) {
+          cookieStore.set({ name, value, ...options });
+        },
+        remove(name: string, options: any) {
+          cookieStore.set({ name, value: "", ...options });
+        },
+      },
+    }
+  );
+}
 
 // =======================
 // Supabase REST ヘルパー
@@ -32,10 +61,7 @@ async function supabaseFetch(path: string, init: RequestInit) {
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 
-async function callOpenAiJson(params: {
-  systemPrompt: string;
-  userPrompt: string;
-}) {
+async function callOpenAiJson(params: { systemPrompt: string; userPrompt: string }) {
   const res = await fetch(OPENAI_RESPONSES_URL, {
     method: "POST",
     headers: {
@@ -43,7 +69,7 @@ async function callOpenAiJson(params: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model:"gpt-4.1-mini",
+      model: "gpt-4.1-mini",
       input: [
         { role: "system", content: params.systemPrompt },
         { role: "user", content: params.userPrompt },
@@ -59,88 +85,72 @@ async function callOpenAiJson(params: {
   }
 
   const data = await res.json();
-
-  // Responses API の JSON 形式:
-  // data.output[0].content[0].text にモデルの返答が入る
   const raw = (data.output?.[0]?.content?.[0]?.text ?? "{}") as string;
 
-  let parsed: any;
+  let parsed: any = {};
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
     console.error("Failed to parse OpenAI JSON:", raw);
-    parsed = {};
   }
-
   return parsed;
 }
 
-// =======================
-// メインハンドラ
-// =======================
-
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    // auth
+    const supabase = await createSupabaseFromCookies();
+    const { data: auth, error: authErr } = await supabase.auth.getUser();
+    const user = auth?.user ?? null;
 
-    const {
-      sessionId,
-      userAnswer, // string | null
-      depthLevel = 0,
-    } = body;
+    if (authErr || !user?.id) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
+    const authUserId = user.id;
+
+    const body = await req.json();
+    const { sessionId, userAnswer, depthLevel = 0 } = body;
 
     if (!sessionId) {
-      return NextResponse.json(
-        { error: "sessionId is required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "sessionId is required" }, { status: 400 });
     }
 
-    // 1. セッション情報取得
+    // 1) セッション取得
     const sessionRes = await supabaseFetch(
-      `interview_sessions?select=*&id=eq.${encodeURIComponent(
-        sessionId
-      )}&limit=1`,
+      `interview_sessions?select=*&id=eq.${encodeURIComponent(sessionId)}&limit=1`,
       { method: "GET" }
     );
     const sessionRows = await sessionRes.json();
     const session = sessionRows[0] ?? null;
 
     if (!session) {
-      return NextResponse.json(
-        { error: "session not found" },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: "session not found" }, { status: 404 });
     }
 
-    // 2. 既存のターン取得
+    // ✅ 追加：セッション所有者チェック
+    if (session.user_id !== authUserId) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    }
+
+    // 2) 既存ターン取得
     const turnsRes = await supabaseFetch(
-      `interview_turns?select=*&session_id=eq.${encodeURIComponent(
-        sessionId
-      )}&order=created_at.asc`,
+      `interview_turns?select=*&session_id=eq.${encodeURIComponent(sessionId)}&order=created_at.asc`,
       { method: "GET" }
     );
     const turns: any[] = await turnsRes.json();
 
-    // 3. 今回のユーザー回答を保存
+    // 3) 今回のユーザー回答保存
     if (userAnswer) {
       await supabaseFetch("interview_turns", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify([
-          {
-            session_id: sessionId,
-            role: "user",
-            content: userAnswer,
-            depth_level: depthLevel ?? 0,
-          },
+          { session_id: sessionId, role: "user", content: userAnswer, depth_level: depthLevel ?? 0 },
         ]),
       });
     }
 
-    // 4. OpenAI に渡すログを組み立て
+    // 4) OpenAI 用ログ
     const historyText =
       (turns || [])
         .map((t) => `${t.role === "ai" ? "Q" : "A"}: ${t.content}`)
@@ -168,23 +178,18 @@ ${session.topic ?? "一般質問"}
 ${historyText || "まだ何もありません。アイスブレイクから始めてください。"}
 `.trim();
 
-    // 5. OpenAI から次の質問を取得
     const parsed = await callOpenAiJson({ systemPrompt, userPrompt });
 
-    const question: string =
+    const question =
       typeof parsed.question === "string" && parsed.question.length > 0
         ? parsed.question
         : "この経験について、もう少し具体的に教えてください。";
 
-    const depth_level: number =
-      typeof parsed.depth_level === "number" ? parsed.depth_level : 0;
-
+    const depth_level = typeof parsed.depth_level === "number" ? parsed.depth_level : 0;
     const tags: string[] = Array.isArray(parsed.tags) ? parsed.tags : [];
+    const helper_hint: string | null = typeof parsed.helper_hint === "string" ? parsed.helper_hint : null;
 
-    const helper_hint: string | null =
-      typeof parsed.helper_hint === "string" ? parsed.helper_hint : null;
-
-    // 6. AI の質問を interview_turns に保存
+    // 5) AI 質問保存
     const aiInsertRes = await supabaseFetch("interview_turns", {
       method: "POST",
       headers: {
@@ -192,28 +197,16 @@ ${historyText || "まだ何もありません。アイスブレイクから始�
         Prefer: "return=representation",
       },
       body: JSON.stringify([
-        {
-          session_id: sessionId,
-          role: "ai",
-          content: question,
-          depth_level,
-          tags,
-        },
+        { session_id: sessionId, role: "ai", content: question, depth_level, tags },
       ]),
     });
 
     const inserted = await aiInsertRes.json();
     const aiTurn = Array.isArray(inserted) ? inserted[0] : inserted;
 
-    return NextResponse.json({
-      aiTurn,
-      helperHint: helper_hint,
-    });
+    return NextResponse.json({ aiTurn, helperHint: helper_hint });
   } catch (e) {
     console.error(e);
-    return NextResponse.json(
-      { error: "interview_turn_failed" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "interview_turn_failed" }, { status: 500 });
   }
 }

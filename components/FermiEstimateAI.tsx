@@ -57,62 +57,7 @@ type FermiProblem = {
   unit: string;
 };
 
-/* -------------------------------
-   ローカル問題バンク（無限生成デモ）
--------------------------------- */
-const FERMI_PROBLEM_BANK: FermiProblem[] = [
-  {
-    id: "jp-cafe-market",
-    category: "business",
-    difficulty: "medium",
-    title: "日本のカフェ市場規模（年間売上）",
-    formulaHint: "人口 × 利用割合 × 年間利用回数 × 平均客単価",
-    defaultFactors: ["人口", "カフェ利用割合", "年間利用回数", "平均客単価"],
-    unit: "円 / 年",
-  },
-  {
-    id: "tokyo-taxi",
-    category: "consulting",
-    difficulty: "medium",
-    title: "東京都内を走っているタクシーの台数",
-    formulaHint: "人口 × タクシー利用割合 × 1台あたりの処理人数",
-    defaultFactors: [
-      "都内人口",
-      "タクシー利用割合",
-      "1台あたり1日の利用人数",
-      "稼働日数",
-    ],
-    unit: "台",
-  },
-  {
-    id: "daily-coffee",
-    category: "daily",
-    difficulty: "easy",
-    title: "日本人1人あたり1年間で飲むコーヒーの杯数",
-    formulaHint: "人口 × コーヒー飲む人の割合 × 1日の杯数 × 日数",
-    defaultFactors: [
-      "人口",
-      "コーヒー飲む人の割合",
-      "1日あたりの杯数",
-      "1年間の日数",
-    ],
-    unit: "杯 / 年",
-  },
-  {
-    id: "cinema-revenue",
-    category: "business",
-    difficulty: "hard",
-    title: "日本の映画館の年間チケット売上",
-    formulaHint: "人口 × 映画館利用割合 × 年間鑑賞回数 × 平均チケット単価",
-    defaultFactors: [
-      "人口",
-      "映画館利用割合",
-      "年間鑑賞回数",
-      "平均チケット単価",
-    ],
-    unit: "円 / 年",
-  },
-];
+type Plan = "free" | "pro" | "beta";
 
 /* -------------------------------
    メインコンポーネント
@@ -122,6 +67,10 @@ export const FermiEstimateAI: React.FC = () => {
 
   const [userId, setUserId] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+
+  // Plan / remaining
+  const [plan, setPlan] = useState<Plan>("free");
+  const [remaining, setRemaining] = useState<number | null>(null);
 
   const [question, setQuestion] = useState("");
   const [formula, setFormula] = useState("");
@@ -143,6 +92,7 @@ export const FermiEstimateAI: React.FC = () => {
     sanityCheck: 0,
   });
   const [feedback, setFeedback] = useState<FermiFeedback | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -154,19 +104,18 @@ export const FermiEstimateAI: React.FC = () => {
   useEffect(() => {
     const run = async () => {
       try {
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        setUserId(user?.id ?? null);
+        const { data } = await supabase.auth.getUser();
+        setUserId(data?.user?.id ?? null);
       } finally {
         setAuthLoading(false);
       }
     };
     run();
-  }, [supabase]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* -------------------------------
-     無限フェルミ問題生成
+     問題をUIに反映
   -------------------------------- */
   const materializeProblem = (problem: FermiProblem) => {
     setCurrentProblemId(problem.id);
@@ -197,13 +146,54 @@ export const FermiEstimateAI: React.FC = () => {
     );
   };
 
-  const generateNewProblem = () => {
-    const candidates = FERMI_PROBLEM_BANK.filter(
-      (p) => p.category === category && p.difficulty === difficulty
-    );
-    const pool = candidates.length > 0 ? candidates : FERMI_PROBLEM_BANK;
-    const random = pool[Math.floor(Math.random() * pool.length)];
-    materializeProblem(random);
+  /* -------------------------------
+     新規問題生成（本番：API）
+  -------------------------------- */
+  const generateNewProblem = async () => {
+    if (!userId) {
+      setErrorMessage("ログイン状態を確認できませんでした。再ログインしてください。");
+      return;
+    }
+
+    setIsGenerating(true);
+    setErrorMessage(null);
+
+    try {
+      const res = await fetch("/api/fermi/new", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, category, difficulty }),
+      });
+
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        if (
+          res.status === 403 &&
+          (json?.error === "limit_exceeded" || json?.error === "upgrade_required")
+        ) {
+          setUpgradeMessage(json?.message ?? "フェルミ生成の無料枠が上限に達しました。");
+          setUpgradeOpen(true);
+          return;
+        }
+        setErrorMessage(json?.message ?? "問題生成に失敗しました。");
+        return;
+      }
+
+      setPlan(json?.plan ?? "free");
+      if (typeof json?.remaining === "number") setRemaining(json.remaining);
+
+      if (json?.fermi) {
+        materializeProblem(json.fermi as FermiProblem);
+      } else {
+        setErrorMessage("生成結果が不正です（fermiがありません）");
+      }
+    } catch (e) {
+      console.error(e);
+      setErrorMessage("ネットワークエラーが発生しました。");
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   /* -------------------------------
@@ -230,33 +220,40 @@ export const FermiEstimateAI: React.FC = () => {
   };
 
   /* -------------------------------
-     計算
+     計算（× / + 対応）
   -------------------------------- */
   const handleCompute = () => {
     try {
-      const numericValues = factors.map((f) => Number(f.value || "0") || 0);
-      const product = numericValues.reduce(
-        (acc, cur) => (acc === null ? cur : acc * cur),
-        null as number | null
-      );
-      if (product === null) {
+      if (factors.length === 0) {
         setResult("");
-      } else {
-        setResult(`${product.toExponential(2)} ${unit}（概算）`);
+        return;
       }
+
+      const nums = factors.map((f) => Number(f.value || "0") || 0);
+      let acc = nums[0] ?? 0;
+
+      for (let i = 1; i < nums.length; i++) {
+        const op = factors[i]?.operator ?? "×";
+        acc = op === "+" ? acc + nums[i] : acc * nums[i];
+      }
+
+      setResult(`${acc.toExponential(2)} ${unit}（概算）`);
     } catch {
       setResult("計算エラー（入力値を確認してください）");
     }
   };
 
   /* -------------------------------
-     AI 採点（＋回数制限チェック）
+     AI 採点（本番：/api/eval/fermi）
   -------------------------------- */
   const handleEvaluate = async () => {
     if (!userId) {
-      setErrorMessage(
-        "ログイン情報を取得できませんでした。ページを再読み込みしてください。"
-      );
+      setErrorMessage("ログイン情報を取得できませんでした。再ログインしてください。");
+      return;
+    }
+    if (!question.trim()) {
+      setErrorMessage("お題（Question）を入力してください。");
+      return;
     }
 
     setIsEvaluating(true);
@@ -269,59 +266,38 @@ export const FermiEstimateAI: React.FC = () => {
       unit,
       factors,
       sanityComment,
+      result,
       problemId: currentProblemId,
       category,
       difficulty,
     };
 
     try {
-      // ① まず無料枠を1回消費できるかチェック
-      const usageRes = await fetch("/api/usage/consume", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId,
-          feature: "fermi", // ★ フェルミ推定AI
-        }),
-      });
-
-      const usageJson = await usageRes.json().catch(() => null);
-
-      if (!usageRes.ok) {
-        // 無料枠オーバーなど
-        if (usageRes.status === 403 && usageJson?.error === "limit_exceeded") {
-          setUpgradeMessage(
-            usageJson.message ??
-              "フェルミ推定AIの今月の無料利用回数が上限に達しました。"
-          );
-          setUpgradeOpen(true);
-          return;
-        }
-
-        console.error("usage error:", usageJson);
-        setErrorMessage(
-          "利用状況の確認に失敗しました。時間をおいて再度お試しください。"
-        );
-        return;
-      }
-
-      // ② OKなら本来の AI 採点 API を呼ぶ
       const res = await fetch("/api/eval/fermi", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
 
+      const data = await res.json().catch(() => null);
+
       if (!res.ok) {
-        const err = await res.json().catch(() => null);
-        console.error("eval error:", err);
-        setErrorMessage("AI採点に失敗しました。時間をおいて再度お試しください。");
+        if (res.status === 403) {
+          setUpgradeMessage(data?.message ?? "この機能はPRO限定です。");
+          setUpgradeOpen(true);
+          return;
+        }
+        setErrorMessage(data?.message ?? "AI採点に失敗しました。");
         return;
       }
 
-      const data = await res.json();
-      if (data.score) setScore(data.score as FermiScore);
-      if (data.feedback) setFeedback(data.feedback as FermiFeedback);
+      setPlan((data?.plan ?? plan) as Plan);
+
+      // ✅ ここが重要：採点後に remaining を更新してUIに反映
+      if (typeof data?.remaining === "number") setRemaining(data.remaining);
+
+      if (data?.score) setScore(data.score as FermiScore);
+      if (data?.feedback) setFeedback(data.feedback as FermiFeedback);
     } catch (e) {
       console.error(e);
       setErrorMessage("ネットワークエラーが発生しました。");
@@ -362,16 +338,29 @@ export const FermiEstimateAI: React.FC = () => {
                   Fermi Estimation Trainer
                 </h1>
                 <p className="mt-1 text-[11px] text-sky-700">
-                  カテゴリと難易度を選んで「新しい問題を出す」を押すと、
-                  フェルミ問題が無限に出題されます。
+                  カテゴリと難易度を選んで「新しい問題を出す」を押すと、フェルミ問題が生成されます。
+                </p>
+                <p className="mt-1 text-[11px] text-sky-700">
+                  Plan: <span className="font-semibold">{plan}</span>
+                  {typeof remaining === "number" && (
+                    <>
+                      {" "}
+                      / 今月残り: <span className="font-semibold">{remaining}</span>
+                    </>
+                  )}
                 </p>
               </div>
               <button
                 type="button"
                 onClick={generateNewProblem}
-                className="rounded-full bg-sky-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-sky-600"
+                disabled={isGenerating}
+                className={`rounded-full px-3 py-1.5 text-xs font-semibold text-white shadow-sm ${
+                  isGenerating
+                    ? "bg-slate-300 cursor-not-allowed"
+                    : "bg-sky-500 hover:bg-sky-600"
+                }`}
               >
-                🎲 新しい問題を出す
+                {isGenerating ? "生成中…" : "🎲 新しい問題を出す"}
               </button>
             </div>
 
@@ -381,9 +370,7 @@ export const FermiEstimateAI: React.FC = () => {
                 <select
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 px-2 py-1.5 text-xs"
                   value={category}
-                  onChange={(e) =>
-                    setCategory(e.target.value as FermiCategory)
-                  }
+                  onChange={(e) => setCategory(e.target.value as FermiCategory)}
                 >
                   <option value="daily">Daily（日常）</option>
                   <option value="business">Business</option>
@@ -395,9 +382,7 @@ export const FermiEstimateAI: React.FC = () => {
                 <select
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 px-2 py-1.5 text-xs"
                   value={difficulty}
-                  onChange={(e) =>
-                    setDifficulty(e.target.value as FermiDifficulty)
-                  }
+                  onChange={(e) => setDifficulty(e.target.value as FermiDifficulty)}
                 >
                   <option value="easy">⭐ Easy</option>
                   <option value="medium">⭐⭐ Medium</option>
@@ -409,9 +394,7 @@ export const FermiEstimateAI: React.FC = () => {
                   {currentProblemId ? (
                     <>
                       現在の問題ID：{" "}
-                      <span className="font-mono text-slate-700">
-                        {currentProblemId}
-                      </span>
+                      <span className="font-mono text-slate-700">{currentProblemId}</span>
                     </>
                   ) : (
                     "まずは「新しい問題を出す」を押してスタート。"
@@ -439,9 +422,7 @@ export const FermiEstimateAI: React.FC = () => {
               </div>
               <div className="grid grid-cols-3 gap-3">
                 <div className="col-span-2">
-                  <label className="text-xs text-slate-500">
-                    式（Formula）
-                  </label>
+                  <label className="text-xs text-slate-500">式（Formula）</label>
                   <input
                     className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 px-2 py-1.5 text-sm"
                     placeholder="人口 × 利用割合 × 年間利用回数 × 平均単価"
@@ -471,9 +452,7 @@ export const FermiEstimateAI: React.FC = () => {
           {/* ② 要素分解 */}
           <section className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm">
             <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-slate-700">
-                ② 要素分解（MECE）
-              </h2>
+              <h2 className="text-sm font-semibold text-slate-700">② 要素分解（MECE）</h2>
               <button
                 type="button"
                 className="rounded-lg border border-sky-200 px-2.5 py-1 text-xs text-sky-700 hover:bg-sky-50"
@@ -485,6 +464,7 @@ export const FermiEstimateAI: React.FC = () => {
             <p className="mb-2 text-xs text-slate-500">
               最低 2〜3 要因に分解し、「掛け算 or 足し算」を意識する。
             </p>
+
             <div className="space-y-3">
               {factors.map((factor, index) => (
                 <div
@@ -499,11 +479,7 @@ export const FermiEstimateAI: React.FC = () => {
                       className="rounded-lg border border-slate-200 bg-white/80 px-1.5 py-1 text-[11px]"
                       value={factor.operator}
                       onChange={(e) =>
-                        updateFactor(
-                          factor.id,
-                          "operator",
-                          e.target.value as "×" | "+"
-                        )
+                        updateFactor(factor.id, "operator", e.target.value as "×" | "+")
                       }
                     >
                       <option value="×">掛け算（×）</option>
@@ -513,56 +489,36 @@ export const FermiEstimateAI: React.FC = () => {
                       className="flex-1 rounded-lg border border-slate-200 bg-white/80 px-2 py-1 text-xs"
                       placeholder="例：年間利用回数"
                       value={factor.name}
-                      onChange={(e) =>
-                        updateFactor(factor.id, "name", e.target.value)
-                      }
+                      onChange={(e) => updateFactor(factor.id, "name", e.target.value)}
                     />
                   </div>
+
                   <div className="mb-2 grid grid-cols-2 gap-2">
                     <div>
-                      <label className="text-[10px] text-slate-500">
-                        仮定（Assumption）
-                      </label>
+                      <label className="text-[10px] text-slate-500">仮定（Assumption）</label>
                       <input
                         className="mt-1 w-full rounded-lg border border-slate-200 bg-white/80 px-2 py-1 text-xs"
                         value={factor.assumption}
-                        onChange={(e) =>
-                          updateFactor(
-                            factor.id,
-                            "assumption",
-                            e.target.value
-                          )
-                        }
+                        onChange={(e) => updateFactor(factor.id, "assumption", e.target.value)}
                       />
                     </div>
                     <div>
-                      <label className="text-[10px] text-slate-500">
-                        根拠（Reason）
-                      </label>
+                      <label className="text-[10px] text-slate-500">根拠（Reason）</label>
                       <input
                         className="mt-1 w-full rounded-lg border border-slate-200 bg-white/80 px-2 py-1 text-xs"
                         value={factor.rationale}
-                        onChange={(e) =>
-                          updateFactor(
-                            factor.id,
-                            "rationale",
-                            e.target.value
-                          )
-                        }
+                        onChange={(e) => updateFactor(factor.id, "rationale", e.target.value)}
                       />
                     </div>
                   </div>
+
                   <div>
-                    <label className="text-[10px] text-slate-500">
-                      数値（丸め後）
-                    </label>
+                    <label className="text-[10px] text-slate-500">数値</label>
                     <input
                       className="mt-1 w-40 rounded-lg border border-slate-200 bg-white/80 px-2 py-1 text-xs"
                       placeholder="例：50000000"
                       value={factor.value}
-                      onChange={(e) =>
-                        updateFactor(factor.id, "value", e.target.value)
-                      }
+                      onChange={(e) => updateFactor(factor.id, "value", e.target.value)}
                     />
                   </div>
                 </div>
@@ -573,9 +529,7 @@ export const FermiEstimateAI: React.FC = () => {
           {/* ③ 計算 */}
           <section className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm">
             <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-slate-700">
-                ④ 計算（Computation）
-              </h2>
+              <h2 className="text-sm font-semibold text-slate-700">④ 計算（Computation）</h2>
               <button
                 type="button"
                 className="rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-sky-600"
@@ -610,18 +564,14 @@ export const FermiEstimateAI: React.FC = () => {
               onClick={handleEvaluate}
               disabled={isEvaluating}
               className={`rounded-full px-5 py-2 text-xs font-semibold text-white ${
-                isEvaluating
-                  ? "cursor-not-allowed bg-slate-300"
-                  : "bg-violet-500 hover:bg-violet-600"
+                isEvaluating ? "cursor-not-allowed bg-slate-300" : "bg-violet-500 hover:bg-violet-600"
               }`}
             >
               {isEvaluating ? "AIが採点中…" : "AIに採点してもらう"}
             </button>
           </section>
 
-          {errorMessage && (
-            <p className="mb-4 text-[11px] text-rose-600">{errorMessage}</p>
-          )}
+          {errorMessage && <p className="mb-4 text-[11px] text-rose-600">{errorMessage}</p>}
 
           {/* フィードバック表示 */}
           {feedback && (
@@ -634,9 +584,7 @@ export const FermiEstimateAI: React.FC = () => {
 
               <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-2">
                 <div className="rounded-xl border border-slate-100 bg-white/80 p-3">
-                  <p className="mb-1 text-[11px] font-semibold text-emerald-600">
-                    👍 良いポイント
-                  </p>
+                  <p className="mb-1 text-[11px] font-semibold text-emerald-600">👍 良いポイント</p>
                   <ul className="list-disc space-y-1 pl-4 text-[11px] text-slate-700">
                     {feedback.strengths.map((s, i) => (
                       <li key={i}>{s}</li>
@@ -644,9 +592,7 @@ export const FermiEstimateAI: React.FC = () => {
                   </ul>
                 </div>
                 <div className="rounded-xl border border-slate-100 bg-white/80 p-3">
-                  <p className="mb-1 text-[11px] font-semibold text-rose-600">
-                    ⚠ 改善ポイント
-                  </p>
+                  <p className="mb-1 text-[11px] font-semibold text-rose-600">⚠ 改善ポイント</p>
                   <ul className="list-disc space-y-1 pl-4 text-[11px] text-slate-700">
                     {feedback.weaknesses.map((w, i) => (
                       <li key={i}>{w}</li>
@@ -655,14 +601,10 @@ export const FermiEstimateAI: React.FC = () => {
                 </div>
               </div>
 
-              <p className="mb-2 text-[11px] text-slate-600">
-                アドバイス：{feedback.advice}
-              </p>
+              <p className="mb-2 text-[11px] text-slate-600">アドバイス：{feedback.advice}</p>
 
               <div className="rounded-xl border border-slate-100 bg-white/90 px-3 py-2">
-                <p className="mb-1 text-[11px] font-semibold text-slate-700">
-                  模範回答イメージ
-                </p>
+                <p className="mb-1 text-[11px] font-semibold text-slate-700">模範回答イメージ</p>
                 <pre className="whitespace-pre-wrap text-[11px] text-slate-700">
                   {feedback.sampleAnswer}
                 </pre>
@@ -703,15 +645,9 @@ export const FermiEstimateAI: React.FC = () => {
 
           {feedback && (
             <div className="rounded-2xl border border-violet-100 bg-white/80 p-4 shadow-sm">
-              <p className="mb-1 text-[11px] text-slate-500">
-                合計スコア（仮）
-              </p>
-              <p className="text-2xl font-semibold text-slate-900">
-                {feedback.totalScore}
-              </p>
-              <p className="mt-1 text-[11px] text-slate-500">
-                ※ フルスコア 50 点想定（V1.5 で正式設計）
-              </p>
+              <p className="mb-1 text-[11px] text-slate-500">合計スコア</p>
+              <p className="text-2xl font-semibold text-slate-900">{feedback.totalScore}</p>
+              <p className="mt-1 text-[11px] text-slate-500">※ 50点満点（5軸×10点）</p>
             </div>
           )}
         </aside>

@@ -92,7 +92,7 @@ export async function POST(req: NextRequest) {
     if (userId) {
       try {
         const { error: planError } = await supabaseServer
-          .from("users_profile")
+          .from("profiles")
           .update({
             plan: "beta", // ★ βプラン
             plan_started_at: new Date().toISOString(),

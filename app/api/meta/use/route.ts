@@ -2,10 +2,11 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
+import { supabaseServer } from "@/lib/supabase-server";
 
-// -----------------------------
-// 1. Feature の ID 定義
-// -----------------------------
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 type FeatureId =
   | "es_check"
   | "fermi"
@@ -17,40 +18,25 @@ type FeatureId =
   | "deep_16type"
   | "enterprise_qgen";
 
-// -----------------------------
-// 2. 機能ごとの Meta コスト
-// -----------------------------
 const FEATURE_META_COST: Record<FeatureId, number> = {
-  // 軽タスク（1〜2）
   es_check: 1,
   fermi: 1,
   light_questions: 1,
-
-  // 中タスク（3〜5）
   interview_10: 3,
   industry_insight: 3,
   case_interview: 4,
-
-  // 重〜Deep（6〜10）
   fit_analysis: 6,
   deep_16type: 10,
   enterprise_qgen: 10,
 };
 
-// -----------------------------
-// 3. Request Body の型
-// -----------------------------
 type UseMetaRequest = {
   feature: FeatureId;
 };
 
-// -----------------------------
-// 4. POST メイン処理
-// -----------------------------
-export async function POST(req: Request) {
+async function createSupabaseFromCookies() {
   const cookieStore = await cookies();
-
-  const supabase = createServerClient<any>(
+  return createServerClient<any>(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
@@ -58,115 +44,87 @@ export async function POST(req: Request) {
         get(name: string) {
           return cookieStore.get(name)?.value;
         },
+        set(name: string, value: string, options: any) {
+          cookieStore.set({ name, value, ...options });
+        },
+        remove(name: string, options: any) {
+          cookieStore.set({ name, value: "", ...options });
+        },
       },
     }
   );
+}
 
-  // 1. 認証チェック
-  const {
-    data: { user },
-    error: authError,
-  } = await supabase.auth.getUser();
+export async function POST(req: Request) {
+  const supabase = await createSupabaseFromCookies();
 
-  if (authError || !user) {
+  // 1) 認証
+  const { data: auth, error: authError } = await supabase.auth.getUser();
+  const user = auth?.user ?? null;
+
+  if (authError || !user?.id) {
     console.error("meta/use auth error:", authError);
-    return NextResponse.json(
-      { ok: false, reason: "unauthorized" as const },
-      { status: 401 }
-    );
+    return NextResponse.json({ ok: false, reason: "unauthorized" as const }, { status: 401 });
   }
 
-  // 2. Body パース
+  // 2) Body
   let body: UseMetaRequest;
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json(
-      { ok: false, reason: "invalid_body" as const },
-      { status: 400 }
-    );
+    return NextResponse.json({ ok: false, reason: "invalid_body" as const }, { status: 400 });
   }
 
   const { feature } = body;
 
-  // 3. コスト定義に存在するか
+  // 3) feature validate
   if (!(feature in FEATURE_META_COST)) {
-    return NextResponse.json(
-      { ok: false, reason: "unknown_feature" as const },
-      { status: 400 }
-    );
+    return NextResponse.json({ ok: false, reason: "unknown_feature" as const }, { status: 400 });
   }
 
   const cost = FEATURE_META_COST[feature];
+  const authUserId = user.id;
 
-  // 4. プロフィール取得
-  const { data: profile, error: profileError } = await supabase
+  // 4) profile 取得（auth_user_id で統一）
+  const { data: profile, error: profileError } = await supabaseServer
     .from("profiles")
     .select("id, meta_balance, is_pro")
-    .eq("id", user.id)
+    .eq("auth_user_id", authUserId)
     .single();
 
   if (profileError || !profile) {
     console.error("meta/use profile error:", profileError);
-    return NextResponse.json(
-      { ok: false, reason: "profile_not_found" as const },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, reason: "profile_not_found" as const }, { status: 500 });
   }
 
   const currentBalance: number = profile.meta_balance ?? 0;
   const isPro: boolean = profile.is_pro ?? false;
 
-  // 5. Pro ユーザーなら Meta 消費なしで OK
+  // 5) Pro は消費なし
   if (isPro) {
-    return NextResponse.json(
-      {
-        ok: true,
-        used: 0,
-        balance: currentBalance,
-        is_pro: true,
-      },
-      { status: 200 }
-    );
+    return NextResponse.json({ ok: true, used: 0, balance: currentBalance, is_pro: true }, { status: 200 });
   }
 
-  // 6. 残高チェック
+  // 6) 残高チェック
   if (currentBalance < cost) {
     return NextResponse.json(
-      {
-        ok: false,
-        reason: "insufficient_meta" as const,
-        required: cost,
-        balance: currentBalance,
-      },
+      { ok: false, reason: "insufficient_meta" as const, required: cost, balance: currentBalance },
       { status: 402 }
     );
   }
 
   const newBalance = currentBalance - cost;
 
-  // 7. 残高更新
-  const { error: updateError } = await supabase
+  // 7) 更新（Service Role）
+  const { error: updateError } = await supabaseServer
     .from("profiles")
     .update({ meta_balance: newBalance })
-    .eq("id", user.id);
+    .eq("auth_user_id", authUserId);
 
   if (updateError) {
     console.error("meta/use update error:", updateError);
-    return NextResponse.json(
-      { ok: false, reason: "update_failed" as const },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, reason: "update_failed" as const }, { status: 500 });
   }
 
-  // 8. OKレスポンス
-  return NextResponse.json(
-    {
-      ok: true,
-      used: cost,
-      balance: newBalance,
-      is_pro: false,
-    },
-    { status: 200 }
-  );
+  return NextResponse.json({ ok: true, used: cost, balance: newBalance, is_pro: false }, { status: 200 });
 }

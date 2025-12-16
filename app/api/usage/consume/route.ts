@@ -1,213 +1,267 @@
 // app/api/usage/consume/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { supabaseServer } from "@/lib/supabase-server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-type Plan = "free" | "beta" | "pro";
+type Plan = "free" | "pro";
 type FeatureKey =
   | "case_interview"
+  | "case_generate"
   | "fermi"
   | "general_interview"
   | "ai_training"
   | "es_correction";
 
-/**
- * 機能ごとの「プラン別・月あたり無料回数」
- * null = 上限なし
- */
-const FEATURE_LIMITS: Record<
-  FeatureKey,
-  { free: number; beta: number; pro: number | null }
-> = {
-  case_interview: {
-    free: 3, // ケース面接：月3問まで無料
-    beta: 5,
-    pro: null,
-  },
-  fermi: {
-    free: 3, // フェルミ：月3問まで無料
-    beta: 5,
-    pro: null,
-  },
-  general_interview: {
-    free: 1, // 一般面接：月1回まで無料
-    beta: 3,
-    pro: null,
-  },
-  ai_training: {
-    free: 1, // AI思考トレ：2回目以降有料 → free は1回
-    beta: 3,
-    pro: null,
-  },
-  es_correction: {
-    free: 1, // ES添削：まず1本だけフル解放、以降はロック想定
-    beta: 3,
-    pro: null,
-  },
+// ✅ “無料枠”だけを定義（proは無制限）
+const FREE_LIMITS: Record<FeatureKey, number> = {
+  case_interview: 3,
+  case_generate: 8,
+  fermi: 3,
+  general_interview: 1,
+  ai_training: 1,
+  es_correction: 1,
 };
+
+// ✅ 無料枠を超えたら必要な meta（都度課金）
+const META_COST: Record<FeatureKey, number> = {
+  case_interview: 1,
+  case_generate: 1,
+  fermi: 1,
+  general_interview: 2,
+  ai_training: 2,
+  es_correction: 2,
+};
+
+function monthStartISO(now = new Date()) {
+  const d = new Date(now.getFullYear(), now.getMonth(), 1);
+  return d.toISOString();
+}
+
+async function createSupabaseFromCookies() {
+  const cookieStore = await cookies();
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value;
+        },
+        set(name: string, value: string, options: any) {
+          cookieStore.set({ name, value, ...options });
+        },
+        remove(name: string, options: any) {
+          cookieStore.set({ name, value: "", ...options });
+        },
+      },
+    }
+  );
+}
+
+// ✅ profiles は cookie付き supabase で取る（無ければ作る）
+async function getOrCreateProfile(
+  supabase: Awaited<ReturnType<typeof createSupabaseFromCookies>>,
+  authUserId: string
+) {
+  const { data: existing, error: selErr } = await supabase
+    .from("profiles")
+    .select("id, plan, meta_balance")
+    .eq("auth_user_id", authUserId)
+    .maybeSingle();
+
+  if (selErr) {
+    console.error("profiles select error:", selErr);
+    return null;
+  }
+  if (existing) {
+    return existing as { id: string; plan: Plan | null; meta_balance: number | null };
+  }
+
+  // ✅ INSERTは id と auth_user_id を両方 authUserId に揃えておく（ポリシー混在対策）
+  const { data: created, error: insErr } = await supabase
+    .from("profiles")
+    .insert({
+      id: authUserId,
+      auth_user_id: authUserId,
+      plan: "free",
+      meta_balance: 0,
+    })
+    .select("id, plan, meta_balance")
+    .single();
+
+  if (insErr) {
+    console.error("profiles insert error:", insErr);
+    return null;
+  }
+  return created as { id: string; plan: Plan | null; meta_balance: number | null };
+}
 
 export async function POST(req: NextRequest) {
   try {
+    const supabase = await createSupabaseFromCookies();
+
+    const { data: auth, error: authErr } = await supabase.auth.getUser();
+    const user = auth?.user ?? null;
+
+    if (authErr || !user?.id) {
+      return NextResponse.json(
+        { ok: false, error: "unauthorized", message: "ログインが必要です。" },
+        { status: 401 }
+      );
+    }
+    const authUserId = user.id;
+
     const body = await req.json().catch(() => ({}));
-    // userId = Supabase auth.user.id
-    const userId = body.userId as string | undefined;
     const feature = body.feature as FeatureKey | undefined;
 
-    if (!userId || !feature) {
+    if (!feature || !(feature in FREE_LIMITS)) {
       return NextResponse.json(
-        { error: "invalid_request", message: "userId と feature は必須です。" },
+        { ok: false, error: "invalid_request", message: "feature が不正です。" },
         { status: 400 }
       );
     }
 
-    const config = FEATURE_LIMITS[feature];
-    if (!config) {
+    const profile = await getOrCreateProfile(supabase, authUserId);
+    if (!profile) {
       return NextResponse.json(
-        { error: "unknown_feature", message: `未知の機能です: ${feature}` },
-        { status: 400 }
+        { ok: false, error: "profile_error", message: "profiles の取得/作成に失敗しました。" },
+        { status: 500 }
       );
     }
 
-    // ---------------------------
-    // プロファイル取得（auth_user_id 単位）
-    // ---------------------------
-    const { data: profile, error: profileError } = await supabaseServer
-      .from("users_profile")
-      .select("*")
-      .eq("auth_user_id", userId)
-      .maybeSingle();
+    const plan: Plan = (profile.plan ?? "free") as Plan;
+    const startISO = monthStartISO(new Date());
 
-    if (profileError || !profile) {
-      console.error("profile not found:", profileError);
-      return NextResponse.json(
-        {
-          error: "profile_not_found",
-          message: "ユーザープロファイルが見つかりません。",
-        },
-        { status: 404 }
-      );
-    }
-
-    const profileId: string = profile.id; // feature_usage.profile_id 用
-    const plan: Plan = (profile.plan as Plan) ?? "free";
-    const now = new Date();
-
-    // ---------------------------
-    // usage_reset_at（無料枠リセット基準日）の更新
-    //  - 初回 or 月替わりで「当月1日」にリセット
-    // ---------------------------
-    let resetAt: Date;
-    if (profile.usage_reset_at) {
-      resetAt = new Date(profile.usage_reset_at as string);
-      const sameMonth =
-        resetAt.getFullYear() === now.getFullYear() &&
-        resetAt.getMonth() === now.getMonth();
-
-      if (!sameMonth) {
-        resetAt = new Date(now.getFullYear(), now.getMonth(), 1);
-        await supabaseServer
-          .from("users_profile")
-          .update({ usage_reset_at: resetAt.toISOString() })
-          .eq("id", profileId);
-      }
-    } else {
-      resetAt = new Date(now.getFullYear(), now.getMonth(), 1);
-      await supabaseServer
-        .from("users_profile")
-        .update({ usage_reset_at: resetAt.toISOString() })
-        .eq("id", profileId);
-    }
-
-    // ---------------------------
-    // PRO は上限なし（ログだけ残す）
-    // ---------------------------
-    const planLimit = config[plan];
-
-    if (plan === "pro" || planLimit === null) {
-      await supabaseServer.from("feature_usage").insert({
-        profile_id: profileId,
+    // ✅ PROは無制限：ログだけ残す
+    if (plan === "pro") {
+      const { error: logErr } = await supabase.from("usage_logs").insert({
+        user_id: authUserId,
         feature,
+        used_at: new Date().toISOString(),
+        profile_id: profile.id, // カラムあるなら入れとく
       });
+
+      if (logErr) {
+        console.error("usage_logs insert error (pro):", logErr);
+        return NextResponse.json(
+          { ok: false, error: "insert_failed", message: "利用ログの保存に失敗しました。" },
+          { status: 500 }
+        );
+      }
+      return NextResponse.json({ ok: true, feature, plan, chargedMeta: 0 });
+    }
+
+    // ✅ FREE: 今月の無料枠カウント（created_atじゃなく used_at）
+    const freeLimit = FREE_LIMITS[feature];
+    const { count, error: countErr } = await supabase
+      .from("usage_logs")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", authUserId)
+      .eq("feature", feature)
+      .gte("used_at", startISO);
+
+    if (countErr) {
+      console.error("usage_logs count error:", countErr);
+      return NextResponse.json(
+        { ok: false, error: "count_failed", message: "利用状況の取得に失敗しました。" },
+        { status: 500 }
+      );
+    }
+
+    const usedThisMonth = count ?? 0;
+
+    // ✅ 無料枠内：メタ消費なしでOK
+    if (usedThisMonth < freeLimit) {
+      const { error: logErr } = await supabase.from("usage_logs").insert({
+        user_id: authUserId,
+        feature,
+        used_at: new Date().toISOString(),
+        profile_id: profile.id,
+      });
+
+      if (logErr) {
+        console.error("usage_logs insert error (free within):", logErr);
+        return NextResponse.json(
+          { ok: false, error: "insert_failed", message: "利用ログの保存に失敗しました。" },
+          { status: 500 }
+        );
+      }
 
       return NextResponse.json({
         ok: true,
         feature,
         plan,
-        usedCount: null,
-        remaining: null,
-        limit: null,
+        usedThisMonth: usedThisMonth + 1,
+        freeLimit,
+        chargedMeta: 0,
       });
     }
 
-    // ---------------------------
-    // 今月の利用回数をカウント
-    // ---------------------------
-    const { data: rows, error: countError } = await supabaseServer
-      .from("feature_usage")
-      .select("id")
-      .eq("profile_id", profileId)
-      .eq("feature", feature)
-      .gte("used_at", resetAt.toISOString());
+    // ✅ 無料枠超過：meta を消費する
+    const cost = META_COST[feature] ?? 1;
+    const balance = Number(profile.meta_balance ?? 0);
 
-    if (countError) {
-      console.error("feature_usage count error:", countError);
+    if (balance < cost) {
       return NextResponse.json(
-        { error: "count_failed", message: "利用状況の取得に失敗しました。" },
+        {
+          ok: false,
+          error: "insufficient_meta",
+          message: "メタが不足しています。購入してください。",
+          feature,
+          plan,
+          required: cost,
+          balance,
+        },
+        { status: 402 }
+      );
+    }
+
+    // ✅ meta 減算
+    const { error: updErr } = await supabase
+      .from("profiles")
+      .update({ meta_balance: balance - cost })
+      .eq("id", profile.id);
+
+    if (updErr) {
+      console.error("profiles meta_balance update error:", updErr);
+      return NextResponse.json(
+        { ok: false, error: "meta_update_failed", message: "メタ消費に失敗しました。" },
         { status: 500 }
       );
     }
 
-    const usedCount = rows?.length ?? 0;
-
-    // ---------------------------
-    // 上限チェック
-    // ---------------------------
-    if (usedCount >= planLimit) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "limit_exceeded",
-          feature,
-          plan,
-          usedCount,
-          remaining: 0,
-          limit: planLimit,
-          message:
-            plan === "free"
-              ? "この機能の今月の無料利用回数が上限に達しました。プラン・料金ページから PRO プランをご検討ください。"
-              : "この機能の今月の利用上限に達しました。",
-        },
-        { status: 403 }
-      );
-    }
-
-    // ---------------------------
-    // 1回消費（ログ追加）
-    // ---------------------------
-    await supabaseServer.from("feature_usage").insert({
-      profile_id: profileId,
+    // ✅ ログ（meta_cost列が無いなら入れない）
+    const { error: logErr } = await supabase.from("usage_logs").insert({
+      user_id: authUserId,
       feature,
+      used_at: new Date().toISOString(),
+      profile_id: profile.id,
     });
 
-    const newUsed = usedCount + 1;
-    const remaining = Math.max(planLimit - newUsed, 0);
+    if (logErr) {
+      console.error("usage_logs insert error (charged):", logErr);
+      return NextResponse.json(
+        { ok: false, error: "insert_failed", message: "利用ログの保存に失敗しました。" },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({
       ok: true,
       feature,
       plan,
-      usedCount: newUsed,
-      remaining,
-      limit: planLimit,
+      usedThisMonth: usedThisMonth + 1,
+      freeLimit,
+      chargedMeta: cost,
+      metaBalanceAfter: balance - cost,
     });
   } catch (e) {
-    console.error(e);
+    console.error("usage/consume server_error:", e);
     return NextResponse.json(
-      {
-        error: "server_error",
-        message: "利用制限チェック中にエラーが発生しました。",
-      },
+      { ok: false, error: "server_error", message: "利用制限チェック中にエラーが発生しました。" },
       { status: 500 }
     );
   }
