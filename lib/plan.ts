@@ -8,7 +8,8 @@ export type UsageFeature =
   | "case_generate"
   | "fermi_generate"
   | "case_fermi" // 互換用（過去の合算カウントを残すなら）
-  | "interview";
+  | "interview"
+  | "ai_training"; // ✅ 追加
 
 export async function getUserPlan(userId: string): Promise<Plan> {
   const { data, error } = await supabaseServer
@@ -77,8 +78,8 @@ export async function logUsage(userId: string, feature: UsageFeature) {
 
   if (error) console.error("logUsage error", error);
 }
-// lib/plan.ts （末尾に追記してOK）
 
+// lib/plan.ts （末尾に追記してOK）
 export async function requirePro(userId: string) {
   const plan = await getUserPlan(userId);
   const ok = plan === "pro" || plan === "beta";
