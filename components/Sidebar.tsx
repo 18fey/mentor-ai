@@ -23,7 +23,6 @@ const sections: MenuSection[] = [
     items: [
       { label: "ホーム", path: "/" },
       { label: "プロフィール", path: "/profile" },
-      { label: "ストーリーカード作成", path: "/general" },
     ],
   },
   {
