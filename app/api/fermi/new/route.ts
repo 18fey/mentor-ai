@@ -1,6 +1,7 @@
 // app/api/fermi/new/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { checkMonthlyLimit, logUsage } from "@/lib/plan";
+import { requireAuthUserId } from "@/lib/authServer";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL_GEN = process.env.OPENAI_MODEL_GEN_FERMI || "gpt-4o-mini";
@@ -17,20 +18,19 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { userId, category, difficulty } = (await req.json()) as {
-      userId: string;
+    const userId = await requireAuthUserId();
+    if (!userId) {
+      return NextResponse.json(
+        { error: "unauthorized", message: "login required" },
+        { status: 401 }
+      );
+    }
+
+    const { category, difficulty } = (await req.json()) as {
       category: FermiCategory;
       difficulty: FermiDifficulty;
     };
 
-    if (!userId) {
-      return NextResponse.json(
-        { error: "bad_request", message: "userId is required" },
-        { status: 400 }
-      );
-    }
-
-    // ✅ FREEは「フェルミ生成：月8問まで」
     const limit = await checkMonthlyLimit({
       userId,
       feature: "fermi_generate",
@@ -119,7 +119,7 @@ difficulty: ${difficulty}
     return NextResponse.json({
       ok: true,
       plan: limit.plan,
-      remaining: limit.remaining - 1,
+      remaining: limit.remaining === Infinity ? Infinity : limit.remaining - 1,
       fermi: obj,
     });
   } catch (e) {

@@ -4,9 +4,41 @@
 import { useState } from "react";
 
 type MetaPack = "meta_3" | "meta_7" | "meta_15";
+type ProPlan = "pro" | "elite";
 
 export default function PricingPage() {
   const [loadingPack, setLoadingPack] = useState<MetaPack | null>(null);
+  const [loadingPro, setLoadingPro] = useState<ProPlan | null>(null);
+
+  const handleBuyPro = async (plan: ProPlan = "pro") => {
+    try {
+      setLoadingPro(plan);
+
+      const res = await fetch("/api/subscription/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan }),
+      });
+
+      if (!res.ok) {
+        console.error(await res.text());
+        alert("決済ページの生成に失敗しました。時間をおいて再度お試しください。");
+        return;
+      }
+
+      const data = await res.json();
+      if (data.checkoutUrl) {
+        window.location.href = data.checkoutUrl;
+      } else {
+        alert("決済URLの取得に失敗しました。");
+      }
+    } catch (e) {
+      console.error(e);
+      alert("エラーが発生しました。時間をおいて再度お試しください。");
+    } finally {
+      setLoadingPro(null);
+    }
+  };
 
   const handleBuyMeta = async (pack: MetaPack) => {
     try {
@@ -19,9 +51,7 @@ export default function PricingPage() {
 
       if (!res.ok) {
         console.error(await res.text());
-        alert(
-          "決済ページの生成に失敗しました。時間をおいて再度お試しください。"
-        );
+        alert("決済ページの生成に失敗しました。時間をおいて再度お試しください。");
         return;
       }
 
@@ -38,6 +68,8 @@ export default function PricingPage() {
       setLoadingPack(null);
     }
   };
+
+  const isAnyLoading = loadingPack !== null || loadingPro !== null;
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-10">
@@ -66,22 +98,33 @@ export default function PricingPage() {
           </ul>
         </div>
 
-        {/* （将来用）Pro */}
+        {/* Pro */}
         <div className="rounded-2xl border border-sky-200 bg-sky-50/80 p-6 shadow-sm">
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-600">
-            Pro（準備中）
+            Pro
           </p>
-          <p className="mt-2 text-2xl font-bold text-slate-900">Coming soon</p>
+          <p className="mt-2 text-2xl font-bold text-slate-900">¥3980 / 月</p>
           <p className="mt-1 text-xs text-slate-600">
             月額サブスクで、Deep機能や保存機能をほぼ無制限に利用できるプランです。
           </p>
+
           <ul className="mt-4 space-y-2 text-xs text-slate-700">
             <li>・Deepレポートの読み放題</li>
             <li>・ES添削 / 面接AIの上限UP</li>
             <li>・成長ログ（Growth Inbox）の解放</li>
           </ul>
-          <p className="mt-4 text-[11px] text-slate-500">
-            現在は Meta コインで Deep 機能をご利用いただけます。
+
+          <button
+            type="button"
+            onClick={() => handleBuyPro("pro")}
+            disabled={isAnyLoading}
+            className="mt-5 w-full rounded-full bg-sky-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-sky-700 disabled:opacity-60"
+          >
+            {loadingPro === "pro" ? "生成中…" : "Pro を購入する"}
+          </button>
+
+          <p className="mt-3 text-[11px] text-slate-500">
+            決済には Stripe を利用します。支払い完了後、自動的に Pro が反映されます（Webhook 連携）。
           </p>
         </div>
 
@@ -105,32 +148,26 @@ export default function PricingPage() {
             <button
               type="button"
               onClick={() => handleBuyMeta("meta_3")}
-              disabled={loadingPack !== null}
+              disabled={isAnyLoading}
               className="w-full rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-60"
             >
-              {loadingPack === "meta_3"
-                ? "生成中…"
-                : "3 Meta を購入（¥500）"}
+              {loadingPack === "meta_3" ? "生成中…" : "3 Meta を購入（¥500）"}
             </button>
             <button
               type="button"
               onClick={() => handleBuyMeta("meta_7")}
-              disabled={loadingPack !== null}
+              disabled={isAnyLoading}
               className="w-full rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-60"
             >
-              {loadingPack === "meta_7"
-                ? "生成中…"
-                : "7 Meta を購入（¥1,000）"}
+              {loadingPack === "meta_7" ? "生成中…" : "7 Meta を購入（¥1,000）"}
             </button>
             <button
               type="button"
               onClick={() => handleBuyMeta("meta_15")}
-              disabled={loadingPack !== null}
+              disabled={isAnyLoading}
               className="w-full rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-60"
             >
-              {loadingPack === "meta_15"
-                ? "生成中…"
-                : "15 Meta を購入（¥2,000）"}
+              {loadingPack === "meta_15" ? "生成中…" : "15 Meta を購入（¥2,000）"}
             </button>
           </div>
 
@@ -144,7 +181,7 @@ export default function PricingPage() {
       <section className="mt-10 text-[11px] text-slate-500">
         <p>※表記の金額は現時点の想定です。実際の価格は運用時に調整してください。</p>
         <p>
-          ※Metaコイン購入にはログインが必要です。未ログインの場合は途中でログイン画面に遷移します。
+          ※購入にはログインが必要です。未ログインの場合は途中でログイン画面に遷移します。
         </p>
       </section>
     </main>

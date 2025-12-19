@@ -42,7 +42,7 @@ type CaseFeedback = {
   nextTraining: string;
 };
 
-type Plan = "free" | "pro" | "beta";
+type Plan = "free" | "pro" ;
 
 type GenerateRes = {
   ok: true;
@@ -60,8 +60,29 @@ type EvalRes = {
   logId?: number | string | null;
 };
 
+type SaveItem = {
+  id: string;
+  attempt_type: string;
+  attempt_id: string;
+  save_type: "mistake" | "learning" | "retry";
+  created_at: string;
+};
+
+type SavesListRes = {
+  ok: true;
+  plan: Plan;
+  items: SaveItem[];
+};
+
+type ToggleSaveRes = {
+  ok: true;
+  plan: Plan;
+  enabled: boolean;
+};
+
 type ApiErr = {
   error?: string;
+  code?: string;
   message?: string;
 };
 
@@ -122,7 +143,11 @@ export const CaseInterviewAI: React.FC = () => {
   const [upgradeOpen, setUpgradeOpen] = useState(false);
   const [upgradeMessage, setUpgradeMessage] = useState<string | undefined>();
 
-  // auth確認（userIdは持たない：サーバがcookieで確定する）
+  // 保存
+  const [isSaving, setIsSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  // auth確認
   useEffect(() => {
     (async () => {
       setAuthError(null);
@@ -161,11 +186,11 @@ export const CaseInterviewAI: React.FC = () => {
     setFeedback(null);
     setTotalScore(null);
     setLastLogId(null);
+    setSaved(false);
   };
 
   /* -------------------------
      ケース生成（API）
-     ※ userIdは送らない（サーバがcookieで確定）
   ------------------------- */
   const handleGenerateCase = async () => {
     setUiError(null);
@@ -180,14 +205,10 @@ export const CaseInterviewAI: React.FC = () => {
       const res = await fetch("/api/case/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // ✅ userId を送らない
         body: JSON.stringify({ domain, pattern }),
       });
 
-      const json = (await res.json().catch(() => null)) as
-        | GenerateRes
-        | ApiErr
-        | null;
+      const json = (await res.json().catch(() => null)) as GenerateRes | ApiErr | null;
 
       if (!res.ok) {
         setUiError((json as ApiErr | null)?.message ?? "ケース生成に失敗しました。");
@@ -209,7 +230,6 @@ export const CaseInterviewAI: React.FC = () => {
 
   /* -------------------------
      AI評価（本番）
-     ※ userIdは送らない（サーバがcookieで確定）
   ------------------------- */
   const handleEvaluate = async () => {
     setUiError(null);
@@ -219,7 +239,6 @@ export const CaseInterviewAI: React.FC = () => {
       return;
     }
 
-    // からっぽ評価を防ぐ（最低限）
     const totalLen =
       goal.length +
       kpi.length +
@@ -242,7 +261,6 @@ export const CaseInterviewAI: React.FC = () => {
       const res = await fetch("/api/eval/case", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // ✅ userId を送らない
         body: JSON.stringify({
           case: currentCase,
           answers: {
@@ -259,13 +277,9 @@ export const CaseInterviewAI: React.FC = () => {
         }),
       });
 
-      const json = (await res.json().catch(() => null)) as
-        | EvalRes
-        | ApiErr
-        | null;
+      const json = (await res.json().catch(() => null)) as EvalRes | ApiErr | null;
 
       if (!res.ok) {
-        // ✅ 回数制限（ロック → upgrade modal）
         if (res.status === 403 && (json as ApiErr | null)?.error === "limit_exceeded") {
           setUpgradeMessage(
             (json as ApiErr | null)?.message ??
@@ -290,6 +304,7 @@ export const CaseInterviewAI: React.FC = () => {
       setFeedback(data.feedback);
       setTotalScore(typeof data.totalScore === "number" ? data.totalScore : null);
       setLastLogId(data.logId ?? null);
+      setSaved(false);
     } catch (e) {
       console.error(e);
       setUiError("通信エラーが発生しました。時間をおいて再度お試しください。");
@@ -299,53 +314,121 @@ export const CaseInterviewAI: React.FC = () => {
   };
 
   /* -------------------------
-     保存（bookmarks）
-     saved_items: user_id(uuid), attempt_type(text), attempt_id(text), save_type(text)
-     ※ 保存はクライアント直叩きなので user_id は必要 → ここだけは userId を取る
+     保存状態チェック（評価が来たら）
+     - lastLogId をキーに「learning 保存済みか」確認
   ------------------------- */
-  const [isSaving, setIsSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [authUserIdForSave, setAuthUserIdForSave] = useState<string | null>(null);
-
   useEffect(() => {
-    // Save用の userId を（必要なときのために）取得
+    if (!lastLogId) return;
+    if (!isAuthed) return;
+
     (async () => {
-      const { data } = await supabase.auth.getUser();
-      setAuthUserIdForSave(data?.user?.id ?? null);
+      try {
+        const res = await fetch("/api/saves/list", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ attemptType: "case", saveType: "learning", limit: 100 }),
+        });
+
+        const json = (await res.json().catch(() => null)) as SavesListRes | ApiErr | null;
+        if (!res.ok) return;
+
+        const data = json as SavesListRes;
+        setPlan(data.plan);
+
+        const exists = (data.items ?? []).some(
+          (it) => it.attempt_type === "case" && it.attempt_id === String(lastLogId) && it.save_type === "learning"
+        );
+        setSaved(exists);
+      } catch {
+        // 無視（UI崩さない）
+      }
     })();
-  }, [supabase]);
+  }, [lastLogId, isAuthed]);
 
-  useEffect(() => {
-    // 新しい評価が来たら保存状態リセット
-    setSaved(false);
-  }, [lastLogId]);
-
-  const handleSave = async () => {
+  /* -------------------------
+     保存（API経由に統一）
+  ------------------------- */
+   const handleSave = async () => {
     setUiError(null);
-    if (!authUserIdForSave) return setUiError("ログインが必要です。");
+    if (!isAuthed) return setUiError("ログインが必要です。");
     if (!lastLogId) return setUiError("先に評価してから保存できます。");
+    if (!currentCase || !feedback) return setUiError("保存する内容がありません。");
 
     try {
       setIsSaving(true);
 
-      const { error } = await supabase.from("saved_items").insert({
-        user_id: authUserIdForSave,
-        attempt_type: "case",
-        attempt_id: String(lastLogId),
-        save_type: "learning",
+      // ✅ カード表示用の軽いメタ（全機能で共通化しやすい）
+      const title = `【ケース】${currentCase.client} / ${currentCase.title}`;
+      const summary = `合計 ${typeof totalScore === "number" ? totalScore : "-"}点｜${domain}/${pattern}`;
+
+      // ✅ スナップショットpayload（共通フォーマット）
+      const payload = {
+        input: {
+          case: currentCase,
+          answers: {
+            goal,
+            kpi,
+            framework,
+            hypothesis,
+            deepDivePlan,
+            analysis,
+            solutions,
+            risks,
+            wrapUp,
+          },
+        },
+        output: {
+          score,
+          feedback,
+          totalScore,
+        },
+        eval: {
+          score,
+          feedback,
+          totalScore,
+        },
+        meta: {
+          attemptType: "case",
+          domain,
+          pattern,
+          caseId: currentCase.id,
+          savedAt: new Date().toISOString(),
+          version: 1,
+        },
+      };
+
+      const res = await fetch("/api/saves/toggle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          attemptId: String(lastLogId),
+          attemptType: "case",
+          saveType: "learning",
+          enabled: true,
+          title,
+          summary,
+          scoreTotal: typeof totalScore === "number" ? totalScore : null,
+          payload,
+          sourceId: String(lastLogId), // 任意：紐付け
+        }),
       });
 
-      if (error) {
-        if (String(error.message || "").toLowerCase().includes("duplicate")) {
-          setSaved(true);
-          return;
+      const json = (await res.json().catch(() => null)) as any;
+
+      if (!res.ok) {
+        if (res.status === 403) {
+          if (json?.error === "upgrade_required" || json?.error === "limit_exceeded") {
+            setUpgradeMessage(json?.message ?? "保存にはアップグレードが必要です。");
+            setUpgradeOpen(true);
+            return;
+          }
         }
-        console.error(error);
-        setUiError("保存に失敗しました。");
+        setUiError(json?.message ?? "保存に失敗しました。");
         return;
       }
 
-      setSaved(true);
+      setPlan(json.plan);
+      setSaved(Boolean(json.enabled));
     } catch (e) {
       console.error(e);
       setUiError("保存に失敗しました。");
@@ -362,7 +445,6 @@ export const CaseInterviewAI: React.FC = () => {
       <div className="flex h-full gap-6">
         {/* 左：ケース生成 + 回答入力 */}
         <div className="flex-1 space-y-6 overflow-y-auto pr-2">
-          {/* エラーバナー */}
           {(authError || uiError) && (
             <div className="rounded-2xl border border-rose-100 bg-rose-50 p-3 text-xs text-rose-700">
               {authError ?? uiError}
@@ -452,9 +534,7 @@ export const CaseInterviewAI: React.FC = () => {
 
           {/* ケース本文 */}
           <section className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-800">
-              ① ケース本文
-            </h2>
+            <h2 className="mb-2 text-sm font-semibold text-slate-800">① ケース本文</h2>
             {currentCase ? (
               <div className="space-y-2 text-xs text-slate-700">
                 <div className="mb-1 inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-[11px] text-slate-600">
@@ -463,12 +543,8 @@ export const CaseInterviewAI: React.FC = () => {
                   <span>{currentCase.title}</span>
                 </div>
                 <p>{currentCase.prompt}</p>
-                <p className="text-[11px] text-slate-500">
-                  ヒント：{currentCase.hint}
-                </p>
-                <p className="text-[11px] text-slate-500">
-                  KPI例：{currentCase.kpiExamples}
-                </p>
+                <p className="text-[11px] text-slate-500">ヒント：{currentCase.hint}</p>
+                <p className="text-[11px] text-slate-500">KPI例：{currentCase.kpiExamples}</p>
               </div>
             ) : (
               <p className="text-xs text-slate-400">
@@ -477,16 +553,12 @@ export const CaseInterviewAI: React.FC = () => {
             )}
           </section>
 
-          {/* ゴール再定義 */}
+          {/* ② */}
           <section className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-800">
-              ② ゴールとKPIの再定義
-            </h2>
+            <h2 className="mb-2 text-sm font-semibold text-slate-800">② ゴールとKPIの再定義</h2>
             <div className="space-y-3 text-xs">
               <div>
-                <label className="text-[11px] text-slate-500">
-                  ゴール（何を最大化 / 最適化する？）
-                </label>
+                <label className="text-[11px] text-slate-500">ゴール（何を最大化 / 最適化する？）</label>
                 <textarea
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
                   rows={2}
@@ -495,9 +567,7 @@ export const CaseInterviewAI: React.FC = () => {
                 />
               </div>
               <div>
-                <label className="text-[11px] text-slate-500">
-                  KPI（追うべき指標）
-                </label>
+                <label className="text-[11px] text-slate-500">KPI（追うべき指標）</label>
                 <textarea
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
                   rows={2}
@@ -508,16 +578,12 @@ export const CaseInterviewAI: React.FC = () => {
             </div>
           </section>
 
-          {/* フレームワーク & 仮説 */}
+          {/* ③ */}
           <section className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-800">
-              ③ フレームワーク & 仮説
-            </h2>
+            <h2 className="mb-2 text-sm font-semibold text-slate-800">③ フレームワーク & 仮説</h2>
             <div className="grid grid-cols-1 gap-4 text-xs md:grid-cols-2">
               <div>
-                <label className="text-[11px] text-slate-500">
-                  フレーム / 分解の仕方
-                </label>
+                <label className="text-[11px] text-slate-500">フレーム / 分解の仕方</label>
                 <textarea
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
                   rows={4}
@@ -526,9 +592,7 @@ export const CaseInterviewAI: React.FC = () => {
                 />
               </div>
               <div>
-                <label className="text-[11px] text-slate-500">
-                  初期仮説（1〜2行でOK）
-                </label>
+                <label className="text-[11px] text-slate-500">初期仮説（1〜2行でOK）</label>
                 <textarea
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
                   rows={4}
@@ -539,16 +603,12 @@ export const CaseInterviewAI: React.FC = () => {
             </div>
           </section>
 
-          {/* 深掘りプラン / 分析 */}
+          {/* ④ */}
           <section className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-800">
-              ④ 深掘りの進め方 & 分析
-            </h2>
+            <h2 className="mb-2 text-sm font-semibold text-slate-800">④ 深掘りの進め方 & 分析</h2>
             <div className="grid grid-cols-1 gap-4 text-xs md:grid-cols-2">
               <div>
-                <label className="text-[11px] text-slate-500">
-                  何から確認する？（深掘り順序）
-                </label>
+                <label className="text-[11px] text-slate-500">何から確認する？（深掘り順序）</label>
                 <textarea
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
                   rows={4}
@@ -557,9 +617,7 @@ export const CaseInterviewAI: React.FC = () => {
                 />
               </div>
               <div>
-                <label className="text-[11px] text-slate-500">
-                  分析メモ（数字・示唆）
-                </label>
+                <label className="text-[11px] text-slate-500">分析メモ（数字・示唆）</label>
                 <textarea
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
                   rows={4}
@@ -570,16 +628,12 @@ export const CaseInterviewAI: React.FC = () => {
             </div>
           </section>
 
-          {/* 打ち手 & リスク / クロージング */}
+          {/* ⑤ */}
           <section className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-800">
-              ⑤ 打ち手・リスク・まとめ
-            </h2>
+            <h2 className="mb-2 text-sm font-semibold text-slate-800">⑤ 打ち手・リスク・まとめ</h2>
             <div className="space-y-3 text-xs">
               <div>
-                <label className="text-[11px] text-slate-500">
-                  打ち手（3つ以内に絞る）
-                </label>
+                <label className="text-[11px] text-slate-500">打ち手（3つ以内に絞る）</label>
                 <textarea
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
                   rows={3}
@@ -588,9 +642,7 @@ export const CaseInterviewAI: React.FC = () => {
                 />
               </div>
               <div>
-                <label className="text-[11px] text-slate-500">
-                  リスク & 前提（1〜3行）
-                </label>
+                <label className="text-[11px] text-slate-500">リスク & 前提（1〜3行）</label>
                 <textarea
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
                   rows={3}
@@ -599,9 +651,7 @@ export const CaseInterviewAI: React.FC = () => {
                 />
               </div>
               <div>
-                <label className="text-[11px] text-slate-500">
-                  クロージング（結論→理由→次アクション）
-                </label>
+                <label className="text-[11px] text-slate-500">クロージング（結論→理由→次アクション）</label>
                 <textarea
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
                   rows={3}
@@ -648,9 +698,7 @@ export const CaseInterviewAI: React.FC = () => {
             <h3 className="mb-2 text-xs font-semibold tracking-wide text-sky-700">
               ケース構造スコア
             </h3>
-            <p className="mb-2 text-[11px] text-sky-800">
-              OpenAI評価の結果を反映しています。
-            </p>
+            <p className="mb-2 text-[11px] text-sky-800">OpenAI評価の結果を反映しています。</p>
 
             <ul className="space-y-1.5 text-xs text-slate-700">
               <li className="flex justify-between">
@@ -678,20 +726,14 @@ export const CaseInterviewAI: React.FC = () => {
             {typeof totalScore === "number" && (
               <div className="mt-3 rounded-xl border border-slate-100 bg-white/80 p-3">
                 <p className="text-[11px] text-slate-500">合計（暫定）</p>
-                <p className="text-2xl font-semibold text-slate-900">
-                  {totalScore}
-                </p>
-                <p className="mt-1 text-[11px] text-slate-500">
-                  ※ 50点満点想定
-                </p>
+                <p className="text-2xl font-semibold text-slate-900">{totalScore}</p>
+                <p className="mt-1 text-[11px] text-slate-500">※ 50点満点想定</p>
               </div>
             )}
           </div>
 
           <div className="rounded-2xl border border-slate-100 bg-white/90 p-4 shadow-sm">
-            <h3 className="mb-2 text-xs font-semibold text-slate-800">
-              フィードバック（文章）
-            </h3>
+            <h3 className="mb-2 text-xs font-semibold text-slate-800">フィードバック（文章）</h3>
             {feedback ? (
               <div className="space-y-2 text-[11px] text-slate-700">
                 <p>{feedback.summary}</p>
@@ -700,20 +742,12 @@ export const CaseInterviewAI: React.FC = () => {
                   <pre className="whitespace-pre-wrap">{feedback.goodPoints}</pre>
                 </div>
                 <div>
-                  <p className="mb-1 font-semibold text-slate-800">
-                    ▲ 改善ポイント
-                  </p>
-                  <pre className="whitespace-pre-wrap">
-                    {feedback.improvePoints}
-                  </pre>
+                  <p className="mb-1 font-semibold text-slate-800">▲ 改善ポイント</p>
+                  <pre className="whitespace-pre-wrap">{feedback.improvePoints}</pre>
                 </div>
                 <div>
-                  <p className="mb-1 font-semibold text-slate-800">
-                    ▶ 次にやると良いこと
-                  </p>
-                  <pre className="whitespace-pre-wrap">
-                    {feedback.nextTraining}
-                  </pre>
+                  <p className="mb-1 font-semibold text-slate-800">▶ 次にやると良いこと</p>
+                  <pre className="whitespace-pre-wrap">{feedback.nextTraining}</pre>
                 </div>
               </div>
             ) : (
@@ -725,7 +759,6 @@ export const CaseInterviewAI: React.FC = () => {
         </aside>
       </div>
 
-      {/* ✅ ロック時の導線（Pro/Meta） */}
       <UpgradeModal
         open={upgradeOpen}
         onClose={() => setUpgradeOpen(false)}

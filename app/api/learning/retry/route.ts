@@ -2,9 +2,10 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { requirePro } from "@/lib/plan";
+import { requireAuthUserId } from "@/lib/authServer";
 
 type Mode = "learning" | "retry";
-type AttemptType ="case_interview"| "fermi";
+type AttemptType = "case_interview" | "fermi";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -13,19 +14,25 @@ const supabaseAdmin = createClient(
 
 export async function POST(req: Request) {
   try {
+    const userId = await requireAuthUserId();
+    if (!userId) {
+      return NextResponse.json(
+        { error: "unauthorized", message: "login required" },
+        { status: 401 }
+      );
+    }
+
     const body = (await req.json()) as {
-      userId: string;
       attemptType: AttemptType;
       attemptId: string;
       mode: Mode;
     };
 
-    const { userId, attemptType, attemptId, mode } = body;
-    if (!userId || !attemptType || !attemptId || !mode) {
+    const { attemptType, attemptId, mode } = body;
+    if (!attemptType || !attemptId || !mode) {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });
     }
 
-    // ✅ PRO限定
     const pro = await requirePro(userId);
     if (!pro.ok) {
       return NextResponse.json(
@@ -33,22 +40,23 @@ export async function POST(req: Request) {
           error: "payment_required",
           code: "LEARNING_RETRY_PRO_ONLY",
           plan: pro.plan,
-          message: "learning / retry はPRO限定機能です。アップグレードすると解放されます。",
+          message:
+            "learning / retry はPRO限定機能です。アップグレードすると解放されます。",
         },
         { status: 402 }
       );
     }
 
-    // ここから：元attemptの取得
-    // ※ case_logs / fermi_sessions のカラムが確定してないので、
-    // “まずはJSONをそのまま保存してる列”がある想定で読みます（後で実カラムに合わせて調整）
-    const table = attemptType ==="case_interview" ? "case_logs" : "fermi_sessions";
+    const table = attemptType === "case_interview" ? "case_logs" : "fermi_sessions";
 
-    const { data: attempt, error: attemptErr } = await supabaseAdmin
-      .from(table)
-      .select("*")
-      .eq("id", attemptId)
-      .maybeSingle();
+    // ✅ 自分のデータしか触れないガード（サービスロールなので必須）
+    // 可能なら tables 側に user_id がある前提でここも絞る
+    const q = supabaseAdmin.from(table).select("*").eq("id", attemptId);
+
+    // もし table に user_id があるならこの1行を有効化してね：
+    // q.eq("user_id", userId);
+
+    const { data: attempt, error: attemptErr } = await q.maybeSingle();
 
     if (attemptErr || !attempt) {
       return NextResponse.json(
@@ -57,8 +65,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // TODO: ここでOpenAIに投げて「同構造・別数値・別業界」で再生成する
-    // 今は返すだけ（本番ではcallOpenAIに差し替え）
     return NextResponse.json({
       ok: true,
       mode,

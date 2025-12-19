@@ -17,14 +17,12 @@ const supabase = createBrowserClient(
 );
 
 type AxisKey = "strategic" | "analytical" | "intuitive" | "creative";
-
 type AxisScore = Record<AxisKey, number>;
 
 type QuestionOption = {
   text: string;
   score: Partial<AxisScore>;
 };
-
 type Question = {
   id: number;
   text: string;
@@ -60,20 +58,15 @@ type TypeProfile = {
   recommended: string[];
 };
 
-// Supabase用プロフィール型（16タイプの結果だけ見る）
+type Plan = "free" | "pro" | "meta" | "beta" | (string & {});
+
+// ✅ profiles.id = auth.users.id 前提で統一
 type ProfileRow = {
-  id: string;
-  ai_type_key : TypeId | null;
+  id: string; // auth.users.id
+  ai_type_key: TypeId | null;
   ai16_axis_score: AxisScore | null;
-};
-
-// Deepレポート用
-type SubscriptionRow = {
-  status: string | null;
-};
-
-type MetaWalletRow = {
-  balance: number | null;
+  plan: Plan | null;
+  meta_balance: number | null;
 };
 
 // 初期スコア
@@ -85,7 +78,6 @@ const INITIAL_SCORE: AxisScore = {
 };
 
 // ーーー 直感アンケート10問 ーーー
-
 const QUESTIONS: Question[] = [
   {
     id: 1,
@@ -265,7 +257,6 @@ const QUESTIONS: Question[] = [
 ];
 
 // ーーー 16タイププロファイル ーーー
-
 const TYPE_PROFILES: Record<TypeId, TypeProfile> = {
   strategic_copilot: {
     id: "strategic_copilot",
@@ -665,7 +656,9 @@ const AXIS_TYPE_GROUPS: Record<AxisKey, TypeId[]> = {
   ],
 };
 
-// ーーー メインコンポーネント ーーー
+// ============================
+// メインコンポーネント
+// ============================
 
 export default function Diagnosis16TypePage() {
   const router = useRouter();
@@ -685,7 +678,10 @@ export default function Diagnosis16TypePage() {
     const run = async () => {
       const {
         data: { user },
+        error: userErr,
       } = await supabase.auth.getUser();
+
+      if (userErr) console.error("auth getUser error:", userErr);
 
       if (!user) {
         router.push("/auth");
@@ -695,19 +691,15 @@ export default function Diagnosis16TypePage() {
       try {
         const { data: profile, error } = await supabase
           .from("profiles")
-          .select("id, ai_type_key,ai16_axis_score")
-          .eq("id", user.id)
-          .maybeSingle<ProfileRow>();
+          .select("id, ai_type_key, ai16_axis_score")
+          .eq("id", user.id) // ✅ profiles.id = auth.users.id
+          .maybeSingle<Pick<ProfileRow, "id" | "ai_type_key" | "ai16_axis_score">>();
 
-        if (error) {
-          console.error("load 16type profile error:", error);
-        }
+        if (error) console.error("load 16type profile error:", error);
 
-        if (profile && profile.ai_type_key ) {
-          setResultId(profile.ai_type_key );
-          if (profile.ai16_axis_score) {
-            setScore(profile.ai16_axis_score);
-          }
+        if (profile?.ai_type_key) {
+          setResultId(profile.ai_type_key);
+          if (profile.ai16_axis_score) setScore(profile.ai16_axis_score);
           setCurrentIndex(totalQuestions); // progress 100%
         }
       } catch (e) {
@@ -721,44 +713,43 @@ export default function Diagnosis16TypePage() {
   }, [router, totalQuestions]);
 
   const finalizeDiagnosis = async (finalScore: AxisScore) => {
-  const typeId = decideType(finalScore);
-  setScore(finalScore);
-  setResultId(typeId);
-  setCurrentIndex(totalQuestions);
+    const typeId = decideType(finalScore);
+    setScore(finalScore);
+    setResultId(typeId);
+    setCurrentIndex(totalQuestions);
 
-  setSaving(true);
-  try {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    setSaving(true);
+    try {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
 
-    if (!user) {
-      console.error("no user when saving 16type");
-      return;
+      if (!user) {
+        console.error("no user when saving 16type");
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("profiles")
+        .update({
+          ai_type_key: typeId,
+          ai16_axis_score: finalScore,
+        })
+        .eq("id", user.id) // ✅ profiles.id = auth.users.id
+        .select("id, ai_type_key, ai16_axis_score")
+        .single();
+
+      if (error) {
+        console.error("save 16type result error:", error);
+      } else {
+        console.log("16type saved:", data);
+      }
+    } catch (e) {
+      console.error("save 16type result unexpected error:", e);
+    } finally {
+      setSaving(false);
     }
-
-    const { data, error } = await supabase
-      .from("profiles")
-      .update({
-        ai_type_key: typeId,
-        ai16_axis_score: finalScore,
-      })
-      .eq("id", user.id)
-      .select("id, ai_type_key, ai16_axis_score")
-      .single();
-
-    if (error) {
-      console.error("save 16type result error:", error);
-    } else {
-      console.log("16type saved:", data);
-    }
-  } catch (e) {
-    console.error("save 16type result unexpected error:", e);
-  } finally {
-    setSaving(false);
-  }
-};
-
+  };
 
   const handleSelect = (option: QuestionOption) => {
     const newScore: AxisScore = {
@@ -779,7 +770,6 @@ export default function Diagnosis16TypePage() {
   };
 
   const handleRestart = () => {
-    // 「もう一度診断する」→ 再診断（上書き）
     setCurrentIndex(0);
     setScore(INITIAL_SCORE);
     setResultId(null);
@@ -796,7 +786,7 @@ export default function Diagnosis16TypePage() {
 
     const text = `Mentor.AI 16タイプ診断の結果は「${profile.nameEn}（${profile.nameJa}）」でした🧠✨\nAIとの付き合い方が可視化される診断。\n${url}`;
 
-    if (navigator && navigator.clipboard) {
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
       navigator.clipboard.writeText(text).then(() => {
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
@@ -860,10 +850,7 @@ export default function Diagnosis16TypePage() {
       </section>
 
       {!resultId ? (
-        <QuestionCard
-          question={QUESTIONS[currentIndex]}
-          onSelect={handleSelect}
-        />
+        <QuestionCard question={QUESTIONS[currentIndex]} onSelect={handleSelect} />
       ) : (
         <ResultSection
           typeId={resultId}
@@ -883,23 +870,39 @@ export default function Diagnosis16TypePage() {
   );
 }
 
-// ーーー タイプ決定ロジック ーーー
+// ============================
+// タイプ決定ロジック
+// ============================
 
 function decideType(axisScore: AxisScore): TypeId {
-  // 軸スコアの中で最大のものを主軸とする
-  const entries = Object.entries(axisScore) as [AxisKey, number][];
-  const sorted = entries.sort((a, b) => b[1] - a[1]);
-  const mainAxis = sorted[0][0];
-  const mainScore = sorted[0][1];
+  // 最大軸（同点なら固定順で決める）
+  const order: AxisKey[] = ["strategic", "analytical", "intuitive", "creative"];
+  const mainAxis = order.reduce((best, k) => {
+    const bestV = axisScore[best];
+    const v = axisScore[k];
+    if (v > bestV) return k;
+    return best;
+  }, order[0]);
 
-  // 主軸のスコアから、4タイプのどれかに割り当て（適当なばらけ方でOK）
   const group = AXIS_TYPE_GROUPS[mainAxis];
-  const index = mainScore % group.length;
 
+  // ばらけさせたいので「合計スコア」も混ぜる（同点でも偏らない）
+  const sum =
+    axisScore.strategic +
+    axisScore.analytical +
+    axisScore.intuitive +
+    axisScore.creative;
+
+  const mainScore = axisScore[mainAxis];
+
+  // 0〜3 に安定して落とす
+  const index = (mainScore + sum) % group.length;
   return group[index];
 }
 
-// ーーー サブコンポーネント ーーー
+// ============================
+// サブコンポーネント
+// ============================
 
 function QuestionCard({
   question,
@@ -1092,7 +1095,7 @@ function AxisBar({ label, value }: { label: string; value: number }) {
 }
 
 // =========================
-// Deepレポート ロックセクション
+// Deepレポート ロックセクション（完全修正版）
 // =========================
 
 function DeepReportLockSection({
@@ -1102,39 +1105,42 @@ function DeepReportLockSection({
   typeId: TypeId;
   profile: TypeProfile;
 }) {
-  const [sub, setSub] = useState<SubscriptionRow | null>(null);
-  const [wallet, setWallet] = useState<MetaWalletRow | null>(null);
+  const [p, setP] = useState<Pick<ProfileRow, "plan" | "meta_balance"> | null>(
+    null
+  );
   const [loading, setLoading] = useState(true);
 
-  const requiredMeta = 500; // Deepレポート解放に必要なMeta量（仮）
+  const requiredMeta = 500; // 仮（後で feature cost に合わせる）
 
   useEffect(() => {
     const run = async () => {
       try {
         const {
           data: { user },
+          error: userErr,
         } = await supabase.auth.getUser();
+
+        if (userErr) console.error("deep report auth getUser error:", userErr);
+
         if (!user) {
+          setP({ plan: "free", meta_balance: 0 });
           setLoading(false);
           return;
         }
 
-        const { data: subRow } = await supabase
-          .from("subscriptions")
-          .select("status")
-          .eq("user_id", user.id)
-          .maybeSingle<SubscriptionRow>();
+        // ✅ profiles.id = auth.users.id 前提
+        const { data, error } = await supabase
+          .from("profiles")
+          .select("plan, meta_balance")
+          .eq("id", user.id)
+          .maybeSingle<Pick<ProfileRow, "plan" | "meta_balance">>();
 
-        const { data: walletRow } = await supabase
-          .from("meta_wallet")
-          .select("balance")
-          .eq("user_id", user.id)
-          .maybeSingle<MetaWalletRow>();
+        if (error) console.error("deep report profile load error:", error);
 
-        setSub(subRow ?? { status: null });
-        setWallet(walletRow ?? { balance: 0 });
+        setP(data ?? { plan: "free", meta_balance: 0 });
       } catch (e) {
         console.error("deep report load error:", e);
+        setP({ plan: "free", meta_balance: 0 });
       } finally {
         setLoading(false);
       }
@@ -1142,6 +1148,20 @@ function DeepReportLockSection({
 
     run();
   }, []);
+
+  const plan = (p?.plan ?? "free").toLowerCase();
+  const isPro = plan === "pro";
+  const metaBalance = p?.meta_balance ?? 0;
+  const canUseMeta = metaBalance >= requiredMeta;
+
+  const handleGenerate = async () => {
+    // ✅ ここで Deepレポート生成API と Meta消費を接続していく想定
+    // 例：/api/deep-report/generate 叩く → 成功で画面に結果表示 or 別ページへ遷移
+    // Meta消費するなら：/api/meta/use → requiredMeta 消費 → generate
+    alert(
+      `Deepレポート生成（β）を呼ぶ場所。\nタイプ: ${typeId}\nplan=${plan}\nmeta=${metaBalance}`
+    );
+  };
 
   if (loading) {
     return (
@@ -1151,46 +1171,23 @@ function DeepReportLockSection({
     );
   }
 
-  const isPro = sub?.status === "active";
-  const metaBalance = wallet?.balance ?? 0;
-
-  const handleGenerate = () => {
-    alert(
-      "ここに「16タイプDeepレポート（企業マッチング含む）」生成APIをつなぐ予定です。"
-    );
-  };
-
-  // Proユーザー：常に解放
+  // ✅ Pro: 無条件解放
   if (isPro) {
     return (
       <section className="space-y-3 rounded-2xl border border-emerald-300 bg-emerald-50/80 p-4 text-[11px] text-emerald-800">
         <div className="mb-1 flex items-center justify-between">
-          <p className="text-[11px] font-semibold">
-            🔓 Deepレポート（Proプランで解放中）
-          </p>
+          <p className="text-[11px] font-semibold">🔓 Deepレポート（Proで解放中）</p>
           <span className="rounded-full bg-white/60 px-2 py-0.5 text-[10px] font-semibold">
-            ProユーザーはMeta消費なし
+            ProはMeta消費なし
           </span>
         </div>
-        <p className="text-[11px] text-emerald-900">
-          あなたの16タイプ
-          <span className="font-semibold">
-            「{profile.nameEn} / {profile.nameJa}」
-          </span>
-          をもとに、
-          <br />
-          ・より詳しい行動特性・思考のクセ
-          <br />
-          ・志望業界・企業とのマッチング（詳細コメント）
-          <br />
-          ・ガクチカ/職務経歴との「戦い方の組み立て方」
-          <br />
-          などをまとめたDeepレポートを生成できます。
+        <p className="text-[10px] text-emerald-800/80">
+          {profile.nameJa}の結果をもとに、企業・業界ギャップと戦い方を深掘りします。
         </p>
         <button
           type="button"
           onClick={handleGenerate}
-          className="mt-2 inline-flex items-center rounded-full bg-emerald-600 px-4 py-1.5 text-[11px] font-semibold text-white shadow-sm hover:bg-emerald-700"
+          className="inline-flex items-center rounded-full bg-emerald-600 px-4 py-1.5 text-[11px] font-semibold text-white shadow-sm hover:bg-emerald-700"
         >
           Deepレポートを生成する（β） →
         </button>
@@ -1198,39 +1195,28 @@ function DeepReportLockSection({
     );
   }
 
-  // Meta残高が足りている場合：Metaで一時解放
-  if (metaBalance >= requiredMeta) {
+  // ✅ Meta残高あり: Metaで解放
+  if (canUseMeta) {
     return (
       <section className="space-y-3 rounded-2xl border border-amber-300 bg-amber-50/80 p-4 text-[11px] text-amber-900">
         <div className="flex items-center justify-between">
-          <p className="text-[11px] font-semibold">
-            🔑 Deepレポート（Metaで一時解放）
-          </p>
+          <p className="text-[11px] font-semibold">🔑 Deepレポート（Metaで解放）</p>
           <span className="text-[10px]">
-            残高: {metaBalance} Meta / 必要: {requiredMeta} Meta
+            残高: {metaBalance} / 必要: {requiredMeta}
           </span>
         </div>
-        <p className="text-[11px]">
-          16タイプ × 志望業界 × あなたの経験をもとに、
-          <span className="font-semibold">より具体的な戦い方レポート</span>
-          を生成できます。
-          <br />
-          一度解放すると、その診断結果に紐づくDeepレポートを閲覧できる想定です。
+        <p className="text-[10px] text-amber-900/80">
+          Metaを消費して、Deepレポート（企業・業界ギャップ / 攻め方 / 守り方）を生成します。
         </p>
-        <div className="flex flex-wrap items-center gap-2 pt-1">
-          <button
-            type="button"
-            onClick={handleGenerate}
-            className="inline-flex items-center rounded-full bg-amber-500 px-4 py-1.5 text-[11px] font-semibold text-white shadow-sm hover:bg-amber-600"
-          >
-            Metaを使ってDeepレポートを解放 →
-          </button>
-          <span className="text-[10px] text-amber-900/80">
-            ※実際のMeta消費APIは後で接続します。
-          </span>
-        </div>
+        <button
+          type="button"
+          onClick={handleGenerate}
+          className="inline-flex items-center rounded-full bg-amber-500 px-4 py-1.5 text-[11px] font-semibold text-white shadow-sm hover:bg-amber-600"
+        >
+          Metaを使ってDeepレポートを解放 →
+        </button>
         <p className="mt-2 border-t border-amber-100 pt-2 text-[10px] text-slate-600">
-          Proプランなら、Metaを使わずにいつでもDeepレポートを閲覧できます。
+          ProならMeta消費なしで使えます。
           <a href="/plans" className="ml-1 underline">
             プランを見る
           </a>
@@ -1239,7 +1225,7 @@ function DeepReportLockSection({
     );
   }
 
-  // Proでもなく、Metaも足りない場合：完全ロック（案内のみ）
+  // ✅ 完全ロック: Pro/Meta誘導（return重複なし）
   return (
     <section className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-[11px] text-slate-700">
       <div className="flex items-center gap-2">
@@ -1253,15 +1239,17 @@ function DeepReportLockSection({
             <span className="font-semibold">
               「企業・業界とのギャップ」「攻め方・守り方」
             </span>
-            まで踏み込んだレポートを生成する有料機能です。
+            まで踏み込んだレポートを生成します。
           </p>
         </div>
       </div>
+
       <ul className="list-disc pl-5 text-[11px] text-slate-700">
         <li>あなたの16タイプの「さらに深い説明」</li>
         <li>志望業界・企業ごとのフィット感とギャップの言語化</li>
         <li>選考でどう見せるか（プロンプト例付き）</li>
       </ul>
+
       <div className="flex flex-wrap gap-2 pt-1">
         <a
           href="/plans"
@@ -1276,9 +1264,15 @@ function DeepReportLockSection({
           Metaをチャージする →
         </a>
       </div>
-      <p className="text-[10px] text-slate-500">
-        ※まずは上のライト版結果と業界フィット感をベースに、無料機能だけでも十分に就活設計が可能です。
-      </p>
+
+      <div className="rounded-xl bg-white/70 p-3 text-[10px] text-slate-600">
+        <p className="font-semibold text-slate-700">現在の状態</p>
+        <p>
+          plan: <span className="font-mono">{plan}</span> / Meta残高:{" "}
+          <span className="font-mono">{metaBalance}</span>（必要:{" "}
+          <span className="font-mono">{requiredMeta}</span>）
+        </p>
+      </div>
     </section>
   );
 }

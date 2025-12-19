@@ -13,48 +13,46 @@ const createBrowserSupabaseClient = () =>
 
 type BrowserSupabaseClient = ReturnType<typeof createBrowserSupabaseClient>;
 
-type SubStatus = {
-  isPro: boolean;
-};
-
-type MetaWallet = {
-  balance: number;
+type ProfileGate = {
+  plan: "free" | "pro" | null;
+  meta_balance: number | null;
 };
 
 export function ProfileDeepSection() {
   const [supabase] = useState<BrowserSupabaseClient>(() =>
     createBrowserSupabaseClient()
   );
-  const [sub, setSub] = useState<SubStatus | null>(null);
-  const [wallet, setWallet] = useState<MetaWallet | null>(null);
+
   const [loading, setLoading] = useState(true);
+  const [isPro, setIsPro] = useState(false);
+  const [metaBalance, setMetaBalance] = useState(0);
 
   useEffect(() => {
     const load = async () => {
       const {
         data: { user },
       } = await supabase.auth.getUser();
+
       if (!user) {
         setLoading(false);
         return;
       }
 
-      const { data: subRow } = await supabase
-        .from("subscriptions")
-        .select("status")
-        .eq("user_id", user.id)
-        .maybeSingle();
+      // ✅ subscriptions / meta_wallet は見ない。profiles(plan, meta_balance) に一本化。
+      const { data: pRow, error } = await supabase
+        .from("profiles")
+        .select("plan, meta_balance")
+        .eq("auth_user_id", user.id)
+        .maybeSingle<ProfileGate>();
 
-      const { data: walletRow } = await supabase
-        .from("meta_wallet")
-        .select("balance")
-        .eq("user_id", user.id)
-        .maybeSingle();
+      if (error) console.error("deep profile load error:", error);
 
-      setSub({ isPro: subRow?.status === "active" });
-      setWallet({ balance: walletRow?.balance ?? 0 });
+      const plan = (pRow?.plan ?? "free") as "free" | "pro";
+      setIsPro(plan === "pro");
+      setMetaBalance(pRow?.meta_balance ?? 0);
       setLoading(false);
     };
+
     void load();
   }, [supabase]);
 
@@ -65,9 +63,6 @@ export function ProfileDeepSection() {
       </section>
     );
   }
-
-  const metaBalance = wallet?.balance ?? 0;
-  const isPro = sub?.isPro ?? false;
 
   return (
     <section className="space-y-4 rounded-2xl border bg-white/70 p-6">
@@ -80,11 +75,10 @@ export function ProfileDeepSection() {
         metaBalance={metaBalance}
         requiredMeta={500}
         onUseMeta={() => {
-          // ここで Meta消費のAPIをつなぐ
+          // ✅ ここで /api/meta/use (RPC consume_meta_fifo) に繋ぐ
           alert("Meta消費APIをつなぐ箇所");
         }}
         onUpgradePlan={() => {
-          // プランページへ遷移
           window.location.href = "/plans";
         }}
       >

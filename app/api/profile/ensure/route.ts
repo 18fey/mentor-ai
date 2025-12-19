@@ -1,8 +1,7 @@
-// app/api/profile/save/route.ts
+// app/api/profile/ensure/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
-import { supabaseServer } from "@/lib/supabase-server";
 import { appMode } from "@/lib/featureFlags";
 
 export const runtime = "nodejs";
@@ -10,24 +9,22 @@ export const dynamic = "force-dynamic";
 
 type Database = any;
 
-// DB 行のざっくり型（完全じゃなくてOK）
-type UserProfileRow = {
+type ProfileRow = {
   id: string;
-  auth_user_id: string | null;
-  name: string | null;
-  university: string | null;
-  faculty: string | null;
-  grade: string | null;
-  interested_industries: string[] | null;
-  values_tags: string[] | null;
-  plan: string | null;
-  beta_user: boolean | null;
-  cohort: string | null;
+  auth_user_id: string;
+  display_name: string | null;
+  affiliation: string | null;
+  job_stage: string | null;
+  purpose: string | null;
+  interests: string[] | null;
+  target_companies: string[] | null;
+  plan: "free" | "pro" | null;
+  meta_balance: number | null;
+  cohort: number | null;
 };
 
 async function createSupabaseFromCookies() {
   const cookieStore = await cookies();
-
   return createServerClient<Database>(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -49,104 +46,67 @@ async function createSupabaseFromCookies() {
 
 async function requireAuthUserId() {
   const supabase = await createSupabaseFromCookies();
-  const { data: auth, error: authErr } = await supabase.auth.getUser();
-  const user = auth?.user ?? null;
-
-  if (authErr || !user?.id) return null;
-  return user.id;
+  const { data, error } = await supabase.auth.getUser();
+  if (error || !data.user?.id) return null;
+  return data.user.id;
 }
 
-/**
- * GET: プロフィール取得（✅ query userId 廃止。セッションから）
- */
-export async function GET(_req: NextRequest) {
+export async function POST(_req: NextRequest) {
   try {
     const authUserId = await requireAuthUserId();
-
     if (!authUserId) {
-      return NextResponse.json(
-        { error: "not_authenticated", profile: null },
-        { status: 401 }
-      );
+      return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
     }
 
-    const { data, error } = await supabaseServer
+    const supabase = await createSupabaseFromCookies();
+
+    // 1) 既存チェック
+    const { data: existing, error: selErr } = await supabase
       .from("profiles")
-      .select("*")
+      .select(
+        "id, auth_user_id, display_name, affiliation, job_stage, purpose, interests, target_companies, plan, meta_balance, cohort"
+      )
       .eq("auth_user_id", authUserId)
-      .limit(1)
-      .maybeSingle<UserProfileRow>();
+      .maybeSingle<ProfileRow>();
 
-    if (error) {
-      console.error("[profile/save] GET error:", error);
-      return NextResponse.json({ error: "profile_get_failed" }, { status: 500 });
+    if (selErr) {
+      console.error("[profile/ensure] select error:", selErr);
+      return NextResponse.json({ ok: false, error: "profile_select_failed" }, { status: 500 });
     }
 
-    if (!data) {
-      return NextResponse.json({ profile: null });
+    if (existing) {
+      return NextResponse.json({ ok: true, created: false, profileId: existing.id });
     }
 
-    return NextResponse.json({
-      profile: {
-        id: data.id,
-        authUserId: data.auth_user_id,
-        name: data.name ?? "",
-        university: data.university ?? "",
-        faculty: data.faculty ?? "",
-        grade: data.grade ?? "",
-        interestedIndustries: data.interested_industries ?? [],
-        valuesTags: data.values_tags ?? [],
-        plan: data.plan ?? "free",
-        betaUser: data.beta_user ?? false,
-        cohort: data.cohort ?? null,
-      },
-    });
-  } catch (e) {
-    console.error("[profile/save] GET exception:", e);
-    return NextResponse.json({ error: "profile_get_failed" }, { status: 500 });
-  }
-}
+    // 2) 無ければ作る（RLS: auth_user_id = auth.uid() を満たす）
+    const cohort =
+      appMode === "classroom" ? 2024 /* 例：intで持つ前提 */ : 0;
 
-/**
- * POST: プロフィール保存（✅ body の userId/authUserId 廃止。セッションから）
- */
-export async function POST(req: NextRequest) {
-  try {
-    const authUserId = await requireAuthUserId();
-
-    if (!authUserId) {
-      return NextResponse.json({ error: "not_authenticated" }, { status: 401 });
-    }
-
-    const body = await req.json().catch(() => ({} as any));
-
-    const rowToUpsert: any = {
-      auth_user_id: authUserId,
-      name: body.name ?? null,
-      university: body.university ?? null,
-      faculty: body.faculty ?? null,
-      grade: body.grade ?? null,
-      interested_industries: body.interestedIndustries ?? [],
-      values_tags: body.valuesTags ?? [],
-    };
-
-    // 🧠 授業モードから保存されたユーザーには cohort を付与
-    if (appMode === "classroom") {
-      rowToUpsert.cohort = "keio_fujita_2024_fujita_seminar";
-    }
-
-    const { error } = await supabaseServer
+    const { data: created, error: insErr } = await supabase
       .from("profiles")
-      .upsert(rowToUpsert, { onConflict: "auth_user_id" });
+      .insert({
+        auth_user_id: authUserId,
+        display_name: null,
+        affiliation: null,
+        job_stage: null,
+        purpose: null,
+        interests: [],
+        target_companies: [],
+        plan: "free",
+        meta_balance: 0,
+        cohort,
+      })
+      .select("id")
+      .single();
 
-    if (error) {
-      console.error("[profile/save] POST error:", error);
-      return NextResponse.json({ error: "profile_save_failed" }, { status: 500 });
+    if (insErr) {
+      console.error("[profile/ensure] insert error:", insErr);
+      return NextResponse.json({ ok: false, error: "profile_insert_failed" }, { status: 500 });
     }
 
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, created: true, profileId: created.id });
   } catch (e) {
-    console.error("[profile/save] POST exception:", e);
-    return NextResponse.json({ error: "profile_save_failed" }, { status: 500 });
+    console.error("[profile/ensure] exception:", e);
+    return NextResponse.json({ ok: false, error: "server_error" }, { status: 500 });
   }
 }

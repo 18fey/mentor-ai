@@ -8,12 +8,7 @@ type UpgradeModalProps = {
   open: boolean;
   onClose: () => void;
   title?: string;
-  // API から来るとき undefined / null もありうるので広めに
   message?: string | null;
-  /**
-   * どの機能でロックがかかったか（例：'フェルミ推定AI', 'ケース面接AI'）
-   * 渡ってきたらメッセージ文の中で使う
-   */
   featureLabel?: string;
   primaryLabel?: string;
   secondaryLabel?: string;
@@ -22,20 +17,19 @@ type UpgradeModalProps = {
 export const UpgradeModal: React.FC<UpgradeModalProps> = ({
   open,
   onClose,
-  title = "PROプランのご案内",
+  title = "PROのご案内",
   message,
   featureLabel,
-  primaryLabel = "PROプランにアップグレード",
+  primaryLabel = "プランを確認する",
   secondaryLabel = "あとで",
 }) => {
   if (!open) return null;
 
-  // 表示するメッセージをここで一本化しておく
   const displayMessage =
     message ??
     (featureLabel
-      ? `${featureLabel}の無料利用回数を使い切りました。PROプランにアップグレードすると、回数制限なく利用できます。`
-      : "無料プランでの利用回数を使い切りました。PROプランにアップグレードすると、回数制限なく利用できます。");
+      ? `${featureLabel}はPROで解放されます。`
+      : "この機能はPROで解放されます。");
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm">
@@ -59,7 +53,7 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
 
         <div className="mt-3 flex flex-col gap-2 text-xs">
           <Link
-            href="/settings" // プラン・料金 or 設定ページに飛ばす
+            href="/pricing" // ✅ ここに統一
             className="inline-flex w-full items-center justify-center rounded-full bg-violet-500 px-3 py-2 font-semibold text-white shadow-sm hover:bg-violet-600"
           >
             {primaryLabel}
@@ -74,7 +68,7 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
         </div>
 
         <p className="mt-3 text-[10px] text-slate-400">
-          ※ ケース面接AI・フェルミ推定AI・ES添削AIなど、PROプランでは回数制限なく利用できます。
+          ※保存など一部機能はPROで解放されます。
         </p>
       </div>
     </div>

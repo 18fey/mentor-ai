@@ -20,7 +20,8 @@ function createClientSupabase() {
 // =========================
 
 type ProfileRow = {
-  id: string;
+  id: string; // profiles のPK（uuid）
+  auth_user_id: string; // auth.users.id
   display_name: string | null;
   affiliation: string | null;
   status: string | null; // 学生 / 社会人 など
@@ -30,14 +31,10 @@ type ProfileRow = {
   onboarding_completed: boolean | null;
   ai_type_key: string | null; // 16タイプ診断（無料ベース）
   cohort: string | null; // クラスデモ識別用
-};
 
-type SubscriptionRow = {
-  status: string | null;
-};
-
-type MetaWalletRow = {
-  balance: number | null;
+  // ✅ ここが今回の肝：subscriptions / meta_wallet をやめて profiles に寄せる
+  plan?: "free" | "pro" | null;
+  meta_balance?: number | null;
 };
 
 // =========================
@@ -49,7 +46,7 @@ export default function ProfilePage() {
   const supabase = createClientSupabase();
 
   const [profile, setProfile] = useState<ProfileRow | null>(null);
-  const [userId, setUserId] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string | null>(null); // auth.users.id
   const [authChecked, setAuthChecked] = useState(false);
 
   useEffect(() => {
@@ -66,10 +63,11 @@ export default function ProfilePage() {
 
         setUserId(user.id);
 
+        // ✅ profiles は auth_user_id で引く
         const { data, error } = await supabase
           .from("profiles")
           .select("*")
-          .eq("id", user.id)
+          .eq("auth_user_id", user.id)
           .maybeSingle<ProfileRow>();
 
         if (error) {
@@ -79,10 +77,14 @@ export default function ProfilePage() {
         if (data) {
           setProfile(data);
         } else {
-          // プロファイルがまだない場合は空行を作成
+          // ✅ プロファイルがまだない場合は作成（auth_user_id で作る）
           const { data: inserted, error: insertError } = await supabase
             .from("profiles")
-            .insert({ id: user.id })
+            .insert({
+              auth_user_id: user.id,
+              plan: "free",
+              meta_balance: 0,
+            })
             .select("*")
             .single<ProfileRow>();
 
@@ -127,7 +129,7 @@ export default function ProfilePage() {
         </p>
       </header>
 
-      {/* ユーザーID表示 */}
+      {/* ユーザーID表示（auth.users.id） */}
       <section>
         <label className="text-xs text-slate-500 block mb-1">ユーザーID</label>
         <input
@@ -191,6 +193,7 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
             .filter(Boolean)
         : [];
 
+    // ✅ 更新も auth_user_id で絞る
     const { data, error } = await supabase
       .from("profiles")
       .update({
@@ -202,7 +205,7 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
         target_companies: targetCompaniesArray,
         onboarding_completed: true,
       })
-      .eq("id", profile.id)
+      .eq("auth_user_id", profile.auth_user_id)
       .select("*")
       .single<ProfileRow>();
 
@@ -261,27 +264,25 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
             現在のステータス
           </label>
           <div className="flex flex-wrap gap-2">
-            {["大学生", "大学院生", "社会人", "転職検討中", "その他"].map(
-              (s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() =>
-                    setForm((f) => ({
-                      ...f,
-                      status: f.status === s ? "" : s,
-                    }))
-                  }
-                  className={`px-3 py-1 rounded-full border text-xs ${
-                    form.status === s
-                      ? "bg-sky-500 text-white border-sky-500"
-                      : "bg-white text-slate-700"
-                  }`}
-                >
-                  {s}
-                </button>
-              )
-            )}
+            {["大学生", "大学院生", "社会人", "転職検討中", "その他"].map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() =>
+                  setForm((f) => ({
+                    ...f,
+                    status: f.status === s ? "" : s,
+                  }))
+                }
+                className={`px-3 py-1 rounded-full border text-xs ${
+                  form.status === s
+                    ? "bg-sky-500 text-white border-sky-500"
+                    : "bg-white text-slate-700"
+                }`}
+              >
+                {s}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -398,9 +399,7 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
           {saving ? "保存中..." : "保存する"}
         </button>
         {message && (
-          <p className="text-xs text-slate-500 whitespace-pre-line">
-            {message}
-          </p>
+          <p className="text-xs text-slate-500 whitespace-pre-line">{message}</p>
         )}
       </div>
     </section>
@@ -409,14 +408,15 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
 
 // =========================
 // Deepプロフィールセクション（ロックUI）
+// ✅ subscriptions / meta_wallet を読まず profiles(plan, meta_balance) のみに統一
 // =========================
 
 function ProfileDeepSection() {
   const supabase = createClientSupabase();
 
-  const [sub, setSub] = useState<SubscriptionRow | null>(null);
-  const [wallet, setWallet] = useState<MetaWalletRow | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isPro, setIsPro] = useState(false);
+  const [metaBalance, setMetaBalance] = useState(0);
 
   useEffect(() => {
     const run = async () => {
@@ -424,22 +424,22 @@ function ProfileDeepSection() {
         const {
           data: { user },
         } = await supabase.auth.getUser();
-        if (!user) return;
+        if (!user) {
+          setLoading(false);
+          return;
+        }
 
-        const { data: subRow } = await supabase
-          .from("subscriptions")
-          .select("status")
-          .eq("user_id", user.id)
-          .maybeSingle<SubscriptionRow>();
+        const { data: pRow, error } = await supabase
+          .from("profiles")
+          .select("plan, meta_balance")
+          .eq("auth_user_id", user.id)
+          .maybeSingle();
 
-        const { data: walletRow } = await supabase
-          .from("meta_wallet")
-          .select("balance")
-          .eq("user_id", user.id)
-          .maybeSingle<MetaWalletRow>();
+        if (error) console.error("deep profile load error:", error);
 
-        setSub(subRow ?? { status: null });
-        setWallet(walletRow ?? { balance: 0 });
+        const plan = (pRow?.plan ?? "free") as "free" | "pro";
+        setIsPro(plan === "pro");
+        setMetaBalance(pRow?.meta_balance ?? 0);
       } catch (e) {
         console.error("deep profile load error:", e);
       } finally {
@@ -457,9 +457,6 @@ function ProfileDeepSection() {
       </section>
     );
   }
-
-  const isPro = sub?.status === "active";
-  const metaBalance = wallet?.balance ?? 0;
 
   return (
     <section className="rounded-2xl border bg-white/70 p-6 space-y-4">
@@ -479,15 +476,13 @@ function ProfileDeepSection() {
         metaBalance={metaBalance}
         requiredMeta={500} // Deepプロフィール解放に必要なMeta量（仮）
         onUseMeta={() => {
-          // TODO: Meta消費APIにつなぐ
+          // TODO: Meta消費API（/api/meta/use → RPC consume_meta_fifo）に接続
           alert("Meta消費APIをここにつなぐ予定です。");
         }}
         onUpgradePlan={() => {
-          // プランページへ
           window.location.href = "/plans";
         }}
       >
-        {/* ここに将来、deep_profiles を編集するフォームを追加 */}
         <p className="text-xs text-slate-600">
           ※ Proプランでは Meta消費なしで常に利用できます。Metaで一時解放も可能です。
         </p>
@@ -520,7 +515,6 @@ function LockBox({
   const hasEnoughMeta = metaBalance >= requiredMeta;
 
   if (isPro) {
-    // Proユーザーは常に解放
     return (
       <div className="rounded-xl border border-emerald-300 bg-emerald-50/70 p-4 space-y-3">
         <div className="text-xs font-semibold text-emerald-700">
@@ -532,7 +526,6 @@ function LockBox({
   }
 
   if (hasEnoughMeta) {
-    // Meta残高は足りている → 使うかどうか選択
     return (
       <div className="rounded-xl border border-amber-300 bg-amber-50/70 p-4 space-y-3">
         <div className="flex items-center justify-between text-xs text-amber-700">
@@ -566,7 +559,6 @@ function LockBox({
     );
   }
 
-  // Metaも足りない＆Proでもない → 完全ロック
   return (
     <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3 opacity-80">
       <div className="flex items-center gap-2 text-sm font-medium text-slate-700">

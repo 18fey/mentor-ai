@@ -1,28 +1,31 @@
 // lib/plan.ts
 import { supabaseServer } from "@/lib/supabase-server";
 
-export type Plan = "free" | "pro" | "beta";
+export type Plan = "free" | "pro" | "elite";
 
 // ✅ 利用制限の単位（ここに追加するだけで全APIが型エラーなく増やせる）
 export type UsageFeature =
   | "case_generate"
   | "fermi_generate"
-  | "case_fermi" // 互換用（過去の合算カウントを残すなら）
+  | "case_fermi"
   | "interview"
-  | "ai_training"; // ✅ 追加
+  | "ai_training";
+
+function isUnlimited(plan: Plan) {
+  return plan === "pro" || plan === "elite";
+}
 
 export async function getUserPlan(userId: string): Promise<Plan> {
   const { data, error } = await supabaseServer
     .from("profiles")
-    .select("plan, beta_user")
-    .eq("id", userId)
+    .select("plan")
+    .eq("id", userId) // ✅ 統一
     .maybeSingle();
 
   if (error || !data) return "free";
 
-  // beta_user は事実上のフル解放扱いにする
-  if (data.beta_user) return "beta";
-  if (data.plan === "pro") return "pro";
+  const p = (data.plan as Plan) ?? "free";
+  if (p === "pro" || p === "elite") return p;
 
   return "free";
 }
@@ -33,13 +36,12 @@ export async function getUserPlan(userId: string): Promise<Plan> {
 export async function checkMonthlyLimit(params: {
   userId: string;
   feature: UsageFeature;
-  freeLimit: number; // free の上限
+  freeLimit: number;
 }) {
   const { userId, feature, freeLimit } = params;
 
   const plan = await getUserPlan(userId);
-  if (plan === "pro" || plan === "beta") {
-    // PRO / βユーザーは無制限
+  if (isUnlimited(plan)) {
     return { allowed: true, plan, remaining: Infinity };
   }
 
@@ -79,9 +81,8 @@ export async function logUsage(userId: string, feature: UsageFeature) {
   if (error) console.error("logUsage error", error);
 }
 
-// lib/plan.ts （末尾に追記してOK）
 export async function requirePro(userId: string) {
   const plan = await getUserPlan(userId);
-  const ok = plan === "pro" || plan === "beta";
+  const ok = plan === "pro" || plan === "elite";
   return { ok, plan };
 }

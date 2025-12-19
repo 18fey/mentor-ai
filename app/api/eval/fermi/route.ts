@@ -4,6 +4,8 @@ import { createServerSupabase } from "@/utils/supabase/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { getUserPlan } from "@/lib/plan";
 
+export const runtime = "nodejs";
+
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL_EVAL = process.env.OPENAI_MODEL_EVAL_FERMI || "gpt-4o-mini";
 
@@ -22,6 +24,16 @@ function clamp0to10(n: any) {
   return Math.max(0, Math.min(10, Math.round(x)));
 }
 
+function safeJsonParse(s: string) {
+  try {
+    return JSON.parse(s);
+  } catch {
+    const m = s.match(/\{[\s\S]*\}/);
+    if (!m) throw new Error("Invalid JSON from model");
+    return JSON.parse(m[0]);
+  }
+}
+
 export async function POST(req: Request) {
   try {
     if (!OPENAI_API_KEY) {
@@ -31,15 +43,18 @@ export async function POST(req: Request) {
       );
     }
 
-    // ✅ cookieセッションから「本人」を確定（body.userIdは信じない）
-    const supabase = createServerSupabase();
+    // ✅ cookieセッションから本人確定（body.userIdは信じない）
+    const supabase = await createServerSupabase(); // ←★await 必須（ケースと揃える）
     const {
       data: { user },
       error: userErr,
     } = await supabase.auth.getUser();
 
     if (userErr || !user) {
-      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: "unauthorized", message: "login required" },
+        { status: 401 }
+      );
     }
     const userId = user.id;
 
@@ -48,7 +63,7 @@ export async function POST(req: Request) {
       formula: string;
       unit: string;
       factors: FermiFactor[];
-      sanityComment: string;
+      sanityComment?: string;
       result?: string;
       problemId?: string | null;
       category?: string;
@@ -67,6 +82,41 @@ export async function POST(req: Request) {
       );
     }
 
+    // ✅ usage/consume：Route Handler → 内部fetchは cookie が勝手に付かない
+    // → 元リクエストの Cookie を転送する（ケースと同じ）
+    const baseUrl = new URL(req.url).origin;
+    const cookieHeader = req.headers.get("cookie") ?? "";
+
+    const usageRes = await fetch(`${baseUrl}/api/usage/consume`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookieHeader,
+      },
+      body: JSON.stringify({ feature: "fermi" }), // ★ここはusage側のFeatureKeyに合わせて
+    });
+
+    const usageJson = await usageRes.json().catch(() => null);
+
+    if (!usageRes.ok) {
+      if (usageRes.status === 403 && usageJson?.error === "limit_exceeded") {
+        return NextResponse.json(
+          {
+            error: "limit_exceeded",
+            message:
+              usageJson?.message ??
+              "フェルミAIの今月の無料利用回数が上限に達しました。",
+          },
+          { status: 403 }
+        );
+      }
+      console.error("usage/consume error:", usageRes.status, usageJson);
+      return NextResponse.json(
+        { error: "usage_error", message: "Failed to check usage" },
+        { status: 500 }
+      );
+    }
+
     const plan = await getUserPlan(userId);
 
     const system = `
@@ -75,7 +125,7 @@ export async function POST(req: Request) {
 スコアは0〜10の整数（5軸）。totalScoreは5軸の合計（0〜50）。
 strengths/weaknessesは配列（3〜6個）。
 sampleAnswerは「短い模範（手順＋代表値＋結論）」を示す。
-`;
+`.trim();
 
     const userPrompt = `
 【お題】
@@ -111,7 +161,7 @@ ${sanityComment || "(なし)"}
     "totalScore": 0-50
   }
 }
-`;
+`.trim();
 
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -123,8 +173,8 @@ ${sanityComment || "(なし)"}
         model: OPENAI_MODEL_EVAL,
         temperature: 0.2,
         messages: [
-          { role: "system", content: system.trim() },
-          { role: "user", content: userPrompt.trim() },
+          { role: "system", content: system },
+          { role: "user", content: userPrompt },
         ],
       }),
     });
@@ -140,15 +190,7 @@ ${sanityComment || "(なし)"}
 
     const j = await r.json();
     const content = j?.choices?.[0]?.message?.content ?? "";
-
-    let parsed: any;
-    try {
-      parsed = JSON.parse(content);
-    } catch {
-      const m = content.match(/\{[\s\S]*\}/);
-      if (!m) throw new Error("Invalid JSON from model");
-      parsed = JSON.parse(m[0]);
-    }
+    const parsed = safeJsonParse(content);
 
     const s = parsed?.score ?? {};
     const fb = parsed?.feedback ?? {};
@@ -174,53 +216,74 @@ ${sanityComment || "(なし)"}
       weaknesses: Array.isArray(fb.weaknesses) ? fb.weaknesses.map(String) : [],
       advice: String(fb.advice ?? ""),
       sampleAnswer: String(fb.sampleAnswer ?? ""),
-      totalScore,
+      totalScore, // ←モデルの値は信用せず、計算値で上書き
     };
 
-    const insertPayload = {
+    const insertPayload: any = {
       user_id: userId,
       problem_id: body.problemId ?? null,
       category: body.category ?? null,
       difficulty: body.difficulty ?? null,
+
       total_score: totalScore,
       reframing: score.reframing,
       decomposition: score.decomposition,
       assumptions: score.assumptions,
       numbers_sense: score.numbersSense,
       sanity_check: score.sanityCheck,
+
       payload: {
         question,
         formula,
         unit,
         factors,
-        sanityComment,
+        sanityComment: sanityComment ?? null,
         result: body.result ?? null,
         feedback,
       },
     };
 
-    // ✅ 第一候補：RLSを通してinsert（ポリシーが正しければ通る）
-    let insErr = (await supabase.from("fermi_sessions").insert(insertPayload)).error;
+    // ✅ A: RLSでinsert（ポリシー必要）
+    let insertRes = await supabase
+      .from("fermi_sessions")
+      .insert(insertPayload)
+      .select("id")
+      .single();
 
-    // ✅ 保険：どうしてもダメならadminでinsert（運用で選ぶ）
-    if (insErr) {
-      console.error("fermi_sessions insert error (authed):", insErr);
-      const adminRes = await supabaseAdmin.from("fermi_sessions").insert(insertPayload);
-      if (adminRes.error) {
-        console.error("fermi_sessions insert error (admin):", adminRes.error);
-      } else {
-        insErr = null;
+    // ✅ B: 保険（RLSがまだ/壊れてる時だけ）
+    if (insertRes.error) {
+      console.error("fermi_sessions insert error (authed):", insertRes.error);
+      insertRes = await supabaseAdmin
+        .from("fermi_sessions")
+        .insert(insertPayload)
+        .select("id")
+        .single();
+
+      if (insertRes.error) {
+        console.error("fermi_sessions insert error (admin):", insertRes.error);
       }
     }
 
     return NextResponse.json({
       ok: true,
       plan,
+
+      remaining:
+        typeof usageJson?.remaining === "number" ? usageJson.remaining : null,
+      usedCount:
+        typeof usageJson?.usedCount === "number" ? usageJson.usedCount : null,
+      limit: typeof usageJson?.limit === "number" ? usageJson.limit : null,
+
       score,
       feedback,
+      totalScore,
+      logId: insertRes.data?.id ?? null,
     });
   } catch (e) {
     console.error(e);
-    return NextResponse.json({ error: "server_error" }, { status: 500 });
+    return NextResponse.json(
+      { error: "server_error", message: "server error" },
+      { status: 500 }
+    );
   }
 }

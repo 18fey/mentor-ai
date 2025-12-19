@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
-import { supabaseServer } from "@/lib/supabase-server";
+import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,13 +30,11 @@ const FEATURE_META_COST: Record<FeatureId, number> = {
   enterprise_qgen: 10,
 };
 
-type UseMetaRequest = {
-  feature: FeatureId;
-};
+type UseMetaRequest = { feature: FeatureId };
 
 async function createSupabaseFromCookies() {
   const cookieStore = await cookies();
-  return createServerClient<any>(
+  return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
@@ -55,6 +53,11 @@ async function createSupabaseFromCookies() {
   );
 }
 
+const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
+
 export async function POST(req: Request) {
   const supabase = await createSupabaseFromCookies();
 
@@ -63,7 +66,6 @@ export async function POST(req: Request) {
   const user = auth?.user ?? null;
 
   if (authError || !user?.id) {
-    console.error("meta/use auth error:", authError);
     return NextResponse.json({ ok: false, reason: "unauthorized" as const }, { status: 401 });
   }
 
@@ -77,7 +79,7 @@ export async function POST(req: Request) {
 
   const { feature } = body;
 
-  // 3) feature validate
+  // 3) validate
   if (!(feature in FEATURE_META_COST)) {
     return NextResponse.json({ ok: false, reason: "unknown_feature" as const }, { status: 400 });
   }
@@ -85,46 +87,49 @@ export async function POST(req: Request) {
   const cost = FEATURE_META_COST[feature];
   const authUserId = user.id;
 
-  // 4) profile 取得（auth_user_id で統一）
-  const { data: profile, error: profileError } = await supabaseServer
+  // 4) Pro判定（planで統一）
+  const { data: profile, error: pErr } = await supabaseAdmin
     .from("profiles")
-    .select("id, meta_balance, is_pro")
+    .select("plan, meta_balance")
     .eq("auth_user_id", authUserId)
-    .single();
+    .maybeSingle();
 
-  if (profileError || !profile) {
-    console.error("meta/use profile error:", profileError);
+  if (pErr || !profile) {
+    console.error("meta/use profile error:", pErr);
     return NextResponse.json({ ok: false, reason: "profile_not_found" as const }, { status: 500 });
   }
 
-  const currentBalance: number = profile.meta_balance ?? 0;
-  const isPro: boolean = profile.is_pro ?? false;
-
-  // 5) Pro は消費なし
-  if (isPro) {
-    return NextResponse.json({ ok: true, used: 0, balance: currentBalance, is_pro: true }, { status: 200 });
+  if (profile.plan === "pro") {
+    return NextResponse.json({
+      ok: true,
+      used: 0,
+      balance: profile.meta_balance ?? 0,
+      is_pro: true,
+    });
   }
 
-  // 6) 残高チェック
-  if (currentBalance < cost) {
-    return NextResponse.json(
-      { ok: false, reason: "insufficient_meta" as const, required: cost, balance: currentBalance },
-      { status: 402 }
-    );
+  // 5) 非ProはRPCで消費（FIFO/期限/atomic）
+  const { data, error } = await supabaseAdmin.rpc("consume_meta_fifo", {
+    p_auth_user_id: authUserId,
+    p_cost: cost,
+  });
+
+  if (error) {
+    const msg = String(error.message ?? "");
+    if (msg.includes("INSUFFICIENT_META")) {
+      return NextResponse.json(
+        { ok: false, reason: "insufficient_meta" as const, required: cost },
+        { status: 402 }
+      );
+    }
+    console.error("consume_meta_fifo error:", error);
+    return NextResponse.json({ ok: false, reason: "consume_failed" as const }, { status: 500 });
   }
 
-  const newBalance = currentBalance - cost;
-
-  // 7) 更新（Service Role）
-  const { error: updateError } = await supabaseServer
-    .from("profiles")
-    .update({ meta_balance: newBalance })
-    .eq("auth_user_id", authUserId);
-
-  if (updateError) {
-    console.error("meta/use update error:", updateError);
-    return NextResponse.json({ ok: false, reason: "update_failed" as const }, { status: 500 });
-  }
-
-  return NextResponse.json({ ok: true, used: cost, balance: newBalance, is_pro: false }, { status: 200 });
+  return NextResponse.json({
+    ok: true,
+    used: cost,
+    ...(typeof data === "object" ? data : {}),
+    is_pro: false,
+  });
 }

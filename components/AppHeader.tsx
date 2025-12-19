@@ -5,19 +5,19 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createBrowserClient } from "@supabase/ssr";
 
-// ブラウザ用 Supabase クライアントをつくるヘルパー
 const createBrowserSupabaseClient = () =>
   createBrowserClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
   );
 
-type SimpleUser = {
-  email: string | null;
-};
+type Plan = "free" | "pro";
 
-type ProfileMetaBalanceRow = {
+type SimpleUser = { email: string | null };
+
+type ProfileRow = {
   meta_balance: number | null;
+  plan: Plan | null;
 };
 
 type SupabaseClient = ReturnType<typeof createBrowserSupabaseClient>;
@@ -25,54 +25,55 @@ type SupabaseClient = ReturnType<typeof createBrowserSupabaseClient>;
 export function AppHeader() {
   const router = useRouter();
 
-  // Supabase クライアントは useState で 1 回だけ生成
-  const [supabase] = useState<SupabaseClient>(() =>
-    createBrowserSupabaseClient()
-  );
+  const [supabase] = useState<SupabaseClient>(() => createBrowserSupabaseClient());
 
   const [user, setUser] = useState<SimpleUser | null>(null);
   const [meta, setMeta] = useState<number | null>(null);
-  const [loadingMeta, setLoadingMeta] = useState(true);
+  const [plan, setPlan] = useState<Plan>("free");
+  const [loading, setLoading] = useState(true);
 
-  // --- ユーザー情報読込 ---
+  // --- ユーザー & プロフィール読込（plan + meta） ---
   useEffect(() => {
-    const loadUser = async () => {
-      const { data } = await supabase.auth.getUser();
-      setUser({ email: data.user?.email ?? null });
-    };
-    void loadUser();
-  }, [supabase]);
-
-  // --- Meta 残高読込 ---
-  useEffect(() => {
-    const loadMeta = async () => {
+    const load = async () => {
+      setLoading(true);
       try {
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
+        const { data } = await supabase.auth.getUser();
+        const authUser = data.user;
 
-        if (!user) {
+        setUser({ email: authUser?.email ?? null });
+
+        if (!authUser) {
           setMeta(null);
-          setLoadingMeta(false);
+          setPlan("free");
           return;
         }
 
-        const { data } = await supabase
+        // ✅ profiles は auth_user_id で引く（id と一致しない前提）
+        const { data: profile, error } = await supabase
           .from("profiles")
-          .select("meta_balance")
-          .eq("id", user.id)
-          .single<ProfileMetaBalanceRow>();
+          .select("meta_balance, plan")
+          .eq("auth_user_id", authUser.id)
+          .maybeSingle<ProfileRow>();
 
-        setMeta(data?.meta_balance ?? 0);
+        if (error) {
+          console.error("profile_load_error:", error);
+          setMeta(null);
+          setPlan("free");
+          return;
+        }
+
+        setMeta(profile?.meta_balance ?? 0);
+        setPlan((profile?.plan ?? "free") as Plan);
       } catch (e) {
-        console.error("meta_balance_load_error:", e);
+        console.error("header_load_error:", e);
         setMeta(null);
+        setPlan("free");
       } finally {
-        setLoadingMeta(false);
+        setLoading(false);
       }
     };
 
-    void loadMeta();
+    void load();
   }, [supabase]);
 
   const handleLogout = async () => {
@@ -90,21 +91,29 @@ export function AppHeader() {
         <span className="text-sm font-semibold text-slate-900">Mentor.AI</span>
       </div>
 
-      {/* 右：Meta 残高 + ユーザーアイコン + ログアウト */}
+      {/* 右：Meta 残高 + Plan + ユーザー + ログアウト */}
       <div className="flex items-center gap-4">
         {/* META 残高 */}
-        {loadingMeta ? (
+        {loading ? (
           <div className="rounded-full bg-slate-100 px-3 py-1 text-[11px] text-slate-400">
-            META 読み込み中…
+            読み込み中…
           </div>
         ) : (
           meta !== null && (
             <button
-              onClick={() => router.push("/meta")}
-              className="flex items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-[11px] font-semibold text-sky-700 shadow-sm transition hover:bg-sky-100"
+              onClick={() => router.push("/pricing")}
+              className="flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-[11px] font-semibold text-sky-700 shadow-sm transition hover:bg-sky-100"
             >
-              <span>META</span>
-              <span className="tabular-nums text-sky-900">{meta}</span>
+              <span className="flex items-center gap-1">
+                <span>META</span>
+                <span className="tabular-nums text-sky-900">{meta}</span>
+              </span>
+
+              {/* ✅ Plan表示（常時見える） */}
+              <span className="h-3 w-px bg-sky-200/80" />
+              <span className="text-[11px] font-medium text-slate-600">
+                Plan: <span className="font-semibold text-slate-800">{plan.toUpperCase()}</span>
+              </span>
             </button>
           )
         )}

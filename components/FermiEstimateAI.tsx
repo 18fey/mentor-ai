@@ -1,23 +1,28 @@
 // src/components/FermiEstimateAI.tsx
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { createBrowserClient } from "@supabase/ssr";
 import { UpgradeModal } from "@/components/UpgradeModal";
 
-/* -------------------------------
-   v8 Supabase Client（Component用）
--------------------------------- */
-function createClientSupabase() {
-  return createBrowserClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  );
-}
-
-/* -------------------------------
+/* ============================
    型定義
--------------------------------- */
+============================ */
+type Plan = "free" | "pro" ;
+
+type FermiCategory = "daily" | "business" | "consulting";
+type FermiDifficulty = "easy" | "medium" | "hard";
+
+type FermiProblem = {
+  id: string;
+  category: FermiCategory;
+  difficulty: FermiDifficulty;
+  title: string;
+  formulaHint: string;
+  defaultFactors: string[];
+  unit: string;
+};
+
 type FermiFactor = {
   id: number;
   name: string;
@@ -44,44 +49,87 @@ type FermiFeedback = {
   totalScore: number;
 };
 
-type FermiCategory = "daily" | "business" | "consulting";
-type FermiDifficulty = "easy" | "medium" | "hard";
-
-type FermiProblem = {
-  id: string;
-  category: FermiCategory;
-  difficulty: FermiDifficulty;
-  title: string;
-  formulaHint: string;
-  defaultFactors: string[];
-  unit: string;
+type GenerateRes = {
+  ok: true;
+  plan: Plan;
+  remaining?: number;
+  usedCount?: number;
+  limit?: number;
+  fermi: FermiProblem;
 };
 
-type Plan = "free" | "pro" | "beta";
+type EvalRes = {
+  ok: true;
+  plan: Plan;
+  remaining?: number;
+  usedCount?: number;
+  limit?: number;
+  score: FermiScore;
+  feedback: FermiFeedback;
+  totalScore?: number;
+  logId?: number | string | null; // ✅保存判定/保存キー
+};
 
-/* -------------------------------
+type SaveItem = {
+  id: string;
+  attempt_type: string;
+  attempt_id: string;
+  save_type: "mistake" | "learning" | "retry";
+  created_at: string;
+};
+
+type SavesListRes = {
+  ok: true;
+  plan: Plan;
+  items: SaveItem[];
+};
+
+type ToggleSaveRes = {
+  ok: true;
+  plan: Plan;
+  enabled: boolean;
+};
+
+type ApiErr = {
+  error?: string;
+  code?: string;
+  message?: string;
+};
+
+/* ============================
    メインコンポーネント
--------------------------------- */
+============================ */
 export const FermiEstimateAI: React.FC = () => {
-  const supabase = createClientSupabase();
+  // ✅ Caseと同じ：clientはuseMemoで固定
+  const supabase = useMemo(
+    () =>
+      createBrowserClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      ),
+    []
+  );
 
-  const [userId, setUserId] = useState<string | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
+  // auth
+  const [isAuthed, setIsAuthed] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   // Plan / remaining
   const [plan, setPlan] = useState<Plan>("free");
   const [remaining, setRemaining] = useState<number | null>(null);
 
+  // 問題設定
+  const [category, setCategory] = useState<FermiCategory>("business");
+  const [difficulty, setDifficulty] = useState<FermiDifficulty>("medium");
+  const [currentProblemId, setCurrentProblemId] = useState<string | null>(null);
+
+  // 入力
   const [question, setQuestion] = useState("");
   const [formula, setFormula] = useState("");
   const [unit, setUnit] = useState("件 / 年");
   const [factors, setFactors] = useState<FermiFactor[]>([]);
   const [result, setResult] = useState<string>("");
   const [sanityComment, setSanityComment] = useState("");
-
-  const [category, setCategory] = useState<FermiCategory>("business");
-  const [difficulty, setDifficulty] = useState<FermiDifficulty>("medium");
-  const [currentProblemId, setCurrentProblemId] = useState<string | null>(null);
 
   // スコア & フィードバック
   const [score, setScore] = useState<FermiScore>({
@@ -92,27 +140,55 @@ export const FermiEstimateAI: React.FC = () => {
     sanityCheck: 0,
   });
   const [feedback, setFeedback] = useState<FermiFeedback | null>(null);
+
+  // 状態
+  const [uiError, setUiError] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isEvaluating, setIsEvaluating] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // 課金モーダル
+  // 🔒 課金モーダル
   const [upgradeOpen, setUpgradeOpen] = useState(false);
   const [upgradeMessage, setUpgradeMessage] = useState<string | undefined>();
 
-  // ---- 認証ユーザー取得 ----
+  // ✅ 保存（Caseと同じ）
+  const [isSaving, setIsSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [lastLogId, setLastLogId] = useState<number | string | null>(null);
+
+  // auth確認（Caseと同じ）
   useEffect(() => {
-    const run = async () => {
-      try {
-        const { data } = await supabase.auth.getUser();
-        setUserId(data?.user?.id ?? null);
-      } finally {
-        setAuthLoading(false);
+    (async () => {
+      setAuthError(null);
+      const { data, error } = await supabase.auth.getUser();
+      if (error || !data?.user?.id) {
+        setIsAuthed(false);
+        setAuthError(
+          "ログイン情報が取得できませんでした。いったんログインし直してください。"
+        );
+        return;
       }
-    };
-    run();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+      setIsAuthed(true);
+    })();
+  }, [supabase]);
+
+  /* -------------------------------
+     UI初期化（Caseのreset相当）
+  -------------------------------- */
+  const resetForNewProblem = () => {
+    setResult("");
+    setSanityComment("");
+    setUiError(null);
+    setFeedback(null);
+    setSaved(false);
+    setLastLogId(null);
+    setScore({
+      reframing: 0,
+      decomposition: 0,
+      assumptions: 0,
+      numbersSense: 0,
+      sanityCheck: 0,
+    });
+  };
 
   /* -------------------------------
      問題をUIに反映
@@ -122,20 +198,11 @@ export const FermiEstimateAI: React.FC = () => {
     setQuestion(problem.title);
     setFormula(problem.formulaHint);
     setUnit(problem.unit);
-    setResult("");
-    setSanityComment("");
-    setFeedback(null);
-    setErrorMessage(null);
-    setScore({
-      reframing: 0,
-      decomposition: 0,
-      assumptions: 0,
-      numbersSense: 0,
-      sanityCheck: 0,
-    });
+
+    resetForNewProblem();
 
     setFactors(
-      problem.defaultFactors.map((name, idx) => ({
+      (problem.defaultFactors ?? []).map((name, idx) => ({
         id: Date.now() + idx,
         name,
         operator: "×",
@@ -147,57 +214,72 @@ export const FermiEstimateAI: React.FC = () => {
   };
 
   /* -------------------------------
-     新規問題生成（本番：API）
+     新規問題生成（/api/fermi/new）
   -------------------------------- */
   const generateNewProblem = async () => {
-    if (!userId) {
-      setErrorMessage("ログイン状態を確認できませんでした。再ログインしてください。");
+    setUiError(null);
+
+    if (!isAuthed) {
+      setUiError("ログインが必要です。");
       return;
     }
 
-    setIsGenerating(true);
-    setErrorMessage(null);
-
     try {
+      setIsGenerating(true);
+
       const res = await fetch("/api/fermi/new", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId, category, difficulty }),
+        body: JSON.stringify({ category, difficulty }),
       });
 
-      const json = await res.json().catch(() => null);
+      const json = (await res.json().catch(() => null)) as
+        | GenerateRes
+        | ApiErr
+        | null;
 
       if (!res.ok) {
         if (
           res.status === 403 &&
-          (json?.error === "limit_exceeded" || json?.error === "upgrade_required")
+          ((json as ApiErr | null)?.error === "limit_exceeded" ||
+            (json as ApiErr | null)?.error === "upgrade_required")
         ) {
-          setUpgradeMessage(json?.message ?? "フェルミ生成の無料枠が上限に達しました。");
+          setUpgradeMessage(
+            (json as ApiErr | null)?.message ??
+              "フェルミ生成の無料利用回数が上限に達しました。"
+          );
           setUpgradeOpen(true);
           return;
         }
-        setErrorMessage(json?.message ?? "問題生成に失敗しました。");
+
+        if (res.status === 401) {
+          setUiError("ログインが必要です。いったんログインし直してください。");
+          return;
+        }
+
+        setUiError((json as ApiErr | null)?.message ?? "問題生成に失敗しました。");
         return;
       }
 
-      setPlan(json?.plan ?? "free");
-      if (typeof json?.remaining === "number") setRemaining(json.remaining);
+      const data = json as GenerateRes;
+      setPlan(data.plan ?? "free");
+      if (typeof data.remaining === "number") setRemaining(data.remaining);
 
-      if (json?.fermi) {
-        materializeProblem(json.fermi as FermiProblem);
+      if (data?.fermi) {
+        materializeProblem(data.fermi);
       } else {
-        setErrorMessage("生成結果が不正です（fermiがありません）");
+        setUiError("生成結果が不正です（fermiがありません）");
       }
     } catch (e) {
       console.error(e);
-      setErrorMessage("ネットワークエラーが発生しました。");
+      setUiError("通信エラーが発生しました。時間をおいて再度お試しください。");
     } finally {
       setIsGenerating(false);
     }
   };
 
   /* -------------------------------
-     要素操作
+     要因操作
   -------------------------------- */
   const addFactor = () => {
     setFactors((prev) => [
@@ -224,7 +306,7 @@ export const FermiEstimateAI: React.FC = () => {
   -------------------------------- */
   const handleCompute = () => {
     try {
-      if (factors.length === 0) {
+      if (!factors.length) {
         setResult("");
         return;
       }
@@ -244,23 +326,37 @@ export const FermiEstimateAI: React.FC = () => {
   };
 
   /* -------------------------------
-     AI 採点（本番：/api/eval/fermi）
+     AI採点（/api/eval/fermi）
   -------------------------------- */
   const handleEvaluate = async () => {
-    if (!userId) {
-      setErrorMessage("ログイン情報を取得できませんでした。再ログインしてください。");
-      return;
-    }
-    if (!question.trim()) {
-      setErrorMessage("お題（Question）を入力してください。");
-      return;
-    }
+    setUiError(null);
 
-    setIsEvaluating(true);
-    setErrorMessage(null);
+    if (!isAuthed) return setUiError("ログインが必要です。");
+    if (!question.trim()) return setUiError("お題（Question）を入力してください。");
+
+    // Caseと同じ：最低限の入力チェック（短すぎ防止）
+    const totalLen =
+      question.length +
+      formula.length +
+      unit.length +
+      (sanityComment?.length ?? 0) +
+      (result?.length ?? 0) +
+      factors.reduce(
+        (acc, f) =>
+          acc +
+          (f.name?.length ?? 0) +
+          (f.assumption?.length ?? 0) +
+          (f.rationale?.length ?? 0) +
+          (f.value?.length ?? 0),
+        0
+      );
+
+    if (totalLen < 60) {
+      setUiError("もう少し埋めてから評価してみて！目安：合計60文字以上。");
+      return;
+    }
 
     const payload = {
-      userId,
       question,
       formula,
       unit,
@@ -273,64 +369,204 @@ export const FermiEstimateAI: React.FC = () => {
     };
 
     try {
+      setIsEvaluating(true);
+
       const res = await fetch("/api/eval/fermi", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
 
-      const data = await res.json().catch(() => null);
+      const json = (await res.json().catch(() => null)) as EvalRes | ApiErr | null;
 
       if (!res.ok) {
-        if (res.status === 403) {
-          setUpgradeMessage(data?.message ?? "この機能はPRO限定です。");
+        if (
+          res.status === 403 &&
+          ((json as ApiErr | null)?.error === "limit_exceeded" ||
+            (json as ApiErr | null)?.error === "upgrade_required")
+        ) {
+          setUpgradeMessage(
+            (json as ApiErr | null)?.message ??
+              "フェルミAIの今月の無料利用回数が上限に達しました。"
+          );
           setUpgradeOpen(true);
           return;
         }
-        setErrorMessage(data?.message ?? "AI採点に失敗しました。");
+
+        if (res.status === 401) {
+          setUiError("ログインが必要です。いったんログインし直してください。");
+          return;
+        }
+
+        setUiError((json as ApiErr | null)?.message ?? "AI採点に失敗しました。");
         return;
       }
 
-      setPlan((data?.plan ?? plan) as Plan);
+      const data = json as EvalRes;
+      setPlan(data.plan ?? plan);
+      if (typeof data.remaining === "number") setRemaining(data.remaining);
 
-      // ✅ ここが重要：採点後に remaining を更新してUIに反映
-      if (typeof data?.remaining === "number") setRemaining(data.remaining);
+      if (data.score) setScore(data.score);
+      if (data.feedback) setFeedback(data.feedback);
 
-      if (data?.score) setScore(data.score as FermiScore);
-      if (data?.feedback) setFeedback(data.feedback as FermiFeedback);
+      // ✅ Caseと同じ：評価結果のlogIdを保持 → 保存ボタン/保存判定に使う
+      setLastLogId(data.logId ?? null);
+      setSaved(false);
     } catch (e) {
       console.error(e);
-      setErrorMessage("ネットワークエラーが発生しました。");
+      setUiError("通信エラーが発生しました。時間をおいて再度お試しください。");
     } finally {
       setIsEvaluating(false);
     }
   };
 
-  if (authLoading) {
-    return (
-      <div className="flex h-full items-center justify-center text-sm text-slate-600">
-        ログイン情報を読み込み中です…
-      </div>
-    );
-  }
+  /* -------------------------
+     保存状態チェック（評価が来たら）
+     - lastLogId をキーに「learning 保存済みか」確認（Caseと同じ）
+  ------------------------- */
+  useEffect(() => {
+    if (!lastLogId) return;
+    if (!isAuthed) return;
 
-  if (!userId) {
-    return (
-      <div className="flex h-full items-center justify-center text-sm text-slate-600">
-        ログイン状態を確認できませんでした。いったんログアウトして再ログインしてください。
-      </div>
-    );
-  }
+    (async () => {
+      try {
+        const res = await fetch("/api/saves/list", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ attemptType: "fermi", saveType: "learning", limit: 100 }),
+        });
+
+        const json = (await res.json().catch(() => null)) as SavesListRes | ApiErr | null;
+        if (!res.ok) return;
+
+        const data = json as SavesListRes;
+        setPlan(data.plan);
+
+        const exists = (data.items ?? []).some(
+          (it) =>
+            it.attempt_type === "fermi" &&
+            it.attempt_id === String(lastLogId) &&
+            it.save_type === "learning"
+        );
+        setSaved(exists);
+      } catch {
+        // 無視（UI崩さない）
+      }
+    })();
+  }, [lastLogId, isAuthed]);
+
+  /* -------------------------
+     保存（Caseと同じ：/api/saves/toggle）
+     - ストーリーカードで後で見返せるpayloadを保存
+  ------------------------- */
+  const handleSave = async () => {
+    setUiError(null);
+    if (!isAuthed) return setUiError("ログインが必要です。");
+    if (!lastLogId) return setUiError("先に採点してから保存できます。");
+    if (!feedback) return setUiError("保存する内容がありません。");
+
+    try {
+      setIsSaving(true);
+
+      const title = `【フェルミ】${question || "Fermi"}`;
+      const summary = `合計 ${typeof feedback.totalScore === "number" ? feedback.totalScore : "-"}点｜${category}/${difficulty}`;
+
+      // ✅ Caseと同じ：スナップショットpayload（Storyカードでそのまま復元できる形）
+      const payload = {
+        input: {
+          problem: {
+            id: currentProblemId,
+            category,
+            difficulty,
+            title: question,
+            formulaHint: formula,
+            unit,
+            defaultFactors: factors.map((f) => f.name),
+          },
+          answers: {
+            question,
+            formula,
+            unit,
+            factors,
+            sanityComment,
+            result,
+          },
+        },
+        output: {
+          score,
+          feedback,
+          totalScore: feedback.totalScore,
+        },
+        eval: {
+          score,
+          feedback,
+          totalScore: feedback.totalScore,
+        },
+        meta: {
+          attemptType: "fermi",
+          category,
+          difficulty,
+          problemId: currentProblemId,
+          savedAt: new Date().toISOString(),
+          version: 1,
+        },
+      };
+
+      const res = await fetch("/api/saves/toggle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          attemptId: String(lastLogId),
+          attemptType: "fermi",
+          saveType: "learning",
+          enabled: true,
+          title,
+          summary,
+          scoreTotal: typeof feedback.totalScore === "number" ? feedback.totalScore : null,
+          payload,
+          sourceId: String(lastLogId),
+        }),
+      });
+
+      const json = (await res.json().catch(() => null)) as ToggleSaveRes | ApiErr | any;
+
+      if (!res.ok) {
+        if (res.status === 403) {
+          if (json?.error === "upgrade_required" || json?.error === "limit_exceeded") {
+            setUpgradeMessage(json?.message ?? "保存にはアップグレードが必要です。");
+            setUpgradeOpen(true);
+            return;
+          }
+        }
+        setUiError(json?.message ?? "保存に失敗しました。");
+        return;
+      }
+
+      setPlan(json?.plan ?? plan);
+      setSaved(Boolean(json?.enabled));
+    } catch (e) {
+      console.error(e);
+      setUiError("保存に失敗しました。");
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   /* -------------------------------
-     UI
+     レイアウト
   -------------------------------- */
   return (
     <>
       <div className="flex h-full gap-6">
         {/* 左カラム */}
         <div className="flex-1 space-y-6 overflow-y-auto pr-2">
-          {/* 無限フェルミ問題ガチャ */}
+          {(authError || uiError) && (
+            <div className="rounded-2xl border border-rose-100 bg-rose-50 p-3 text-xs text-rose-700">
+              {authError ?? uiError}
+            </div>
+          )}
+
+          {/* フェルミ問題ガチャ */}
           <section className="mb-2 rounded-2xl border border-sky-100 bg-sky-50/70 p-4 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
               <div>
@@ -350,13 +586,14 @@ export const FermiEstimateAI: React.FC = () => {
                   )}
                 </p>
               </div>
+
               <button
                 type="button"
                 onClick={generateNewProblem}
                 disabled={isGenerating}
                 className={`rounded-full px-3 py-1.5 text-xs font-semibold text-white shadow-sm ${
                   isGenerating
-                    ? "bg-slate-300 cursor-not-allowed"
+                    ? "cursor-not-allowed bg-slate-300"
                     : "bg-sky-500 hover:bg-sky-600"
                 }`}
               >
@@ -377,6 +614,7 @@ export const FermiEstimateAI: React.FC = () => {
                   <option value="consulting">Consulting</option>
                 </select>
               </div>
+
               <div>
                 <label className="text-[11px] text-slate-600">難易度</label>
                 <select
@@ -389,6 +627,7 @@ export const FermiEstimateAI: React.FC = () => {
                   <option value="hard">⭐⭐⭐ Hard</option>
                 </select>
               </div>
+
               <div className="flex items-end">
                 <div className="w-full text-[11px] text-slate-500">
                   {currentProblemId ? (
@@ -420,6 +659,7 @@ export const FermiEstimateAI: React.FC = () => {
                   onChange={(e) => setQuestion(e.target.value)}
                 />
               </div>
+
               <div className="grid grid-cols-3 gap-3">
                 <div className="col-span-2">
                   <label className="text-xs text-slate-500">式（Formula）</label>
@@ -430,6 +670,7 @@ export const FermiEstimateAI: React.FC = () => {
                     onChange={(e) => setFormula(e.target.value)}
                   />
                 </div>
+
                 <div>
                   <label className="text-xs text-slate-500">単位（Unit）</label>
                   <select
@@ -475,6 +716,7 @@ export const FermiEstimateAI: React.FC = () => {
                     <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] text-slate-600">
                       Factor {index + 1}
                     </span>
+
                     <select
                       className="rounded-lg border border-slate-200 bg-white/80 px-1.5 py-1 text-[11px]"
                       value={factor.operator}
@@ -485,6 +727,7 @@ export const FermiEstimateAI: React.FC = () => {
                       <option value="×">掛け算（×）</option>
                       <option value="+">足し算（＋）</option>
                     </select>
+
                     <input
                       className="flex-1 rounded-lg border border-slate-200 bg-white/80 px-2 py-1 text-xs"
                       placeholder="例：年間利用回数"
@@ -499,15 +742,20 @@ export const FermiEstimateAI: React.FC = () => {
                       <input
                         className="mt-1 w-full rounded-lg border border-slate-200 bg-white/80 px-2 py-1 text-xs"
                         value={factor.assumption}
-                        onChange={(e) => updateFactor(factor.id, "assumption", e.target.value)}
+                        onChange={(e) =>
+                          updateFactor(factor.id, "assumption", e.target.value)
+                        }
                       />
                     </div>
+
                     <div>
                       <label className="text-[10px] text-slate-500">根拠（Reason）</label>
                       <input
                         className="mt-1 w-full rounded-lg border border-slate-200 bg-white/80 px-2 py-1 text-xs"
                         value={factor.rationale}
-                        onChange={(e) => updateFactor(factor.id, "rationale", e.target.value)}
+                        onChange={(e) =>
+                          updateFactor(factor.id, "rationale", e.target.value)
+                        }
                       />
                     </div>
                   </div>
@@ -557,21 +805,34 @@ export const FermiEstimateAI: React.FC = () => {
             />
           </section>
 
-          {/* AI 採点ボタン */}
-          <section className="mb-2 flex justify-end">
+          {/* ✅ 評価 + 保存（Caseと同じ並び） */}
+          <section className="mb-2 flex justify-end gap-2">
             <button
               type="button"
               onClick={handleEvaluate}
               disabled={isEvaluating}
               className={`rounded-full px-5 py-2 text-xs font-semibold text-white ${
-                isEvaluating ? "cursor-not-allowed bg-slate-300" : "bg-violet-500 hover:bg-violet-600"
+                isEvaluating
+                  ? "cursor-not-allowed bg-slate-300"
+                  : "bg-violet-500 hover:bg-violet-600"
               }`}
             >
               {isEvaluating ? "AIが採点中…" : "AIに採点してもらう"}
             </button>
-          </section>
 
-          {errorMessage && <p className="mb-4 text-[11px] text-rose-600">{errorMessage}</p>}
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={!feedback || isSaving || saved}
+              className={`rounded-full px-4 py-2 text-xs font-semibold ${
+                !feedback || isSaving || saved
+                  ? "cursor-not-allowed bg-slate-100 text-slate-400"
+                  : "bg-white text-slate-700 border border-slate-200 hover:bg-slate-50"
+              }`}
+            >
+              {saved ? "保存済み" : isSaving ? "保存中…" : "保存（あとで見返す）"}
+            </button>
+          </section>
 
           {/* フィードバック表示 */}
           {feedback && (
@@ -584,27 +845,36 @@ export const FermiEstimateAI: React.FC = () => {
 
               <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-2">
                 <div className="rounded-xl border border-slate-100 bg-white/80 p-3">
-                  <p className="mb-1 text-[11px] font-semibold text-emerald-600">👍 良いポイント</p>
+                  <p className="mb-1 text-[11px] font-semibold text-emerald-600">
+                    👍 良いポイント
+                  </p>
                   <ul className="list-disc space-y-1 pl-4 text-[11px] text-slate-700">
-                    {feedback.strengths.map((s, i) => (
+                    {(feedback.strengths ?? []).map((s, i) => (
                       <li key={i}>{s}</li>
                     ))}
                   </ul>
                 </div>
+
                 <div className="rounded-xl border border-slate-100 bg-white/80 p-3">
-                  <p className="mb-1 text-[11px] font-semibold text-rose-600">⚠ 改善ポイント</p>
+                  <p className="mb-1 text-[11px] font-semibold text-rose-600">
+                    ⚠ 改善ポイント
+                  </p>
                   <ul className="list-disc space-y-1 pl-4 text-[11px] text-slate-700">
-                    {feedback.weaknesses.map((w, i) => (
+                    {(feedback.weaknesses ?? []).map((w, i) => (
                       <li key={i}>{w}</li>
                     ))}
                   </ul>
                 </div>
               </div>
 
-              <p className="mb-2 text-[11px] text-slate-600">アドバイス：{feedback.advice}</p>
+              <p className="mb-2 text-[11px] text-slate-600">
+                アドバイス：{feedback.advice}
+              </p>
 
               <div className="rounded-xl border border-slate-100 bg-white/90 px-3 py-2">
-                <p className="mb-1 text-[11px] font-semibold text-slate-700">模範回答イメージ</p>
+                <p className="mb-1 text-[11px] font-semibold text-slate-700">
+                  模範回答イメージ
+                </p>
                 <pre className="whitespace-pre-wrap text-[11px] text-slate-700">
                   {feedback.sampleAnswer}
                 </pre>
@@ -646,7 +916,9 @@ export const FermiEstimateAI: React.FC = () => {
           {feedback && (
             <div className="rounded-2xl border border-violet-100 bg-white/80 p-4 shadow-sm">
               <p className="mb-1 text-[11px] text-slate-500">合計スコア</p>
-              <p className="text-2xl font-semibold text-slate-900">{feedback.totalScore}</p>
+              <p className="text-2xl font-semibold text-slate-900">
+                {feedback.totalScore}
+              </p>
               <p className="mt-1 text-[11px] text-slate-500">※ 50点満点（5軸×10点）</p>
             </div>
           )}

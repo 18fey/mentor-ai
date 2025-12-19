@@ -1,41 +1,54 @@
-// app/api/interview/start/route.ts
+// app/api/interview/session/start/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { checkMonthlyLimit, logUsage } from "@/lib/plan";
+import { createClient } from "@supabase/supabase-js";
+import { requireAuthUserId } from "@/lib/authServer";
+
+const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
 
 export async function POST(req: NextRequest) {
   try {
-    const { userId, ...body } = await req.json();
-
-    const limit = await checkMonthlyLimit({
-      userId,
-      feature: "interview",
-      freeLimit: 1,
-    });
-
-    if (!limit.allowed) {
+    const userId = await requireAuthUserId();
+    if (!userId) {
       return NextResponse.json(
-        {
-          error: "limit_exceeded",
-          plan: limit.plan,
-          message:
-            "無料プランでの一般面接AIの利用回数（今月1回まで）を使い切りました。PROプランにアップグレードすると無制限で利用できます。",
-        },
-        { status: 403 }
+        { error: "unauthorized", message: "login required" },
+        { status: 401 }
       );
     }
 
-    // 実際の面接セッション作成など
-    // const session = await createInterviewSession(userId, body);
+    const { topic, isSensitive = false } = await req.json().catch(() => ({}));
 
-    await logUsage(userId, "interview");
+    const row = {
+      user_id: userId,
+      topic: topic ?? "",
+      is_sensitive: !!isSensitive,
+    };
+
+    const { data, error } = await supabaseAdmin
+      .from("interview_sessions")
+      .insert(row)
+      .select("id")
+      .single();
+
+    if (error || !data) {
+      console.error("interview session/start error:", error);
+      return NextResponse.json(
+        { error: "Failed to create session" },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({
-      // sessionId: session.id,
-      plan: limit.plan,
-      remaining: limit.remaining - 1,
+      sessionId: data.id,
+      isSensitive: !!isSensitive,
     });
-  } catch (e) {
-    console.error(e);
-    return NextResponse.json({ error: "server_error" }, { status: 500 });
+  } catch (err) {
+    console.error(err);
+    return NextResponse.json(
+      { error: "Failed to create session" },
+      { status: 500 }
+    );
   }
 }

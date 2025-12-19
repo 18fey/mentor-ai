@@ -8,7 +8,7 @@ import { createBrowserClient } from "@supabase/ssr";
 import { PayjpCheckoutButton } from "@/components/PayjpCheckoutButton";
 
 // プラン型
-type AppPlan = "free" | "beta" | "pro";
+type AppPlan = "free" | "pro";
 
 // 決済履歴表示用の型（APIの戻りに合わせて調整OK）
 type BillingHistoryItem = {
@@ -254,11 +254,9 @@ const Settings: React.FC = () => {
   const planLabel =
     loadingProfile
       ? "読み込み中..."
-      : plan === "beta"
-      ? "βテスト（有料）"
       : plan === "pro"
       ? "PRO"
-      : "FREE（βテスト）";
+      : "FREE";
 
   // ---------------------------
   // 利用規約への同意
