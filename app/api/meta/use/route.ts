@@ -91,7 +91,7 @@ export async function POST(req: Request) {
   const { data: profile, error: pErr } = await supabaseAdmin
     .from("profiles")
     .select("plan, meta_balance")
-    .eq("auth_user_id", authUserId)
+    .eq("id", authUserId) // ✅ 統一: profiles.id = auth.users.id
     .maybeSingle();
 
   if (pErr || !profile) {

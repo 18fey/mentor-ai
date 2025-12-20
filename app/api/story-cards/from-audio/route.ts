@@ -1,13 +1,18 @@
 // app/api/story-cards/from-audio/route.ts
 import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
 import type { TopicType } from "@/lib/types/story";
 
-const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
-const TABLE_NAME = "story_cards";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 type QA = { question: string; answer: string };
+
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
+if (!OPENAI_API_KEY) {
+  console.warn("❗ OPENAI_API_KEY が設定されていません。.env.local を確認してください。");
+}
 
 // TopicType ガード
 const isValidTopicType = (v: unknown): v is TopicType => {
@@ -20,30 +25,11 @@ const isValidTopicType = (v: unknown): v is TopicType => {
   );
 };
 
-async function supabaseFetch(path: string, init: RequestInit = {}) {
-  const url = `${SUPABASE_URL}/rest/v1/${path}`;
-  const headers = {
-    apikey: SERVICE_KEY,
-    Authorization: `Bearer ${SERVICE_KEY}`,
-    "Content-Type": "application/json",
-    ...(init.headers || {}),
-  };
-
-  const res = await fetch(url, { ...init, headers });
-
-  if (!res.ok) {
-    const text = await res.text();
-    console.error("Supabase story_cards(from-audio) error:", res.status, text);
-    throw new Error(text);
-  }
-  return res;
-}
-
 type OpenAIPayload = {
   qaList: QA[];
   personaId?: string;
   profile?: any;
-  topicType?: TopicType; // ← 共通型を利用
+  topicType?: TopicType;
 };
 
 type OpenAICard = {
@@ -78,14 +64,14 @@ async function callOpenAI(payload: OpenAIPayload): Promise<OpenAICard> {
 就活でそのまま使える「STAR形式のストーリーカード」を1枚だけ作成してください。
 
 ※ リクエストに "topicType" が含まれている場合は、その種類
-   ("gakuchika" | "self_pr" | "why_company" | "why_industry")
+   ("gakuchika" | "self_pr" | "why_company" | "why_industry" | "general")
    を最優先の分類候補として扱ってください。
 
 出力フォーマットは必ず次のJSONオブジェクト1つにしてください：
 
 {
   "title": "経験のタイトル（20〜40文字程度）",
-  "topicType": "gakuchika | self_pr | why_company | why_industry",
+  "topicType": "gakuchika | self_pr | why_company | why_industry | general",
   "star": {
     "situation": "...",
     "task": "...",
@@ -95,12 +81,9 @@ async function callOpenAI(payload: OpenAIPayload): Promise<OpenAICard> {
   "learnings": "この経験から得た学び・強みを1〜3文で",
   "axes": ["主体性 / オーナーシップ", "チームワーク / 巻き込み力"]
 }
-        `.trim(),
+          `.trim(),
         },
-        {
-          role: "user",
-          content: JSON.stringify(payload, null, 2),
-        },
+        { role: "user", content: JSON.stringify(payload, null, 2) },
       ],
     }),
   });
@@ -127,47 +110,80 @@ async function callOpenAI(payload: OpenAIPayload): Promise<OpenAICard> {
   }
 }
 
+async function createSupabaseFromCookies() {
+  const cookieStore = await cookies();
+
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value;
+        },
+        set(name: string, value: string, options: any) {
+          cookieStore.set({ name, value, ...options });
+        },
+        remove(name: string, options: any) {
+          cookieStore.set({ name, value: "", ...options });
+        },
+      },
+    }
+  );
+}
+
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const supabase = await createSupabaseFromCookies();
+
+    // ✅ userIdは body から受け取らない。cookie auth で確定。
+    const { data: auth, error: authErr } = await supabase.auth.getUser();
+    const user = auth?.user ?? null;
+
+    if (authErr || !user?.id) {
+      return NextResponse.json(
+        { error: "unauthorized", message: "ログインが必要です。" },
+        { status: 401 }
+      );
+    }
+
+    const authUserId = user.id;
+
+    const body = await req.json().catch(() => ({}));
 
     const {
-      userId,
       personaId,
       qaList,
       profile,
-      topicType, // ← 任意（gakuchika/self_pr/...）
+      topicType, // 任意
       isSensitive,
       sessionId,
     } = body ?? {};
 
-    if (!userId || !Array.isArray(qaList) || qaList.length === 0) {
+    if (!Array.isArray(qaList) || qaList.length === 0) {
       return NextResponse.json(
-        { error: "userId と qaList は必須です。" },
+        { error: "bad_request", message: "qaList は必須です。" },
         { status: 400 }
       );
     }
 
-    // 1. OpenAI でカード生成
+    // 1) OpenAIでカード生成
     const card = await callOpenAI({
       qaList,
       personaId,
       profile,
-      topicType,
+      topicType: isValidTopicType(topicType) ? topicType : undefined,
     });
 
-    // TopicType の確定（優先度：リクエスト > OpenAI返却 > デフォルト）
+    // 2) TopicType確定（優先: リクエスト > OpenAI返却 > デフォルト）
     let effectiveTopicType: TopicType = "gakuchika";
 
-    if (isValidTopicType(topicType)) {
-      effectiveTopicType = topicType;
-    } else if (isValidTopicType(card.topicType)) {
-      effectiveTopicType = card.topicType;
-    }
+    if (isValidTopicType(topicType)) effectiveTopicType = topicType;
+    else if (isValidTopicType(card.topicType)) effectiveTopicType = card.topicType;
 
-    // 2. Supabase に保存
+    // 3) Supabaseへ保存（RLSに従う）
     const row = {
-      user_id: userId,
+      user_id: authUserId,
       session_id: sessionId ?? null,
       topic_type: effectiveTopicType,
       title: card.title ?? "音声面接から生成したストーリー",
@@ -181,16 +197,24 @@ export async function POST(req: NextRequest) {
       last_updated_at: new Date().toISOString(),
     };
 
-    const res = await supabaseFetch(TABLE_NAME, {
-      method: "POST",
-      headers: { Prefer: "return=representation" },
-      body: JSON.stringify([row]),
-    });
+    const { data, error } = await supabase
+      .from("story_cards")
+      .insert(row)
+      .select("*")
+      .single();
 
-    const data = await res.json();
-    const storyCard = Array.isArray(data) ? data[0] : data;
+    if (error) {
+      console.error("Supabase story_cards(from-audio) insert error:", error);
+      return NextResponse.json(
+        {
+          error: "story_card_insert_failed",
+          detail: error.message,
+        },
+        { status: 500 }
+      );
+    }
 
-    return NextResponse.json({ storyCard });
+    return NextResponse.json({ storyCard: data });
   } catch (e: any) {
     console.error("from-audio POST failed:", e);
     return NextResponse.json(

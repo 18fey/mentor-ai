@@ -2,7 +2,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
-import { supabaseServer } from "@/lib/supabase-server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,30 +46,21 @@ type EvalRequestBody = {
   limit?: number;
 };
 
-async function resolveProfileIdFromAuthUserId(authUserId: string): Promise<string> {
-  const { data: byAuth } = await supabaseServer
-    .from("profiles")
-    .select("id")
-    .eq("auth_user_id", authUserId)
-    .maybeSingle();
+function clampInt(n: unknown, min: number, max: number, fallback: number) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(x)));
+}
 
-  if (byAuth?.id) return byAuth.id;
-
-  const { data: byId } = await supabaseServer
-    .from("profiles")
-    .select("id")
-    .eq("id", authUserId)
-    .maybeSingle();
-
-  if (byId?.id) return byId.id;
-
-  throw new Error("ユーザープロファイルが見つかりません。（profiles）");
+function safeStr(v: unknown, maxLen: number) {
+  if (typeof v !== "string") return "";
+  return v.slice(0, maxLen);
 }
 
 export async function POST(req: NextRequest) {
   try {
     if (!OPENAI_API_KEY) {
-      return NextResponse.json({ error: "Missing OPENAI_API_KEY" }, { status: 500 });
+      return NextResponse.json({ ok: false, error: "Missing OPENAI_API_KEY" }, { status: 500 });
     }
 
     // ✅ userId はセッションから確定
@@ -86,23 +76,26 @@ export async function POST(req: NextRequest) {
 
     const body = (await req.json().catch(() => null)) as EvalRequestBody | null;
     if (!body) {
-      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+      return NextResponse.json({ ok: false, error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const { text, company, qType, limit } = body;
+    const text = typeof body.text === "string" ? body.text : "";
+    const company = safeStr(body.company, 100);
+    const qTypeRaw = typeof body.qType === "string" ? body.qType : "";
+    const safeQType: QuestionType =
+      (ALLOWED_QTYPES as readonly string[]).includes(qTypeRaw) ? (qTypeRaw as QuestionType) : "other";
 
-    if (!text || typeof text !== "string" || text.trim().length < 50) {
+    const safeLimit = clampInt(body.limit, 1, 4000, 400);
+
+    if (!text || text.trim().length < 50) {
       return NextResponse.json(
-        { error: "ES本文が短すぎるか空です。少なくとも50文字以上の本文を送信してください。" },
+        {
+          ok: false,
+          error: "ES本文が短すぎるか空です。少なくとも50文字以上の本文を送信してください。",
+        },
         { status: 400 }
       );
     }
-
-    const safeQType: QuestionType =
-      (ALLOWED_QTYPES as readonly string[]).includes(qType || "") ? (qType as QuestionType) : "other";
-
-    const safeLimit = typeof limit === "number" && limit > 0 && limit < 4000 ? limit : 400;
-    const safeCompany = typeof company === "string" ? company.slice(0, 100) : "";
 
     const MAX_ES_LENGTH = 4000;
     const truncatedText = text.length > MAX_ES_LENGTH ? text.slice(0, MAX_ES_LENGTH) : text;
@@ -114,7 +107,7 @@ export async function POST(req: NextRequest) {
 以下は就活ESの回答です。構成・ロジック・分かりやすさ・企業フィット・文字数フィットの5項目で10点満点で評価し、
 フィードバックを作成してください。
 
-【企業名】:${safeCompany || "（未指定）"}
+【企業名】:${company || "（未指定）"}
 【設問タイプ】:${safeQType}
 【文字数目安】:${safeLimit} 文字
 【ES本文】:
@@ -127,6 +120,7 @@ ${truncatedText}
 }
 `.trim();
 
+    // ✅ OpenAI call
     const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -149,56 +143,74 @@ ${truncatedText}
 
     if (!openaiRes.ok) {
       console.error("OpenAI API error:", data);
-      return NextResponse.json({ error: "OpenAI API error", detail: data }, { status: 500 });
+      return NextResponse.json({ ok: false, error: "OpenAI API error", detail: data }, { status: 500 });
     }
 
     const content = data.choices?.[0]?.message?.content;
     if (!content) {
-      return NextResponse.json({ error: "No content from OpenAI" }, { status: 500 });
+      return NextResponse.json({ ok: false, error: "No content from OpenAI" }, { status: 500 });
     }
 
     let parsed: any;
     try {
       parsed = JSON.parse(content);
     } catch {
-      return NextResponse.json({ error: "Failed to parse OpenAI JSON", raw: content }, { status: 500 });
+      return NextResponse.json({ ok: false, error: "Failed to parse OpenAI JSON", raw: content }, { status: 500 });
     }
 
     const s = parsed?.score;
     if (!s || typeof s.structure !== "number" || !parsed.feedback) {
-      return NextResponse.json({ error: "Invalid JSON shape from OpenAI", raw: parsed }, { status: 500 });
+      return NextResponse.json({ ok: false, error: "Invalid JSON shape from OpenAI", raw: parsed }, { status: 500 });
     }
 
     const avgScore = Math.round((s.structure + s.logic + s.clarity + s.companyFit + s.lengthFit) / 5);
 
-    // ✅ ログ保存（偽装不可）
+    // ✅ ログ保存（profiles 依存を完全に排除 / user_id 統一）
+    // ここが「ログ溜まらない」を直す本丸
     try {
-      const profileId = await resolveProfileIdFromAuthUserId(authUserId);
-
-      await supabaseServer.from("es_logs").insert({
-        profile_id: profileId,
-        company_name: safeCompany || null,
+      // es_logs: user_id で保存（profile_id不要）
+      const { error: esLogErr } = await supabase.from("es_logs").insert({
+        user_id: authUserId,
+        company_name: company || null,
         es_question: safeQType,
         es_before: truncatedText,
         es_after: null,
         mode: "eval",
         score: avgScore,
+        created_at: new Date().toISOString(), // defaultがあるなら不要
       });
 
-      await supabaseServer.from("growth_logs").insert({
+      if (esLogErr) {
+        console.error("es_logs insert error:", esLogErr);
+      }
+
+      // growth_logs: user_id で保存
+      const { error: growthErr } = await supabase.from("growth_logs").insert({
         user_id: authUserId,
         source: "es",
-        title: `${safeCompany ? `ES評価：${safeCompany}` : "ES評価"} [Score]`,
+        title: `${company ? `ES評価：${company}` : "ES評価"} [Score]`,
         description: "ESのスコアリングとフィードバックを実施しました。",
-        metadata: { mode: "eval", company: safeCompany || null, qType: safeQType, score: parsed.score },
+        metadata: {
+          mode: "eval",
+          company: company || null,
+          qType: safeQType,
+          score: parsed.score,
+        },
+        created_at: new Date().toISOString(), // defaultがあるなら不要
       });
+
+      if (growthErr) {
+        console.error("growth_logs insert error:", growthErr);
+      }
     } catch (logErr) {
       console.error("logging error in /api/es/eval:", logErr);
     }
 
+    // ✅ UIに返す
+    // 今まで通り parsed を返してOK（互換維持）
     return NextResponse.json(parsed);
   } catch (e) {
     console.error("POST /api/es/eval error:", e);
-    return NextResponse.json({ error: "Unexpected error" }, { status: 500 });
+    return NextResponse.json({ ok: false, error: "Unexpected error" }, { status: 500 });
   }
 }

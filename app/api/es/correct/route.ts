@@ -3,7 +3,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import { getUserPlan } from "@/lib/plan";
-import { supabaseServer } from "@/lib/supabase-server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,7 +20,6 @@ type EsFeedback = {
 
 async function createSupabaseFromCookies() {
   const cookieStore = await cookies();
-
   return createServerClient<any>(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -41,7 +39,6 @@ async function createSupabaseFromCookies() {
   );
 }
 
-// OpenAI で ES 添削してもらう関数
 async function callOpenAIForES(input: {
   esText: string;
   company?: string;
@@ -76,6 +73,8 @@ async function callOpenAIForES(input: {
         },
         { role: "user", content: JSON.stringify(input, null, 2) },
       ],
+      temperature: 0.3,
+      max_tokens: 900,
     }),
   });
 
@@ -96,7 +95,7 @@ async function callOpenAIForES(input: {
   let parsed: any = {};
   try {
     parsed = JSON.parse(text);
-  } catch (e) {
+  } catch {
     console.error("ES correct JSON.parse failed:", text);
     throw new Error("ES添削AIのJSON解析に失敗しました。");
   }
@@ -109,25 +108,8 @@ async function callOpenAIForES(input: {
   };
 }
 
-// profiles から profile_id を取る（FK用）
-async function getProfileByAuthUserId(authUserId: string) {
-  const { data, error } = await supabaseServer
-    .from("profiles")
-    .select("id, plan")
-    .eq("auth_user_id", authUserId)
-    .maybeSingle();
-
-  if (error || !data) {
-    console.error("profiles not found:", error);
-    throw new Error("ユーザープロファイルが見つかりません。");
-  }
-
-  return data as { id: string; plan: Plan };
-}
-
 export async function POST(req: NextRequest) {
   try {
-    // 0) auth 確定（cookie session）
     const supabase = await createSupabaseFromCookies();
     const { data: auth, error: authErr } = await supabase.auth.getUser();
     const user = auth?.user ?? null;
@@ -141,85 +123,82 @@ export async function POST(req: NextRequest) {
 
     const authUserId = user.id;
 
-    // 1) body（userIdは受け取らない）
-    const { esText, company, questionType, storyCardId } = await req.json();
+    const body = (await req.json().catch(() => null)) as any;
+    if (!body) {
+      return NextResponse.json({ error: "invalid_json" }, { status: 400 });
+    }
 
-    if (!esText) {
+    const esText = typeof body.esText === "string" ? body.esText : "";
+    const company = typeof body.company === "string" ? body.company.slice(0, 100) : "";
+    const questionType = typeof body.questionType === "string" ? body.questionType.slice(0, 50) : "";
+    const storyCardId = body.storyCardId ?? null;
+
+    if (!esText || esText.trim().length < 30) {
       return NextResponse.json(
-        { error: "invalid_request", message: "esText は必須です。" },
+        { error: "invalid_request", message: "esText は必須です。（短すぎます）" },
         { status: 400 }
       );
     }
 
-    // 2) プラン取得（free/beta/pro）
+    // 1) plan（※ここはあなたの設計に合わせてOK）
     const plan = (await getUserPlan(authUserId)) as Plan;
 
-    // 3) profile 取得（FK用）
-    const profile = await getProfileByAuthUserId(authUserId);
-
-    // 4) OpenAI
+    // 2) OpenAI
     const full = await callOpenAIForES({ esText, company, questionType });
 
-    // 5) es_corrections 保存
-    const { error: insertError } = await supabaseServer
-      .from("es_corrections")
-      .insert({
-        profile_id: profile.id,
-        story_card_id: storyCardId ?? null,
-        company_name: company ?? null,
-        question: questionType ?? null,
-        original_text: esText,
-        ai_feedback: full,
-        ai_rewrite: plan === "pro" ? full.sampleRewrite : null,
-      });
+    // 3) 保存（RLSが効く形で user_id 統一）
+    // ※ es_corrections に user_id カラムが必要（後述SQL）
+    const { error: corrErr } = await supabase.from("es_corrections").insert({
+      user_id: authUserId,
+      story_card_id: storyCardId,
+      company_name: company || null,
+      question: questionType || null,
+      original_text: esText,
+      ai_feedback: full,
+      ai_rewrite: plan === "pro" ? full.sampleRewrite : null,
+      created_at: new Date().toISOString(),
+    });
 
-    if (insertError) {
-      console.error("es_corrections insert error:", insertError);
-    }
+    if (corrErr) console.error("es_corrections insert error:", corrErr);
 
-    // 6) es_logs / growth_logs（失敗しても表は返す）
-    try {
-      const { error: esLogError } = await supabaseServer.from("es_logs").insert({
-        profile_id: profile.id,
-        company_name: company ?? null,
-        es_question: questionType ?? null,
-        es_before: esText,
-        es_after: plan === "pro" ? full.sampleRewrite : null,
-        mode: plan === "pro" ? "pro_correct" : "lite_correct",
-        score: null,
-      });
-      if (esLogError) console.error("es_logs insert error:", esLogError);
+    const { error: esLogError } = await supabase.from("es_logs").insert({
+      user_id: authUserId,
+      company_name: company || null,
+      es_question: questionType || null,
+      es_before: esText,
+      es_after: plan === "pro" ? full.sampleRewrite : null,
+      mode: plan === "pro" ? "pro_correct" : "lite_correct",
+      score: null,
+      created_at: new Date().toISOString(),
+    });
 
-      const titleBase = company ? `ES添削：${company}` : "ES添削";
-      const title = plan === "pro" ? `${titleBase} [PRO]` : `${titleBase} [Lite]`;
-      const description =
-        plan === "pro"
-          ? "PROプランとしてES添削（改善案＆書き換え例）を生成しました。"
-          : "ES添削の一部フィードバックを生成しました。（詳細はPRO限定）";
+    if (esLogError) console.error("es_logs insert error:", esLogError);
 
-      // ※ growth_logs の user_id が auth user id 前提でOK
-      const { error: growthError } = await supabaseServer.from("growth_logs").insert({
-        user_id: authUserId,
-        source: "es",
-        title,
-        description,
-        metadata: {
-          mode: plan,
-          locked: plan !== "pro",
-          company: company ?? null,
-          questionType: questionType ?? null,
-          story_card_id: storyCardId ?? null,
-        },
-      });
+    const titleBase = company ? `ES添削：${company}` : "ES添削";
+    const title = plan === "pro" ? `${titleBase} [PRO]` : `${titleBase} [Lite]`;
+    const description =
+      plan === "pro"
+        ? "PROプランとしてES添削（改善案＆書き換え例）を生成しました。"
+        : "ES添削の一部フィードバックを生成しました。（詳細はPRO限定）";
 
-      if (growthError) {
-        console.error("growth_logs insert error (es_correct):", growthError);
-      }
-    } catch (logErr) {
-      console.error("es_logs / growth_logs logging error:", logErr);
-    }
+    const { error: growthErr } = await supabase.from("growth_logs").insert({
+      user_id: authUserId,
+      source: "es",
+      title,
+      description,
+      metadata: {
+        mode: plan,
+        locked: plan !== "pro",
+        company: company || null,
+        questionType: questionType || null,
+        story_card_id: storyCardId,
+      },
+      created_at: new Date().toISOString(),
+    });
 
-    // 7) plan別レスポンス
+    if (growthErr) console.error("growth_logs insert error (es_correct):", growthErr);
+
+    // 4) plan別レスポンス
     if (plan === "pro") {
       return NextResponse.json({ plan, locked: false, feedback: full });
     }
@@ -229,8 +208,7 @@ export async function POST(req: NextRequest) {
       strengths: full.strengths.slice(0, 1),
       improvements: [],
       sampleRewrite:
-        (full.sampleRewrite ?? "").slice(0, 80) +
-        ((full.sampleRewrite ?? "").length > 80 ? "…" : ""),
+        (full.sampleRewrite ?? "").slice(0, 80) + ((full.sampleRewrite ?? "").length > 80 ? "…" : ""),
     };
 
     return NextResponse.json({

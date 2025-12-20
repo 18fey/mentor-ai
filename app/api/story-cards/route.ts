@@ -1,61 +1,96 @@
 // app/api/story-cards/route.ts
 import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
 
-const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const TABLE_NAME = "story_cards";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-async function supabaseFetch(path: string, init: RequestInit = {}) {
-  const url = `${SUPABASE_URL}/rest/v1/${path}`;
-  const headers = {
-    apikey: SERVICE_KEY,
-    Authorization: `Bearer ${SERVICE_KEY}`,
-    "Content-Type": "application/json",
-    ...(init.headers || {}),
-  };
+type Database = any;
 
-  const res = await fetch(url, { ...init, headers });
-  if (!res.ok) {
-    const text = await res.text();
-    console.error("Supabase story_cards error:", res.status, text);
-    throw new Error(text);
-  }
-  return res;
+async function createSupabaseFromCookies() {
+  const cookieStore = await cookies();
+  return createServerClient<Database>(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value;
+        },
+        set(name: string, value: string, options: any) {
+          cookieStore.set({ name, value, ...options });
+        },
+        remove(name: string, options: any) {
+          cookieStore.set({ name, value: "", ...options });
+        },
+      },
+    }
+  );
 }
 
-/**
- * ✅ ストーリーカード一覧取得（GET）
- * /api/story-cards?userId=xxx
- */
 export async function GET(req: NextRequest) {
   try {
-    const { searchParams } = new URL(req.url);
-    const userId = searchParams.get("userId");
+    const supabase = await createSupabaseFromCookies();
 
-    if (!userId) {
+    const { data: auth, error: authErr } = await supabase.auth.getUser();
+    const user = auth?.user ?? null;
+
+    if (authErr || !user?.id) {
       return NextResponse.json(
-        { error: "userId は必須です" },
-        { status: 400 }
+        { ok: false, error: "unauthorized", message: "ログインが必要です。" },
+        { status: 401 }
       );
     }
 
-    const res = await supabaseFetch(
-      `${TABLE_NAME}?user_id=eq.${encodeURIComponent(
-        userId
-      )}&order=last_updated_at.desc`
-    );
+    const authUserId = user.id;
 
-    const data = await res.json();
-    return NextResponse.json({ storyCards: data });
+    // ✅ profiles を auth_user_id で引く（あなたの設計）
+    const { data: profile, error: profErr } = await supabase
+      .from("profiles")
+      .select("id")
+      .eq("auth_user_id", authUserId)
+      .maybeSingle();
+
+    if (profErr) {
+      console.error("profiles select error:", profErr);
+      return NextResponse.json(
+        { ok: false, error: "profile_fetch_failed" },
+        { status: 500 }
+      );
+    }
+
+    if (!profile?.id) {
+      // 作れてないなら、UI側で profile 作る導線が必要
+      return NextResponse.json(
+        { ok: true, storyCards: [], message: "profile が未作成です。" },
+        { status: 200 }
+      );
+    }
+
+    const profileId = profile.id;
+
+    // ✅ story_cards.user_id は「profile.id」が入ってる前提で取得
+    const { data, error } = await supabase
+      .from("story_cards")
+      .select("*")
+      .eq("user_id", profileId)
+      .order("last_updated_at", { ascending: false });
+
+    if (error) {
+      console.error("story_cards select error:", error);
+      return NextResponse.json(
+        { ok: false, error: "story_cards_fetch_failed", detail: error.message },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json({ ok: true, storyCards: data ?? [] });
   } catch (e: any) {
-    console.error("GET story-cards failed:", e);
+    console.error("GET /api/story-cards server_error:", e);
     return NextResponse.json(
-      { error: "story_cards_fetch_failed" },
+      { ok: false, error: "server_error", message: "取得中にエラーが発生しました。" },
       { status: 500 }
     );
   }
 }
-
-/**
- * ✅ 既存の POST は別ファイル（generate / from-audio）で定義
- */

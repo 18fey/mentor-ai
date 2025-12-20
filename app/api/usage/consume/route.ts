@@ -19,7 +19,7 @@ type FeatureKey =
 const FREE_LIMITS: Record<FeatureKey, number> = {
   case_interview: 3,
   case_generate: 8,
-  fermi: 3,
+  fermi: 7,
   general_interview: 1,
   ai_training: 1,
   es_correction: 1,
@@ -42,6 +42,7 @@ function monthStartISO(now = new Date()) {
 
 async function createSupabaseFromCookies() {
   const cookieStore = await cookies();
+
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -62,14 +63,16 @@ async function createSupabaseFromCookies() {
 }
 
 // ✅ profiles は cookie付き supabase で取る（無ければ作る）
+// ✅ 方針：profiles.id = auth.uid() に統一する
 async function getOrCreateProfile(
   supabase: Awaited<ReturnType<typeof createSupabaseFromCookies>>,
   authUserId: string
 ) {
+  // まず id で探す（= auth.uid と一致する前提）
   const { data: existing, error: selErr } = await supabase
     .from("profiles")
     .select("id, plan, meta_balance")
-    .eq("auth_user_id", authUserId)
+    .eq("id", authUserId)
     .maybeSingle();
 
   if (selErr) {
@@ -80,7 +83,7 @@ async function getOrCreateProfile(
     return existing as { id: string; plan: Plan | null; meta_balance: number | null };
   }
 
-  // ✅ INSERTは id と auth_user_id を両方 authUserId に揃えておく（ポリシー混在対策）
+  // 無ければ作る（id も auth_user_id も authUserId に揃える）
   const { data: created, error: insErr } = await supabase
     .from("profiles")
     .insert({
@@ -103,6 +106,7 @@ export async function POST(req: NextRequest) {
   try {
     const supabase = await createSupabaseFromCookies();
 
+    // ✅ userId は body から受け取らない。cookieセッションで確定。
     const { data: auth, error: authErr } = await supabase.auth.getUser();
     const user = auth?.user ?? null;
 
@@ -112,6 +116,7 @@ export async function POST(req: NextRequest) {
         { status: 401 }
       );
     }
+
     const authUserId = user.id;
 
     const body = await req.json().catch(() => ({}));
@@ -138,10 +143,10 @@ export async function POST(req: NextRequest) {
     // ✅ PROは無制限：ログだけ残す
     if (plan === "pro") {
       const { error: logErr } = await supabase.from("usage_logs").insert({
+        // user_id は default auth.uid() があるので省略も可だが、明示で入れてOK
         user_id: authUserId,
         feature,
         used_at: new Date().toISOString(),
-        profile_id: profile.id, // カラムあるなら入れとく
       });
 
       if (logErr) {
@@ -154,7 +159,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, feature, plan, chargedMeta: 0 });
     }
 
-    // ✅ FREE: 今月の無料枠カウント（created_atじゃなく used_at）
+    // ✅ FREE: 今月の無料枠カウント（used_at 기준）
     const freeLimit = FREE_LIMITS[feature];
     const { count, error: countErr } = await supabase
       .from("usage_logs")
@@ -173,13 +178,12 @@ export async function POST(req: NextRequest) {
 
     const usedThisMonth = count ?? 0;
 
-    // ✅ 無料枠内：メタ消費なしでOK
+    // ✅ 無料枠内：メタ消費なし
     if (usedThisMonth < freeLimit) {
       const { error: logErr } = await supabase.from("usage_logs").insert({
         user_id: authUserId,
         feature,
         used_at: new Date().toISOString(),
-        profile_id: profile.id,
       });
 
       if (logErr) {
@@ -200,7 +204,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // ✅ 無料枠超過：meta を消費する
+    // ✅ 無料枠超過：meta を消費
     const cost = META_COST[feature] ?? 1;
     const balance = Number(profile.meta_balance ?? 0);
 
@@ -219,11 +223,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ✅ meta 減算
+    // ✅ meta 減算（profiles.id = auth.uid()）
     const { error: updErr } = await supabase
       .from("profiles")
       .update({ meta_balance: balance - cost })
-      .eq("id", profile.id);
+      .eq("id", authUserId);
 
     if (updErr) {
       console.error("profiles meta_balance update error:", updErr);
@@ -233,12 +237,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ✅ ログ（meta_cost列が無いなら入れない）
+    // ✅ 利用ログ（課金後）
     const { error: logErr } = await supabase.from("usage_logs").insert({
       user_id: authUserId,
       feature,
       used_at: new Date().toISOString(),
-      profile_id: profile.id,
     });
 
     if (logErr) {
