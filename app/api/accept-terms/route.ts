@@ -54,7 +54,7 @@ export async function POST(_req: NextRequest) {
         accepted_terms: true,
         accepted_terms_at: new Date().toISOString(),
       })
-      .eq("auth_user_id", authUserId);
+      .eq("id", user.id) ;
 
     if (error) {
       console.error("[accept-terms] Supabase update error:", error);

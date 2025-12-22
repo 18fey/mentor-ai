@@ -46,7 +46,7 @@ async function resolveProfileIdFromAuthUserId(authUserId: string) {
     .from("profiles")
     .select("id")
     // @ts-ignore
-    .eq("auth_user_id", authUserId)
+    .eq("id", user.id) 
     .maybeSingle();
 
   if (byAuth?.id) return byAuth.id;
@@ -85,7 +85,7 @@ export async function POST(_req: NextRequest) {
     }
 
     // ✅ auth_user_id で紐づく profiles 更新/削除（設計移行中の保険）
-    results.push(await supabaseServer.from("profiles").delete().eq("auth_user_id", authUserId));
+    results.push(await supabaseServer.from("profiles").delete().eq("id", user.id) );
     // ✅ profiles.id = authUserId の運用も残ってるならこちらも
     results.push(await supabaseServer.from("profiles").delete().eq("id", authUserId));
 

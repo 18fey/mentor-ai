@@ -51,7 +51,7 @@ export async function POST() {
     const { data: profile, error: profileErr } = await supabaseServer
       .from("profiles")
       .select("id, onboarding_cc, referred_by")
-      .eq("auth_user_id", authUserId)
+      .eq("id", user.id) 
       .single();
 
     if (profileErr || !profile) {
@@ -71,7 +71,7 @@ export async function POST() {
     const { error: markErr } = await supabaseServer
       .from("profiles")
       .update({ onboarding_cc: true })
-      .eq("auth_user_id", authUserId);
+      .eq("id", user.id) ;
 
     if (markErr) {
       console.error("[ai-typing/complete] mark completed error:", markErr);

@@ -48,7 +48,7 @@ export async function GET(_req: NextRequest) {
     const { data: profileByAuth } = await supabaseServer
       .from("profiles")
       .select("*")
-      .eq("auth_user_id", authUserId)
+      .eq("id", authUserId)
       .maybeSingle();
 
     const profile =

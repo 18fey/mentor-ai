@@ -21,7 +21,7 @@ function createClientSupabase() {
 
 type ProfileRow = {
   id: string; // profiles のPK（uuid）
-  auth_user_id: string; // auth.users.id
+  auth_user_id: string | null; // auth.users.id
   display_name: string | null;
   affiliation: string | null;
   status: string | null; // 学生 / 社会人 など
@@ -67,7 +67,7 @@ export default function ProfilePage() {
         const { data, error } = await supabase
           .from("profiles")
           .select("*")
-          .eq("auth_user_id", user.id)
+          .eq("id", user.id)
           .maybeSingle<ProfileRow>();
 
         if (error) {
@@ -81,6 +81,7 @@ export default function ProfilePage() {
           const { data: inserted, error: insertError } = await supabase
             .from("profiles")
             .insert({
+              id: user.id,
               auth_user_id: user.id,
               plan: "free",
               meta_balance: 0,
