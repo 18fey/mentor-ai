@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { createServerSupabase } from "@/utils/supabase/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { getUserPlan } from "@/lib/plan";
+import { requireFeatureOrConsumeMeta } from "@/lib/payment/featureGate";
 
 export const runtime = "nodejs";
 
@@ -44,7 +45,7 @@ export async function POST(req: Request) {
     }
 
     // ✅ cookieセッションから本人確定（body.userIdは信じない）
-    const supabase = await createServerSupabase(); // ←★await 必須（ケースと揃える）
+    const supabase = await createServerSupabase(); // ←await 必須
     const {
       data: { user },
       error: userErr,
@@ -58,6 +59,7 @@ export async function POST(req: Request) {
     }
     const userId = user.id;
 
+    // ✅ body
     const body = (await req.json()) as {
       question: string;
       formula: string;
@@ -83,7 +85,7 @@ export async function POST(req: Request) {
     }
 
     // ✅ usage/consume：Route Handler → 内部fetchは cookie が勝手に付かない
-    // → 元リクエストの Cookie を転送する（ケースと同じ）
+    // → 元リクエストの Cookie を転送する
     const baseUrl = new URL(req.url).origin;
     const cookieHeader = req.headers.get("cookie") ?? "";
 
@@ -93,30 +95,36 @@ export async function POST(req: Request) {
         "Content-Type": "application/json",
         Cookie: cookieHeader,
       },
-      body: JSON.stringify({ feature: "fermi" }), // ★ここはusage側のFeatureKeyに合わせて
+      body: JSON.stringify({ feature: "fermi" }), // usage側のFeatureKey
     });
 
     const usageJson = await usageRes.json().catch(() => null);
 
+    // ✅ 無料枠を超えていたら → meta消費へ誘導
     if (!usageRes.ok) {
-      if (usageRes.status === 403 && usageJson?.error === "limit_exceeded") {
+      // 402 で need_meta を返す想定（あなたが今直してる usage/consume の仕様）
+      if (usageRes.status === 402 && usageJson?.error === "need_meta") {
+        // ✅ meta消費（meta_lots / consume_meta_fifo）
+        // ※ FeatureGate側のFeatureIdは「fermi」を使う（あなたのFEATURE_META_COSTに合わせる）
+        const gate = await requireFeatureOrConsumeMeta("fermi");
+
+        // meta不足なら、ここでそのまま返す（UIは購入導線へ）
+        if (!gate.ok) {
+          return NextResponse.json(gate, { status: gate.status });
+        }
+
+        // gate.ok なら「metaで続行できた」ので本処理へ進む
+      } else {
+        // それ以外は usage側の想定外エラー
+        console.error("usage/consume error:", usageRes.status, usageJson);
         return NextResponse.json(
-          {
-            error: "limit_exceeded",
-            message:
-              usageJson?.message ??
-              "フェルミAIの今月の無料利用回数が上限に達しました。",
-          },
-          { status: 403 }
+          { error: "usage_error", message: "Failed to check usage" },
+          { status: 500 }
         );
       }
-      console.error("usage/consume error:", usageRes.status, usageJson);
-      return NextResponse.json(
-        { error: "usage_error", message: "Failed to check usage" },
-        { status: 500 }
-      );
     }
 
+    // ✅ ここまで来たら「無料枠内 or meta消費済み or pro」なので実行OK
     const plan = await getUserPlan(userId);
 
     const system = `
@@ -268,11 +276,10 @@ ${sanityComment || "(なし)"}
       ok: true,
       plan,
 
-      remaining:
-        typeof usageJson?.remaining === "number" ? usageJson.remaining : null,
-      usedCount:
-        typeof usageJson?.usedCount === "number" ? usageJson.usedCount : null,
-      limit: typeof usageJson?.limit === "number" ? usageJson.limit : null,
+      // usage/consume が200のときのみ意味がある（need_metaのときは usageJson は {error:"need_meta", ...}）
+      usedThisMonth:
+        typeof usageJson?.usedThisMonth === "number" ? usageJson.usedThisMonth : null,
+      freeLimit: typeof usageJson?.freeLimit === "number" ? usageJson.freeLimit : null,
 
       score,
       feedback,

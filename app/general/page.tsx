@@ -41,10 +41,7 @@ const PERSONAS = [
   { id: "sales_trading_commerce", label: "商社・営業・流通系" },
   { id: "finance_banking_insurance", label: "金融（銀行・証券・保険）系" },
   { id: "maker_it_telecom", label: "メーカー・IT・通信系" },
-  {
-    id: "service_education_entertainment",
-    label: "サービス・教育・エンタメ系",
-  },
+  { id: "service_education_entertainment", label: "サービス・教育・エンタメ系" },
 ];
 
 const TOPIC_LABEL: Record<TopicType, string> = {
@@ -55,7 +52,8 @@ const TOPIC_LABEL: Record<TopicType, string> = {
   general: "",
 };
 
-type Step = "idle" | "asking" | "thinking" | "evaluating" | "finished";
+// ✅ editing 追加
+type Step = "idle" | "asking" | "thinking" | "editing" | "evaluating" | "finished";
 
 // 学びテキストから「就活の軸」タグをざっくり抽出（いまは未使用だが、今後のために残しておく）
 function extractAxesFromLearnings(text: string): string[] {
@@ -118,7 +116,6 @@ function buildQuestions(profile: Profile | null): string[] {
 export default function InterviewPage() {
   const router = useRouter();
 
-  // ✅ 新SDK：createBrowserClient をそのまま使用
   const supabase = useMemo(
     () =>
       createBrowserClient(
@@ -131,28 +128,13 @@ export default function InterviewPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
 
-  // 上部カード（※ここは将来 /api/score-dashboard に差し替え可）
   const stats = [
-    {
-      label: "模擬面接回数",
-      value: "—",
-      helper: "これまでのセッション数（あなた専用）",
-    },
-    {
-      label: "平均評価",
-      value: "—",
-      helper: "5点満点の平均レビュー（あなた専用）",
-    },
-    {
-      label: "累計練習時間",
-      value: "—",
-      helper: "ケース以外の面接練習時間（あなた専用）",
-    },
+    { label: "模擬面接回数", value: "—", helper: "これまでのセッション数（あなた専用）" },
+    { label: "平均評価", value: "—", helper: "5点満点の平均レビュー（あなた専用）" },
+    { label: "累計練習時間", value: "—", helper: "ケース以外の面接練習時間（あなた専用）" },
   ];
 
-  // 面接官ペルソナ
   const [personaId, setPersonaId] = useState<string>("consulting_finance");
-  // どのタブのストーリーカードとして保存するか（ES添削と共通）
   const [topicType, setTopicType] = useState<TopicType>("gakuchika");
 
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -165,34 +147,28 @@ export default function InterviewPage() {
   const [evaluation, setEvaluation] = useState<EvaluationResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // ✅ 編集用（一時置き）
+  const [pendingTranscript, setPendingTranscript] = useState<string>("");
+  const [isCommitting, setIsCommitting] = useState(false);
+
   const [isCreatingCard, setIsCreatingCard] = useState(false);
   const [createMessage, setCreateMessage] = useState<string | null>(null);
 
   const logRef = useRef<HTMLDivElement | null>(null);
 
-  // ✅ ログインユーザー取得 → プロフィール取得
   useEffect(() => {
     const run = async () => {
       try {
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-
+        const { data: { user } } = await supabase.auth.getUser();
         if (!user) {
           router.push("/auth");
           return;
         }
-
         setUserId(user.id);
 
-        // プロフィール取得（完全個別化）
-        const res = await fetch(
-          `/api/profile/get?userId=${encodeURIComponent(user.id)}`
-        );
+        const res = await fetch(`/api/profile/get?userId=${encodeURIComponent(user.id)}`);
         const data = await res.json();
-        if (data.profile) {
-          setProfile(data.profile);
-        }
+        if (data.profile) setProfile(data.profile);
       } catch (e) {
         console.error("Failed to fetch auth/profile:", e);
       } finally {
@@ -203,25 +179,16 @@ export default function InterviewPage() {
     run();
   }, [supabase, router]);
 
-  const questions = useMemo(
-    () => buildQuestions(profile),
-    [profileLoaded, profile]
-  );
+  const questions = useMemo(() => buildQuestions(profile), [profileLoaded, profile]);
 
   const scrollToBottom = () => {
     setTimeout(() => {
       if (logRef.current) {
-        logRef.current.scrollTo({
-          top: logRef.current.scrollHeight,
-          behavior: "smooth",
-        });
+        logRef.current.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
       }
     }, 120);
   };
 
-  // -------------------------------------
-  // 面接開始
-  // -------------------------------------
   const startInterview = () => {
     if (!authChecked || !userId) {
       router.push("/auth");
@@ -234,65 +201,12 @@ export default function InterviewPage() {
     setStep("asking");
     setError(null);
     setCreateMessage(null);
+    setPendingTranscript("");
+    setIsCommitting(false);
     scrollToBottom();
   };
 
-  // -------------------------------------
-  // 録音完了 → /api/transcribe → Q&A登録 → 次の質問 or 評価
-  // -------------------------------------
-  const handleRecorded = async (blob: Blob) => {
-    try {
-      setStep("thinking");
-      setError(null);
-      scrollToBottom();
-
-      const fd = new FormData();
-      fd.append("audio", blob);
-
-      const res = await fetch("/api/transcribe", {
-        method: "POST",
-        body: fd,
-      });
-
-      const data = await res.json();
-
-      const transcript: string =
-        data?.transcript ??
-        "（文字起こしに失敗しましたが、録音秒数ぶんのダミー文字列です。）";
-
-      const newQA: QA = {
-        question: currentQuestion,
-        answer: transcript,
-      };
-
-      setQAList((prev) => [...prev, newQA]);
-      scrollToBottom();
-
-      const nextIdx = currentIdx + 1;
-
-      if (nextIdx >= MAX_Q) {
-        // 10問終了 → 評価へ
-        await runEvaluation([...qaList, newQA]);
-      } else {
-        // 次の質問へ
-        setCurrentIdx(nextIdx);
-        setCurrentQuestion(questions[nextIdx]);
-        setStep("asking");
-        scrollToBottom();
-      }
-    } catch (e: any) {
-      console.error(e);
-      setError(
-        e?.message ||
-          "文字起こし中にエラーが発生しました。通信環境を確認して、もう一度お試しください。"
-      );
-      setStep("asking");
-    }
-  };
-
-  // -------------------------------------
-  // 10問終了 → /api/interview-eval でまとめ評価
-  // -------------------------------------
+  // ✅ 10問終了 → /api/interview-eval
   const runEvaluation = async (finishedList: QA[]) => {
     try {
       setStep("evaluating");
@@ -301,11 +215,7 @@ export default function InterviewPage() {
       const res = await fetch("/api/interview-eval", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          persona_id: personaId,
-          qaList: finishedList,
-          userId,
-        }),
+        body: JSON.stringify({ persona_id: personaId, qaList: finishedList, userId }),
       });
 
       if (!res.ok) {
@@ -319,12 +229,87 @@ export default function InterviewPage() {
       scrollToBottom();
     } catch (e: any) {
       console.error(e);
-      setError(
-        e?.message ||
-          "面接評価の作成中にエラーが発生しました。時間をおいて再度お試しください。"
-      );
+      setError(e?.message || "面接評価の作成中にエラーが発生しました。時間をおいて再度お試しください。");
       setStep("finished");
     }
+  };
+
+  // ✅ 録音完了 → /api/transcribe → editingへ（ここではQA保存しない）
+  const handleRecorded = async (blob: Blob) => {
+    try {
+      setStep("thinking");
+      setError(null);
+      scrollToBottom();
+
+      const fd = new FormData();
+      fd.append("audio", blob);
+
+      const res = await fetch("/api/transcribe", { method: "POST", body: fd });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(data?.message || "文字起こしに失敗しました。");
+      }
+
+      const transcript: string =
+        String(data?.transcript ?? "").trim() ||
+        "（文字起こしに失敗しました。必要なら編集して確定してください。）";
+
+      setPendingTranscript(transcript);
+      setStep("editing");
+      scrollToBottom();
+    } catch (e: any) {
+      console.error(e);
+      setError(
+        e?.message ||
+          "文字起こし中にエラーが発生しました。通信環境を確認して、もう一度お試しください。"
+      );
+      setStep("asking");
+    }
+  };
+
+  // ✅ 確定：QAに保存 → 次へ or 評価へ
+  const commitEditedTranscript = async () => {
+    if (isCommitting) return;
+    setIsCommitting(true);
+    setError(null);
+
+    try {
+      const answer = pendingTranscript.trim() || "（空の回答）";
+
+      const newQA: QA = { question: currentQuestion, answer };
+      const nextList = [...qaList, newQA];
+      setQAList(nextList);
+
+      // 次に持ち越さない
+      setPendingTranscript("");
+
+      const nextIdx = currentIdx + 1;
+
+      if (nextIdx >= MAX_Q) {
+        await runEvaluation(nextList);
+        return;
+      }
+
+      setCurrentIdx(nextIdx);
+      setCurrentQuestion(questions[nextIdx]);
+      setStep("asking");
+      scrollToBottom();
+    } catch (e: any) {
+      console.error(e);
+      setError(e?.message || "確定処理中にエラーが発生しました。");
+      setStep("editing");
+    } finally {
+      setIsCommitting(false);
+    }
+  };
+
+  // ✅ やり直し：同じ質問で再録音（QAには保存しない）
+  const retryAnswer = () => {
+    setPendingTranscript("");
+    setError(null);
+    setStep("asking");
+    scrollToBottom();
   };
 
   // -------------------------------------
@@ -337,15 +322,11 @@ export default function InterviewPage() {
     }
 
     if (!evaluation) {
-      setCreateMessage(
-        "まず10問すべて回答して、面接評価を出してください。"
-      );
+      setCreateMessage("まず10問すべて回答して、面接評価を出してください。");
       return;
     }
     if (qaList.length === 0) {
-      setCreateMessage(
-        "Q&Aログがありません。もう一度面接を実施してください。"
-      );
+      setCreateMessage("Q&Aログがありません。もう一度面接を実施してください。");
       return;
     }
 
@@ -356,33 +337,17 @@ export default function InterviewPage() {
       const res = await fetch("/api/story-cards/from-audio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId, // ログインユーザーごとに保存
-          personaId, // どの面接官人格で聞いたか
-          qaList,
-          profile,
-          topicType, // ★ このセッションをどのタブのカードとして保存するか
-        }),
+        body: JSON.stringify({ userId, personaId, qaList, profile, topicType }),
       });
 
       const data = await res.json().catch(() => null);
 
       if (!res.ok || !data?.storyCard) {
-        console.error("createStoryCardFromSession error:", {
-          status: res.status,
-          data,
-        });
-        setCreateMessage(
-          "ストーリーカードの保存に失敗しました。時間をおいて再度お試しください。"
-        );
+        console.error("createStoryCardFromSession error:", { status: res.status, data });
+        setCreateMessage("ストーリーカードの保存に失敗しました。時間をおいて再度お試しください。");
       } else {
-        setCreateMessage(
-          "ストーリーカードを作成しました。ES添削タブに移動します…"
-        );
-
-        setTimeout(() => {
-          router.push("/es");
-        }, 1500);
+        setCreateMessage("ストーリーカードを作成しました。ES添削タブに移動します…");
+        setTimeout(() => router.push("/es"), 1500);
       }
     } catch (e) {
       console.error("createStoryCardFromSession error:", e);
@@ -392,14 +357,14 @@ export default function InterviewPage() {
     }
   };
 
-  // ステップが変わるたびにログをスクロール
   useEffect(() => {
     scrollToBottom();
   }, [step]);
 
+  const isLocked = step !== "idle" && step !== "finished";
+
   return (
     <div className="px-10 py-8 space-y-8">
-      {/* タイトル */}
       <div className="flex flex-col gap-1">
         <h1 className="text-2xl font-semibold">一般面接AI（音声版）</h1>
         <p className="text-sm text-slate-500">
@@ -408,43 +373,32 @@ export default function InterviewPage() {
         </p>
       </div>
 
-      {/* 上の3カード */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {stats.map((s) => (
-          <StatCard
-            key={s.label}
-            label={s.label}
-            value={s.value}
-            helper={s.helper}
-          />
+          <StatCard key={s.label} label={s.label} value={s.value} helper={s.helper} />
         ))}
       </div>
 
-      {/* メインエリア */}
       <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,2fr)_minmax(280px,360px)] gap-6 items-start">
-        {/* 左：面接ログ + 録音 */}
+        {/* 左 */}
         <div className="rounded-3xl bg-white shadow-sm px-6 py-6 flex flex-col gap-4">
           {/* ヘッダー行 */}
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
             <div>
-              <h2 className="text-base font-semibold">
-                音声模擬面接（一般質問 × 10問）
-              </h2>
+              <h2 className="text-base font-semibold">音声模擬面接（一般質問 × 10問）</h2>
               <p className="text-[11px] text-slate-500">
                 「面接官の質問」⇒「あなたが話す」⇒「AIが解析＆評価」という流れで、10問分のやりとりを一気に練習できます。
               </p>
             </div>
+
             <div className="flex flex-col items-start md:items-end gap-2">
-              {/* 業界・人格セレクト */}
               <div className="flex items-center gap-2">
-                <span className="text-[11px] text-slate-500">
-                  面接官タイプ：
-                </span>
+                <span className="text-[11px] text-slate-500">面接官タイプ：</span>
                 <select
                   className="text-xs border border-slate-200 rounded-full px-3 py-1.5 bg-slate-50"
                   value={personaId}
                   onChange={(e) => setPersonaId(e.target.value)}
-                  disabled={step !== "idle" && step !== "finished"}
+                  disabled={isLocked}
                 >
                   {PERSONAS.map((p) => (
                     <option key={p.id} value={p.id}>
@@ -454,34 +408,26 @@ export default function InterviewPage() {
                 </select>
               </div>
 
-              {/* テーマ（ストーリーカードのタブ）セレクト */}
               <div className="flex items-center gap-2">
                 <span className="text-[11px] text-slate-500">テーマ：</span>
                 <select
                   className="text-xs border border-slate-200 rounded-full px-3 py-1.5 bg-slate-50"
                   value={topicType}
                   onChange={(e) => setTopicType(e.target.value as TopicType)}
-                  disabled={step !== "idle" && step !== "finished"}
+                  disabled={isLocked}
                 >
                   <option value="gakuchika">{TOPIC_LABEL.gakuchika}</option>
                   <option value="self_pr">{TOPIC_LABEL.self_pr}</option>
                   <option value="why_company">{TOPIC_LABEL.why_company}</option>
-                  <option value="why_industry">
-                    {TOPIC_LABEL.why_industry}
-                  </option>
+                  <option value="why_industry">{TOPIC_LABEL.why_industry}</option>
                 </select>
               </div>
 
-              {/* 進捗と開始ボタン */}
               <div className="flex items-center gap-3">
                 <span className="text-[11px] text-slate-400">
-                  進捗：
-                  {Math.min(
-                    qaList.length + (step === "asking" ? 1 : 0),
-                    10
-                  )}{" "}
-                  / {MAX_Q} 問
+                  進捗：{Math.min(qaList.length + (step === "asking" ? 1 : 0), 10)} / {MAX_Q} 問
                 </span>
+
                 {(step === "idle" || step === "finished") && (
                   <button
                     type="button"
@@ -507,12 +453,10 @@ export default function InterviewPage() {
               </p>
             )}
 
-            {/* これまでのQ&A */}
             {qaList.map((qa, i) => (
               <div key={i} className="space-y-1">
                 <div className="bg-slate-100 px-4 py-2 rounded-xl text-xs text-slate-800">
-                  <span className="font-semibold text-sky-700">Q{i + 1}</span>
-                  ：{qa.question}
+                  <span className="font-semibold text-sky-700">Q{i + 1}</span>：{qa.question}
                 </div>
                 <div className="bg-sky-500 text-white px-4 py-2 rounded-xl text-xs">
                   <span className="font-semibold">A：</span> {qa.answer}
@@ -524,28 +468,64 @@ export default function InterviewPage() {
             {step !== "idle" && step !== "finished" && (
               <div className="space-y-1">
                 <div className="bg-slate-100 px-4 py-2 rounded-xl text-xs text-slate-800">
-                  <span className="font-semibold text-sky-700">
-                    Q{currentIdx + 1}
-                  </span>
-                  ：{currentQuestion}
+                  <span className="font-semibold text-sky-700">Q{currentIdx + 1}</span>：{currentQuestion}
                 </div>
+
                 {step === "thinking" && (
-                  <p className="text-[11px] text-slate-500 pl-1">
-                    AI が回答を解析中…
-                  </p>
+                  <p className="text-[11px] text-slate-500 pl-1">文字起こし中…</p>
                 )}
               </div>
             )}
           </div>
 
-          {/* 録音コンポーネント */}
+          {/* ✅ editing UI */}
+          {step === "editing" && (
+            <div className="pt-3 border-t border-slate-100">
+              <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 space-y-3">
+                <div>
+                  <p className="text-xs font-semibold text-slate-800">✨ 文字起こし確認・修正 ✨</p>
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    認識ズレがあればここで直してから確定してください（確定後にQ&Aへ保存されます）。
+                  </p>
+                </div>
+
+                <textarea
+                  className="w-full min-h-[120px] rounded-2xl border border-slate-200 bg-white px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-sky-300"
+                  value={pendingTranscript}
+                  onChange={(e) => setPendingTranscript(e.target.value)}
+                  placeholder="文字起こし結果がここに入ります"
+                />
+
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={retryAnswer}
+                    disabled={isCommitting}
+                    className="px-3 py-2 rounded-xl text-xs border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-60"
+                  >
+                    この回答をやり直す
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={commitEditedTranscript}
+                    disabled={isCommitting}
+                    className="px-3 py-2 rounded-xl text-xs font-semibold bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-60"
+                  >
+                    {isCommitting ? "確定中…" : "確定して次へ"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 録音 */}
           {step === "asking" && (
             <div className="pt-3 border-t border-slate-100">
               <InterviewRecorder onRecorded={handleRecorded} />
             </div>
           )}
 
-          {/* ステータス表示 */}
           {step === "evaluating" && (
             <p className="text-[11px] text-slate-500 pt-2">
               AI が10問分の回答をまとめて解析し、評価を作成しています…
@@ -563,9 +543,7 @@ export default function InterviewPage() {
         <aside className="w-full">
           <div className="rounded-3xl bg-white shadow-sm px-5 py-5 space-y-4">
             <div>
-              <h2 className="text-sm font-semibold text-slate-800 mb-1">
-                面接評価（AI自動解析）
-              </h2>
+              <h2 className="text-sm font-semibold text-slate-800 mb-1">面接評価（AI自動解析）</h2>
               {!evaluation && (
                 <p className="text-xs text-slate-400">
                   面接が終了すると、ここに総合スコアとフィードバックが表示されます。
@@ -576,12 +554,9 @@ export default function InterviewPage() {
             {evaluation && (
               <>
                 <div className="space-y-4 text-xs">
-                  {/* 総合スコア */}
                   <div className="rounded-2xl bg-sky-50 px-4 py-3 flex items-center justify-between">
                     <div>
-                      <p className="text-[11px] text-sky-700 mb-1">
-                        総合スコア
-                      </p>
+                      <p className="text-[11px] text-sky-700 mb-1">総合スコア</p>
                       <p className="text-2xl font-bold text-sky-700">
                         {evaluation.total_score}
                         <span className="text-xs ml-1">/100</span>
@@ -592,69 +567,45 @@ export default function InterviewPage() {
                     </p>
                   </div>
 
-                  {/* 個別スコア */}
                   <div className="grid grid-cols-2 gap-2">
                     <div className="rounded-2xl bg-slate-50 px-3 py-2">
                       <p className="text-[11px] text-slate-500">STAR構造</p>
-                      <p className="font-semibold text-slate-800">
-                        {evaluation.star_score} / 100
-                      </p>
+                      <p className="font-semibold text-slate-800">{evaluation.star_score} / 100</p>
                     </div>
                     <div className="rounded-2xl bg-slate-50 px-3 py-2">
                       <p className="text-[11px] text-slate-500">内容の深さ</p>
-                      <p className="font-semibold text-slate-800">
-                        {evaluation.content_depth_score} / 100
-                      </p>
+                      <p className="font-semibold text-slate-800">{evaluation.content_depth_score} / 100</p>
                     </div>
                     <div className="rounded-2xl bg-slate-50 px-3 py-2">
                       <p className="text-[11px] text-slate-500">明瞭さ</p>
-                      <p className="font-semibold text-slate-800">
-                        {evaluation.clarity_score} / 100
-                      </p>
+                      <p className="font-semibold text-slate-800">{evaluation.clarity_score} / 100</p>
                     </div>
                     <div className="rounded-2xl bg-slate-50 px-3 py-2">
-                      <p className="text-[11px] text-slate-500">
-                        話し方（WPM・フィラー）
-                      </p>
-                      <p className="font-semibold text-slate-800">
-                        {evaluation.delivery_score} / 100
-                      </p>
+                      <p className="text-[11px] text-slate-500">話し方（WPM・フィラー）</p>
+                      <p className="font-semibold text-slate-800">{evaluation.delivery_score} / 100</p>
                     </div>
                   </div>
 
-                  {/* Goodポイント */}
                   <div className="rounded-2xl bg-emerald-50 px-3 py-3">
-                    <p className="font-semibold text-emerald-700 mb-1">
-                      Goodポイント
-                    </p>
+                    <p className="font-semibold text-emerald-700 mb-1">Goodポイント</p>
                     <ul className="list-disc list-inside text-emerald-800 space-y-1">
-                      {(evaluation.auto_feedback?.good_points ?? []).map(
-                        (g, i) => (
-                          <li key={i}>{g}</li>
-                        )
-                      )}
+                      {(evaluation.auto_feedback?.good_points ?? []).map((g, i) => (
+                        <li key={i}>{g}</li>
+                      ))}
                     </ul>
                   </div>
 
-                  {/* 改善ポイント */}
                   <div className="rounded-2xl bg-amber-50 px-3 py-3">
-                    <p className="font-semibold text-amber-700 mb-1">
-                      改善ポイント
-                    </p>
+                    <p className="font-semibold text-amber-700 mb-1">改善ポイント</p>
                     <ul className="list-disc list-inside text-amber-800 space-y-1">
-                      {(evaluation.auto_feedback?.improvement_points ?? []).map(
-                        (g, i) => (
-                          <li key={i}>{g}</li>
-                        )
-                      )}
+                      {(evaluation.auto_feedback?.improvement_points ?? []).map((g, i) => (
+                        <li key={i}>{g}</li>
+                      ))}
                     </ul>
                   </div>
 
-                  {/* 一言アドバイス */}
                   <div className="rounded-2xl bg-slate-50 px-3 py-3">
-                    <p className="font-semibold text-slate-700 mb-1">
-                      一言アドバイス
-                    </p>
+                    <p className="font-semibold text-slate-700 mb-1">一言アドバイス</p>
                     <p className="text-slate-600">
                       {evaluation.auto_feedback?.one_sentence_advice ??
                         "次回以降の面接のポイントがここに表示されます。"}
@@ -662,7 +613,6 @@ export default function InterviewPage() {
                   </div>
                 </div>
 
-                {/* ストーリーカード生成ボタン */}
                 <div className="pt-3 border-t border-slate-100 space-y-2">
                   <button
                     type="button"
@@ -674,15 +624,9 @@ export default function InterviewPage() {
                         : "bg-violet-500 text-white hover:bg-violet-600"
                     }`}
                   >
-                    {isCreatingCard
-                      ? "ストーリーカード作成中…"
-                      : "このセッションからストーリーカードを作成（ES用）"}
+                    {isCreatingCard ? "ストーリーカード作成中…" : "このセッションからストーリーカードを作成（ES用）"}
                   </button>
-                  {createMessage && (
-                    <p className="text-[11px] text-slate-600">
-                      {createMessage}
-                    </p>
-                  )}
+                  {createMessage && <p className="text-[11px] text-slate-600">{createMessage}</p>}
                 </div>
               </>
             )}

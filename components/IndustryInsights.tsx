@@ -1,7 +1,9 @@
-// components/IndustryInsights.tsx
+// src/components/IndustryInsights.tsx
 "use client";
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { MetaConfirmModal } from "@/components/MetaConfirmModal";
 
 type ResultTab = "insight" | "questions" | "news";
 
@@ -92,8 +94,7 @@ const FUTURE_TAGS = [
   "AI/技術変化の影響",
 ];
 
-// デモ用サンプル（初期表示）
-// key = `${groupLabel}|${subLabel}`
+// デモ用サンプル（初期表示） key = `${groupLabel}|${subLabel}`
 const SAMPLE_CONTENT: Record<string, InsightResult> = {
   "コンサルティング|戦略コンサル": {
     insight: `### 戦略コンサル業界のざっくり構造（サンプル）
@@ -169,7 +170,6 @@ const SAMPLE_CONTENT: Record<string, InsightResult> = {
   },
 };
 
-// デフォルトサンプル（上記に該当しないとき用）
 const DEFAULT_SAMPLE: InsightResult = {
   insight: `### 業界インサイト（サンプル）
 
@@ -184,12 +184,15 @@ const DEFAULT_SAMPLE: InsightResult = {
 };
 
 export default function IndustryInsights() {
+  const router = useRouter();
+
   const [selectedGroupId, setSelectedGroupId] = useState<string>(
     INDUSTRY_GROUPS[0]?.id ?? ""
   );
   const [selectedSub, setSelectedSub] = useState<string>(
     INDUSTRY_GROUPS[0]?.subs[0] ?? ""
   );
+
   const [targetCompany, setTargetCompany] = useState("");
   const [focusTopic, setFocusTopic] = useState("");
   const [includeNews, setIncludeNews] = useState(true);
@@ -201,11 +204,73 @@ export default function IndustryInsights() {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
 
-  const selectedGroup =
-    INDUSTRY_GROUPS.find((g) => g.id === selectedGroupId) ??
-    INDUSTRY_GROUPS[0];
+  // ✅ gate用（usage/meta）
+  const [isCheckingGate, setIsCheckingGate] = useState(false);
 
-  const handleGenerate = async () => {
+  // ✅ 共通METAモーダル
+  const [metaModalOpen, setMetaModalOpen] = useState(false);
+  const [metaBalance, setMetaBalance] = useState<number | null>(null);
+  const [metaNeed, setMetaNeed] = useState<number>(3);
+  const [metaMode, setMetaMode] = useState<"confirm" | "purchase">("confirm");
+  const [metaTitle, setMetaTitle] = useState<string | undefined>(undefined);
+  const [metaMessage, setMetaMessage] = useState<string | undefined>(undefined);
+  const [pendingAction, setPendingAction] = useState<null | (() => Promise<void>)>(null);
+
+  const selectedGroup = useMemo(
+    () => INDUSTRY_GROUPS.find((g) => g.id === selectedGroupId) ?? INDUSTRY_GROUPS[0],
+    [selectedGroupId]
+  );
+
+  const closeMetaModal = () => {
+    setMetaModalOpen(false);
+    setMetaTitle(undefined);
+    setMetaMessage(undefined);
+    setPendingAction(null);
+  };
+
+  // ✅ 残高取得（UI用）
+  const fetchMyBalance = async (): Promise<number | null> => {
+    try {
+      const res = await fetch("/api/meta/balance", { method: "POST" });
+      const j: any = await res.json().catch(() => ({}));
+      if (!res.ok || j?.ok !== true) return null;
+      return Number(j.balance ?? 0);
+    } catch {
+      return null;
+    }
+  };
+
+  const openMetaModalFor = async (params: {
+    requiredMeta: number;
+    featureLabel: string;
+    onProceed: () => Promise<void>;
+  }) => {
+    const { requiredMeta, onProceed } = params;
+
+    const b = await fetchMyBalance();
+    setMetaNeed(requiredMeta);
+    setMetaBalance(typeof b === "number" ? b : metaBalance);
+
+    const mode: "confirm" | "purchase" =
+      typeof b === "number" && b < requiredMeta ? "purchase" : "confirm";
+
+    setMetaMode(mode);
+    setMetaTitle(undefined);
+    setMetaMessage(undefined);
+
+    setPendingAction(async () => {
+      await onProceed();
+      const bb = await fetchMyBalance();
+      if (typeof bb === "number") setMetaBalance(bb);
+    });
+
+    setMetaModalOpen(true);
+  };
+
+  /* ------------------------------
+   core generate
+  ------------------------------*/
+  const generateCore = async () => {
     setIsLoading(true);
     setErrorMessage("");
     setHasGenerated(true);
@@ -213,9 +278,7 @@ export default function IndustryInsights() {
     try {
       const res = await fetch("/api/industry-insights", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           industryGroup: selectedGroup.label,
           industrySub: selectedSub,
@@ -225,14 +288,39 @@ export default function IndustryInsights() {
         }),
       });
 
+      const data: any = await res.json().catch(() => ({}));
+
       if (!res.ok) {
-        const text = await res.text();
-        console.error("API error:", text);
-        throw new Error("サーバーエラーが発生しました");
+        // ✅ featureGate側でmeta不足など (402)
+        if (res.status === 402) {
+          const requiredMeta = Number(data?.required ?? data?.requiredMeta ?? 3);
+          const b =
+            typeof data?.balance === "number"
+              ? Number(data.balance)
+              : await fetchMyBalance();
+
+          setMetaNeed(requiredMeta);
+          setMetaBalance(typeof b === "number" ? b : metaBalance);
+          setMetaMode("purchase");
+          setMetaTitle("METAが不足しています");
+          setMetaMessage(`この実行には META が ${requiredMeta} 必要です。購入して続行してください。`);
+          setMetaModalOpen(true);
+
+          setResult(null);
+          return;
+        }
+
+        console.error("API error:", res.status, data);
+        throw new Error(data?.message ?? "サーバーエラーが発生しました");
       }
 
-      const data = (await res.json()) as InsightResult;
-      setResult(data);
+      // 期待形に寄せる
+      const normalized: InsightResult = {
+        insight: String(data?.insight ?? ""),
+        questions: String(data?.questions ?? ""),
+        news: String(data?.news ?? ""),
+      };
+      setResult(normalized);
     } catch (err: any) {
       console.error(err);
       setErrorMessage(
@@ -245,12 +333,56 @@ export default function IndustryInsights() {
     }
   };
 
+  /* ------------------------------
+   gate + generate
+  ------------------------------*/
+  const handleGenerate = async () => {
+    if (isCheckingGate || isLoading) return;
+
+    setIsCheckingGate(true);
+    setErrorMessage("");
+
+    try {
+      // ✅ ① 無料枠チェック（usage）
+      const usageRes = await fetch("/api/usage/consume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ feature: "industry_insight" }),
+      });
+      const usageBody: any = await usageRes.json().catch(() => ({}));
+
+      if (usageRes.ok) {
+        await generateCore();
+        return;
+      }
+
+      if (usageRes.status === 402 && usageBody?.error === "need_meta") {
+        const requiredMeta = Number(usageBody.requiredMeta ?? 3);
+
+        await openMetaModalFor({
+          requiredMeta,
+          featureLabel: "業界別インサイト",
+          onProceed: async () => {
+            await generateCore();
+          },
+        });
+        return;
+      }
+
+      console.error("usage/consume unexpected", usageRes.status, usageBody);
+      setErrorMessage("実行条件の確認に失敗しました。時間をおいて再度お試しください。");
+    } catch {
+      setErrorMessage("ネットワークエラーが発生しました。");
+    } finally {
+      setIsCheckingGate(false);
+    }
+  };
+
   const getDisplayText = () => {
     const sampleKey = `${selectedGroup.label}|${selectedSub}`;
     const fallback =
       SAMPLE_CONTENT[sampleKey] ??
-      (selectedGroup.label === "コンサルティング" &&
-      selectedSub === "戦略コンサル"
+      (selectedGroup.label === "コンサルティング" && selectedSub === "戦略コンサル"
         ? SAMPLE_CONTENT["コンサルティング|戦略コンサル"]
         : DEFAULT_SAMPLE);
 
@@ -261,210 +393,237 @@ export default function IndustryInsights() {
     return source.news;
   };
 
-  return (
-    <div className="flex flex-col gap-6 w-full h-full">
-      {/* タイトル */}
-      <div>
-        <h1 className="text-2xl font-semibold text-slate-900 mb-1">
-          業界別インサイト
-        </h1>
-        <p className="text-sm text-slate-500">
-          建設・金融・商社・IT・コンサル・投資銀行 など、志望業界ごとの
-          「構造」「想定質問」「直近ニュース」「企業の強み/弱み・将来性」を一度に整理できる画面です。
-        </p>
-        <p className="mt-1 text-[11px] text-slate-400">
-          志望業界がまだ決まっていない場合は、「コンサルティング」や「ファイナンス（IBD・PE/VC・M&A）」から見ていくと全体像を掴みやすくなります。
-        </p>
-      </div>
+  const showGeneratedBadge = hasGenerated || Boolean(result);
 
-      {/* 設定パネル */}
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 flex flex-col gap-4">
-        {/* 業界大分類タブ */}
-        <div className="flex flex-wrap gap-2">
-          {INDUSTRY_GROUPS.map((group) => (
-            <button
-              key={group.id}
-              onClick={() => {
-                setSelectedGroupId(group.id);
-                setSelectedSub(group.subs[0]); // 大分類切り替え時は最初の小分類にリセット
-                if (!result) {
+  return (
+    <>
+      <div className="flex flex-col gap-6 w-full h-full">
+        {/* タイトル */}
+        <div>
+          <h1 className="text-2xl font-semibold text-slate-900 mb-1">
+            業界別インサイト
+          </h1>
+          <p className="text-sm text-slate-500">
+            建設・金融・商社・IT・コンサル・投資銀行 など、志望業界ごとの
+            「構造」「想定質問」「直近ニュース」「企業の強み/弱み・将来性」を一度に整理できます。
+          </p>
+          <p className="mt-1 text-[11px] text-slate-400">
+            志望業界がまだ決まっていない場合は、「コンサルティング」や
+            「ファイナンス（IBD・PE/VC・M&A）」から見ると全体像を掴みやすいです。
+          </p>
+        </div>
+
+        {/* 設定パネル */}
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 flex flex-col gap-4">
+          {/* 業界大分類タブ */}
+          <div className="flex flex-wrap gap-2">
+            {INDUSTRY_GROUPS.map((group) => (
+              <button
+                key={group.id}
+                onClick={() => {
+                  setSelectedGroupId(group.id);
+                  setSelectedSub(group.subs[0]); // 大分類切り替え時は最初の小分類にリセット
                   setActiveTab("insight");
-                }
-              }}
-              className={`px-3 py-1.5 rounded-full text-xs md:text-sm border transition
+                  // ※ result は残してもいいが、UX的に古い結果に見えるのでクリア推奨
+                  setResult(null);
+                  setHasGenerated(false);
+                }}
+                className={`px-3 py-1.5 rounded-full text-xs md:text-sm border transition
                 ${
                   selectedGroupId === group.id
                     ? "bg-sky-500 text-white border-sky-500"
                     : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
                 }`}
-            >
-              {group.label}
-            </button>
-          ))}
-        </div>
+              >
+                {group.label}
+              </button>
+            ))}
+          </div>
 
-        {/* 小分類チップ */}
-        <div className="flex flex-wrap gap-2 mt-1">
-          {selectedGroup.subs.map((sub) => (
-            <button
-              key={sub}
-              onClick={() => setSelectedSub(sub)}
-              className={`px-3 py-1.5 rounded-full text-xs border transition
+          {/* 小分類チップ */}
+          <div className="flex flex-wrap gap-2 mt-1">
+            {selectedGroup.subs.map((sub) => (
+              <button
+                key={sub}
+                onClick={() => {
+                  setSelectedSub(sub);
+                  setActiveTab("insight");
+                  setResult(null);
+                  setHasGenerated(false);
+                }}
+                className={`px-3 py-1.5 rounded-full text-xs border transition
                 ${
                   selectedSub === sub
                     ? "bg-sky-100 text-sky-800 border-sky-300"
                     : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
                 }`}
-            >
-              {sub}
-            </button>
-          ))}
-        </div>
-
-        {/* 将来性ショートカットチップ */}
-        <div className="flex flex-wrap gap-1.5 mt-2">
-          <span className="text-[11px] text-slate-500 mr-1">
-            ワンタップで深掘りしたい切り口を追加：
-          </span>
-          {FUTURE_TAGS.map((tag) => (
-            <button
-              key={tag}
-              onClick={() =>
-                setFocusTopic((prev) =>
-                  prev.includes(tag)
-                    ? prev
-                    : prev
-                    ? `${prev} ${tag}`
-                    : tag
-                )
-              }
-              className="px-2 py-1 rounded-full text-[11px] border border-slate-200 bg-slate-50 hover:bg-sky-50 hover:border-sky-200"
-            >
-              {tag}
-            </button>
-          ))}
-        </div>
-
-        {/* 入力フォーム */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
-          <div className="flex flex-col gap-1">
-            <label className="text-xs font-medium text-slate-600">
-              志望企業（任意）
-            </label>
-            <input
-              value={targetCompany}
-              onChange={(e) => setTargetCompany(e.target.value)}
-              placeholder="例）三菱商事、トヨタ自動車、マッキンゼー、ゴールドマン・サックス など"
-              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-sky-400 bg-slate-50"
-            />
-            <span className="text-[11px] text-slate-400">
-              企業名を入れると、その企業の<strong>強み・弱み・将来性</strong>も含めて整理します。
-            </span>
+              >
+                {sub}
+              </button>
+            ))}
           </div>
 
-          <div className="flex flex-col gap-1">
-            <label className="text-xs font-medium text-slate-600">
-              特に深掘りしたいテーマ（任意）
-            </label>
-            <input
-              value={focusTopic}
-              onChange={(e) => setFocusTopic(e.target.value)}
-              placeholder="例）弱み 将来性 中期リスク 競争優位性 など"
-              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-sky-400 bg-slate-50"
-            />
-            <span className="text-[11px] text-slate-400">
-              「弱み」「将来性」「中期リスク」などを入れると、企業の将来性まで踏み込んだインサイトが生成されます。
+          {/* 将来性ショートカットチップ */}
+          <div className="flex flex-wrap gap-1.5 mt-2">
+            <span className="text-[11px] text-slate-500 mr-1">
+              ワンタップで深掘りしたい切り口を追加：
             </span>
+            {FUTURE_TAGS.map((tag) => (
+              <button
+                key={tag}
+                onClick={() =>
+                  setFocusTopic((prev) =>
+                    prev.includes(tag) ? prev : prev ? `${prev} ${tag}` : tag
+                  )
+                }
+                className="px-2 py-1 rounded-full text-[11px] border border-slate-200 bg-slate-50 hover:bg-sky-50 hover:border-sky-200"
+              >
+                {tag}
+              </button>
+            ))}
           </div>
-        </div>
 
-        {/* オプション＋ボタン */}
-        <div className="flex items-center justify-between gap-4 mt-2">
-          <label className="flex items-center gap-2 text-xs text-slate-600">
-            <input
-              type="checkbox"
-              checked={includeNews}
-              onChange={(e) => setIncludeNews(e.target.checked)}
-              className="rounded border-slate-300 text-sky-500 focus:ring-sky-500"
-            />
-            直近1〜2年のニュース・トレンドも含めてほしい
-          </label>
-
-          <div className="flex flex-col items-end gap-1">
-            <button
-              onClick={handleGenerate}
-              disabled={isLoading}
-              className="inline-flex items-center justify-center px-4 py-2 rounded-xl text-sm font-medium bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-60 disabled:cursor-not-allowed shadow-sm"
-            >
-              {isLoading ? "生成中..." : "インサイトを生成する"}
-            </button>
-            <p className="text-[11px] text-slate-400">
-              ボタンを押すと、選んだ業界×企業×テーマに合わせて、インサイト・想定質問・直近ニュースがタブごとに表示されます。
-            </p>
-          </div>
-        </div>
-
-        {errorMessage && (
-          <p className="text-xs text-red-500 mt-1">{errorMessage}</p>
-        )}
-      </div>
-
-      {/* 結果表示 */}
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 flex-1 flex flex-col overflow-hidden">
-        {/* 結果タブ */}
-        <div className="flex items-center gap-2 mb-3 border-b border-slate-100 pb-2">
-          {[
-            { key: "insight", label: "インサイト" },
-            { key: "questions", label: "想定質問" },
-            { key: "news", label: "直近ニュース" },
-          ].map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key as ResultTab)}
-              className={`px-3 py-1.5 rounded-full text-xs font-medium transition ${
-                activeTab === tab.key
-                  ? "bg-sky-500 text-white"
-                  : "bg-slate-50 text-slate-600 hover:bg-slate-100"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-
-          {hasGenerated && (
-            <span className="ml-auto text-[11px] text-slate-400">
-              ※ 現在の内容は、あなたの入力をもとに AI が生成した結果です。
-            </span>
-          )}
-        </div>
-
-        {/* 本文エリア */}
-        <div className="flex-1 overflow-auto">
-          {isLoading && (
-            <p className="text-sm text-slate-500">
-              インサイトを生成しています…
-            </p>
-          )}
-
-          {!isLoading && (
-            <div className="prose prose-sm max-w-none text-slate-800">
-              {!result && (
-                <p className="text-[11px] text-slate-400 mb-3">
-                  ※ まずはサンプルとして業界ごとのインサイト例を表示しています。
-                  「インサイトを生成する」を押すと、あなたの入力に合わせた内容に置き換わります。
-                </p>
-              )}
-              {getDisplayText()
-                .split("\n")
-                .map((line, idx) => (
-                  <p key={idx} className="whitespace-pre-wrap">
-                    {line}
-                  </p>
-                ))}
+          {/* 入力フォーム */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-medium text-slate-600">
+                志望企業（任意）
+              </label>
+              <input
+                value={targetCompany}
+                onChange={(e) => setTargetCompany(e.target.value)}
+                placeholder="例）三菱商事、トヨタ自動車、マッキンゼー、ゴールドマン・サックス など"
+                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-sky-400 bg-slate-50"
+              />
+              <span className="text-[11px] text-slate-400">
+                企業名を入れると、その企業の<strong>強み・弱み・将来性</strong>も含めて整理します。
+              </span>
             </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-medium text-slate-600">
+                特に深掘りしたいテーマ（任意）
+              </label>
+              <input
+                value={focusTopic}
+                onChange={(e) => setFocusTopic(e.target.value)}
+                placeholder="例）弱み 将来性 中期リスク 競争優位性 など"
+                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-400 focus:border-sky-400 bg-slate-50"
+              />
+              <span className="text-[11px] text-slate-400">
+                「弱み」「将来性」「中期リスク」などを入れると、企業の将来性まで踏み込んだインサイトが生成されます。
+              </span>
+            </div>
+          </div>
+
+          {/* オプション＋ボタン */}
+          <div className="flex items-center justify-between gap-4 mt-2">
+            <label className="flex items-center gap-2 text-xs text-slate-600">
+              <input
+                type="checkbox"
+                checked={includeNews}
+                onChange={(e) => setIncludeNews(e.target.checked)}
+                className="rounded border-slate-300 text-sky-500 focus:ring-sky-500"
+              />
+              直近1〜2年のニュース・トレンドも含めてほしい
+            </label>
+
+            <div className="flex flex-col items-end gap-1">
+              <button
+                onClick={handleGenerate}
+                disabled={isLoading || isCheckingGate}
+                className="inline-flex items-center justify-center px-4 py-2 rounded-xl text-sm font-medium bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-60 disabled:cursor-not-allowed shadow-sm"
+              >
+                {isLoading ? "生成中..." : isCheckingGate ? "確認中..." : "インサイトを生成する"}
+              </button>
+              <p className="text-[11px] text-slate-400">
+                ボタンを押すと、選んだ業界×企業×テーマに合わせて、インサイト・想定質問・直近ニュースがタブごとに表示されます。
+              </p>
+            </div>
+          </div>
+
+          {errorMessage && (
+            <p className="text-xs text-red-500 mt-1">{errorMessage}</p>
           )}
         </div>
+
+        {/* 結果表示 */}
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 flex-1 flex flex-col overflow-hidden">
+          {/* 結果タブ */}
+          <div className="flex items-center gap-2 mb-3 border-b border-slate-100 pb-2">
+            {[
+              { key: "insight", label: "インサイト" },
+              { key: "questions", label: "想定質問" },
+              { key: "news", label: "直近ニュース" },
+            ].map((tab) => (
+              <button
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key as ResultTab)}
+                className={`px-3 py-1.5 rounded-full text-xs font-medium transition ${
+                  activeTab === tab.key
+                    ? "bg-sky-500 text-white"
+                    : "bg-slate-50 text-slate-600 hover:bg-slate-100"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+
+            {showGeneratedBadge && (
+              <span className="ml-auto text-[11px] text-slate-400">
+                ※ 現在の内容は、あなたの入力をもとに AI が生成した結果です。
+              </span>
+            )}
+          </div>
+
+          {/* 本文エリア */}
+          <div className="flex-1 overflow-auto">
+            {isLoading && (
+              <p className="text-sm text-slate-500">
+                インサイトを生成しています…
+              </p>
+            )}
+
+            {!isLoading && (
+              <div className="prose prose-sm max-w-none text-slate-800">
+                {!result && (
+                  <p className="text-[11px] text-slate-400 mb-3">
+                    ※ まずはサンプルとして業界ごとのインサイト例を表示しています。
+                    「インサイトを生成する」を押すと、あなたの入力に合わせた内容に置き換わります。
+                  </p>
+                )}
+
+                {getDisplayText()
+                  .split("\n")
+                  .map((line, idx) => (
+                    <p key={idx} className="whitespace-pre-wrap">
+                      {line}
+                    </p>
+                  ))}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
-    </div>
+
+      {/* ✅ 共通METAモーダル */}
+      <MetaConfirmModal
+        open={metaModalOpen}
+        onClose={closeMetaModal}
+        featureLabel="業界別インサイト"
+        requiredMeta={metaNeed}
+        balance={metaBalance}
+        mode={metaMode}
+        title={metaTitle}
+        message={metaMessage}
+        onConfirm={async () => {
+          const fn = pendingAction;
+          closeMetaModal();
+          if (!fn) return;
+          await fn();
+        }}
+        onPurchase={() => router.push("/pricing")}
+      />
+    </>
   );
 }

@@ -1,4 +1,11 @@
 // app/api/meta/use/route.ts
+
+
+// DEPRECATED
+// This route is kept for reference only.
+// Meta consumption logic has been moved to lib/payment/featureGate.
+// Do NOT use this route for new implementations.
+
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
@@ -30,7 +37,7 @@ const FEATURE_META_COST: Record<FeatureId, number> = {
   enterprise_qgen: 10,
 };
 
-type UseMetaRequest = { feature: FeatureId };
+type UseMetaRequest = { feature?: FeatureId };
 
 async function createSupabaseFromCookies() {
   const cookieStore = await cookies();
@@ -53,15 +60,25 @@ async function createSupabaseFromCookies() {
   );
 }
 
+// service role（RLSをバイパスしてRPCを叩ける：Route Handler内だけで使用）
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
+async function getBalanceViaRpc(supabase: Awaited<ReturnType<typeof createSupabaseFromCookies>>) {
+  const { data, error } = await supabase.rpc("get_my_meta_balance");
+  if (error) {
+    console.error("get_my_meta_balance rpc error:", error);
+    return 0;
+  }
+  return Number(data ?? 0);
+}
+
 export async function POST(req: Request) {
   const supabase = await createSupabaseFromCookies();
 
-  // 1) 認証
+  // 1) 認証（cookie session）
   const { data: auth, error: authError } = await supabase.auth.getUser();
   const user = auth?.user ?? null;
 
@@ -70,66 +87,82 @@ export async function POST(req: Request) {
   }
 
   // 2) Body
-  let body: UseMetaRequest;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ ok: false, reason: "invalid_body" as const }, { status: 400 });
-  }
-
-  const { feature } = body;
+  const body = (await req.json().catch(() => ({}))) as UseMetaRequest;
+  const feature = body.feature;
 
   // 3) validate
-  if (!(feature in FEATURE_META_COST)) {
+  if (!feature || !(feature in FEATURE_META_COST)) {
     return NextResponse.json({ ok: false, reason: "unknown_feature" as const }, { status: 400 });
   }
 
   const cost = FEATURE_META_COST[feature];
   const authUserId = user.id;
 
-  // 4) Pro判定（planで統一）
+  // 4) plan取得（ズレ耐性：profiles.auth_user_idで引く）
   const { data: profile, error: pErr } = await supabaseAdmin
     .from("profiles")
-    .select("plan, meta_balance")
-    .eq("id", authUserId) // ✅ 統一: profiles.id = auth.users.id
-    .maybeSingle();
+    .select("plan")
+    .eq("auth_user_id", authUserId)
+    .maybeSingle<{ plan: "free" | "pro" | null }>();
 
   if (pErr || !profile) {
     console.error("meta/use profile error:", pErr);
     return NextResponse.json({ ok: false, reason: "profile_not_found" as const }, { status: 500 });
   }
 
+  // ✅ proは消費しない。でも残高は meta_lots 集計で返す（正）
   if (profile.plan === "pro") {
-    return NextResponse.json({
-      ok: true,
-      used: 0,
-      balance: profile.meta_balance ?? 0,
-      is_pro: true,
-    });
+    const balance = await getBalanceViaRpc(supabase);
+    return NextResponse.json(
+      {
+        ok: true,
+        used: 0,
+        balance,
+        is_pro: true,
+      },
+      { status: 200 }
+    );
   }
 
-  // 5) 非ProはRPCで消費（FIFO/期限/atomic）
-  const { data, error } = await supabaseAdmin.rpc("consume_meta_fifo", {
+  // 5) 非Pro：RPCで消費（FIFO/期限/atomic）
+  const { data: consumeData, error: consumeError } = await supabaseAdmin.rpc("consume_meta_fifo", {
     p_auth_user_id: authUserId,
     p_cost: cost,
   });
 
-  if (error) {
-    const msg = String(error.message ?? "");
+  if (consumeError) {
+    const msg = String(consumeError.message ?? "");
     if (msg.includes("INSUFFICIENT_META")) {
       return NextResponse.json(
         { ok: false, reason: "insufficient_meta" as const, required: cost },
         { status: 402 }
       );
     }
-    console.error("consume_meta_fifo error:", error);
+    if (msg.includes("INVALID_COST")) {
+      return NextResponse.json({ ok: false, reason: "invalid_cost" as const }, { status: 400 });
+    }
+    console.error("consume_meta_fifo error:", consumeError);
     return NextResponse.json({ ok: false, reason: "consume_failed" as const }, { status: 500 });
   }
 
-  return NextResponse.json({
-    ok: true,
-    used: cost,
-    ...(typeof data === "object" ? data : {}),
-    is_pro: false,
-  });
+  // 6) balanceを必ず返す（consumeDataに無ければRPCフォールバック）
+  const fallbackBalance = await getBalanceViaRpc(supabase);
+  const balance =
+    typeof consumeData === "object" &&
+    consumeData !== null &&
+    "balance" in (consumeData as any) &&
+    Number((consumeData as any).balance) >= 0
+      ? Number((consumeData as any).balance)
+      : fallbackBalance;
+
+  return NextResponse.json(
+    {
+      ok: true,
+      used: cost,
+      balance,
+      is_pro: false,
+      ...(typeof consumeData === "object" && consumeData !== null ? consumeData : {}),
+    },
+    { status: 200 }
+  );
 }

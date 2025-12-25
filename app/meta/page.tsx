@@ -42,7 +42,7 @@ const FEATURE_META_COST: Record<FeatureId, number> = {
   light_questions: 1,
   interview_10: 3,
   industry_insight: 3,
-  case_interview: 4,
+  case_interview: 2,
   fit_analysis: 6,
   deep_16type: 10,
   enterprise_qgen: 10,

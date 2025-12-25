@@ -1,8 +1,6 @@
-// app/api/diagnosis-16type/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
-import { requireAndConsumeMetaIfNeeded } from "@/lib/payment/featureGate";
 import type { ThinkingTypeId } from "@/lib/careerFitMap";
 
 type AxisScore = {
@@ -12,64 +10,61 @@ type AxisScore = {
   creative: number;
 };
 
-type RequestBody = {
-  thinkingTypeId: ThinkingTypeId;
-  thinkingTypeNameJa: string;
-  thinkingTypeNameEn: string;
-  typeSummary: string;
-  axisScore?: AxisScore;
-  mode?: "basic" | "deep";
-  userContext?: string; // 任意：キャリア状況など
-};
-
-export async function POST(req: Request) {
+export async function POST() {
   try {
-    const body = (await req.json()) as RequestBody;
+    const cookieStore = await cookies();
 
-    const {
-      thinkingTypeId,
-      thinkingTypeNameJa,
-      thinkingTypeNameEn,
-      typeSummary,
-      axisScore,
-      mode = "basic",
-      userContext,
-    } = body;
-
-    if (!thinkingTypeId || !thinkingTypeNameJa || !thinkingTypeNameEn) {
-      return NextResponse.json(
-        { error: "thinkingType の情報が不足しています。" },
-        { status: 400 }
-      );
-    }
-
-    // Deep モードは課金ゲート＋必要に応じて Meta を消費
-    if (mode === "deep") {
-      const gate = await requireAndConsumeMetaIfNeeded(
-        "diagnosis_16type_deep",
-        1 // Deep1回につきMeta1枚
-      );
-      if (!gate.ok) {
-        if (gate.status === 401) {
-          return NextResponse.json(
-            { error: "ログインが必要です。" },
-            { status: 401 }
-          );
-        }
-        // 402 Payment Required
-        return NextResponse.json(
-          {
-            error:
-              "16タイプのDeep解説は有料機能です。MetaコインまたはProプランをご利用ください。",
+    const supabase = createServerClient<any>(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+      {
+        cookies: {
+          get(name: string) {
+            return cookieStore.get(name)?.value;
           },
-          { status: 402 }
-        );
+        },
       }
+    );
+
+    /* ------------------------
+       1. Auth
+    ------------------------ */
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser();
+
+    if (authError || !user) {
+      return NextResponse.json(
+        { error: "ログインが必要です。" },
+        { status: 401 }
+      );
     }
 
+    /* ------------------------
+       2. プロフィールから固定診断結果を取得
+    ------------------------ */
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("ai_type_key, ai16_axis_score")
+      .eq("auth_user_id", user.id)
+      .single();
+
+    if (profileError || !profile?.ai_type_key) {
+      return NextResponse.json(
+        { error: "診断結果が見つかりません。" },
+        { status: 404 }
+      );
+    }
+
+    const thinkingTypeId = profile.ai_type_key as ThinkingTypeId;
+    const axisScore = profile.ai16_axis_score as AxisScore | null;
+
+    /* ------------------------
+       3. OpenAI で説明文だけ生成
+    ------------------------ */
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
-      console.error("OPENAI_API_KEY is not set");
       return NextResponse.json(
         { error: "サーバー設定エラー（APIキー未設定）" },
         { status: 500 }
@@ -77,51 +72,40 @@ export async function POST(req: Request) {
     }
 
     const axisSummary = axisScore
-      ? `- 戦略(Strategic): ${axisScore.strategic}
-- 分析(Analytical): ${axisScore.analytical}
-- 直感(Intuitive): ${axisScore.intuitive}
-- 創造(Creative): ${axisScore.creative}`
+      ? `- 戦略: ${axisScore.strategic}
+- 分析: ${axisScore.analytical}
+- 直感: ${axisScore.intuitive}
+- 創造: ${axisScore.creative}`
       : "スコア情報なし";
 
-    const userContextText = userContext
-      ? `\n【ユーザー文脈】\n${userContext}\n`
-      : "";
-
-    const depthHint =
-      mode === "deep"
-        ? "かなり具体的かつ実務レベルで役立つ内容にしてください。"
-        : "分量は中程度で、要点を分かりやすくまとめてください。";
-
     const systemPrompt = `
-あなたは、就活OS「Mentor.AI」に搭載されたキャリアコーチAIです。
-ユーザーの「AI思考タイプ」診断結果にもとづき、就活生が自分の強みを理解し、
-実際の就活・キャリア選択に活かせるように解説を作成します。
+あなたは、就活OS「Mentor.AI」のキャリアコーチAIです。
+ユーザーのAI思考タイプ診断結果をもとに、
+「自分はどういうタイプで、どう就活を戦えばいいか」が
+自然に腹落ちする説明を行ってください。
 
 トーン:
-- 上から目線ではなく、「一緒に作戦を考える相棒」のような口調
-- 具体例とニュアンスを大事にする
-- 不安を煽らず、「こう戦えばちゃんと戦える」を伝える
+- 上から目線にならない
+- 優秀な先輩メンターのような語り口
+- 不安を煽らず、戦い方を示す
 `;
 
     const userPrompt = `
-【タイプID】${thinkingTypeId}
-【タイプ名】${thinkingTypeNameJa} / ${thinkingTypeNameEn}
-【タイプ概要】${typeSummary}
+【AI思考タイプID】
+${thinkingTypeId}
 
-【思考バランス（参考）】
+【思考バランス】
 ${axisSummary}
 
-${userContextText}
-
 出力フォーマット（日本語）:
-1. タイプの核となる強み（3〜5点）
-2. 就活・仕事の場面で「ハマりやすいシーン」
-3. 気をつけたい思考のクセ（2〜4点）
-4. このタイプならではの戦い方・キャリア戦略
-5. AIとの付き合い方のコツ（プロンプトの書き方や役割分担など）
+1. このタイプの本質（短い要約）
+2. 強みとして活きやすいポイント（3〜5）
+3. 就活でハマりやすい場面
+4. 気をつけたい思考のクセ
+5. このタイプにおすすめの戦い方
 
-${depthHint}
-見出しや箇条書きを使って、プレーンテキストで出力してください。
+※診断結果はすでに確定しています。
+説明はブレず、一貫性を持たせてください。
 `;
 
     const completionRes = await fetch(
@@ -138,15 +122,15 @@ ${depthHint}
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt },
           ],
-          temperature: mode === "deep" ? 0.8 : 0.7,
-          max_tokens: mode === "deep" ? 1400 : 800,
+          temperature: 0.6,
+          max_tokens: 900,
         }),
       }
     );
 
     if (!completionRes.ok) {
       const text = await completionRes.text();
-      console.error("OpenAI API error:", completionRes.status, text);
+      console.error("OpenAI error:", text);
       return NextResponse.json(
         { error: "AI生成に失敗しました。" },
         { status: 500 }
@@ -154,86 +138,16 @@ ${depthHint}
     }
 
     const json = await completionRes.json();
-    const resultText: string =
+    const resultText =
       json.choices?.[0]?.message?.content?.trim() ?? "";
 
-    // 🧠 ここから：診断ログ＋Growthログ保存（失敗してもレスポンスは返す）
-    try {
-      const cookieStore = await cookies();
-
-      const supabase = createServerClient<any>(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        {
-          cookies: {
-            get(name: string) {
-              return cookieStore.get(name)?.value;
-            },
-          },
-        }
-      );
-
-      const {
-        data: { user },
-        error: authError,
-      } = await supabase.auth.getUser();
-
-      if (authError) {
-        console.error("diagnosis-16type auth error for logging:", authError);
-      }
-
-      if (user) {
-        // diagnosis_logs に保存
-        const { data: inserted, error: insertError } = await supabase
-          .from("diagnosis_logs")
-          .insert({
-            user_id: user.id,
-            thinking_type_id: thinkingTypeId as string,
-            axis_score: axisScore ?? null,
-            mode,
-            result_text: resultText,
-          })
-          .select("id")
-          .single();
-
-        if (insertError) {
-          console.error("diagnosis_logs insert error:", insertError);
-        }
-
-        const diagnosisLogId = inserted?.id;
-
-        // growth_logs にも1行追加（タイムライン用）
-        const title =
-          mode === "deep"
-            ? `Deep診断レポートを生成 (${thinkingTypeNameJa})`
-            : `AI思考タイプ診断を実施 (${thinkingTypeNameJa})`;
-
-        const description =
-          mode === "deep"
-            ? "あなたの思考タイプのDeepレポートを生成しました。"
-            : "AI思考タイプ診断の結果を保存しました。";
-
-        const { error: growthError } = await supabase.from("growth_logs").insert({
-          user_id: user.id,
-          source: "diagnosis",
-          title,
-          description,
-          metadata: {
-            thinking_type_id: thinkingTypeId,
-            mode,
-            diagnosis_log_id: diagnosisLogId ?? null,
-          },
-        });
-
-        if (growthError) {
-          console.error("growth_logs insert error (diagnosis):", growthError);
-        }
-      }
-    } catch (logErr) {
-      console.error("diagnosis-16type logging error:", logErr);
-    }
-
-    return NextResponse.json({ result: resultText, mode });
+    /* ------------------------
+       4. レスポンス
+    ------------------------ */
+    return NextResponse.json({
+      thinkingTypeId,
+      result: resultText,
+    });
   } catch (err) {
     console.error("diagnosis-16type route error:", err);
     return NextResponse.json(

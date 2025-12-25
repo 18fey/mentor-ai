@@ -13,7 +13,7 @@ async function createSupabaseFromCookies() {
 
   return createServerClient<Database>(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, // ✅ anon のまま
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
         get(name: string) {
@@ -34,25 +34,14 @@ export async function GET() {
       return NextResponse.json({ ok: false, reason: "unauthorized" }, { status: 401 });
     }
 
-    const authUserId = auth.user.id;
-    const nowIso = new Date().toISOString();
-
-    // ✅ meta_lots の remaining を合算（期限内だけ）
-    const { data: lots, error: lotsErr } = await supabase
-      .from("meta_lots")
-      .select("remaining")
-      .eq("auth_user_id", authUserId)
-      .gt("expires_at", nowIso)
-      .gt("remaining", 0);
-
-    if (lotsErr) {
-      console.error("meta balance: meta_lots select error:", lotsErr);
+    // ✅ 残高はRPC（= meta_lots の正）に統一
+    const { data, error } = await supabase.rpc("get_my_meta_balance");
+    if (error) {
+      console.error("get_my_meta_balance rpc error:", error);
       return NextResponse.json({ ok: false, reason: "db_error" }, { status: 500 });
     }
 
-    const balance = (lots ?? []).reduce((sum, row: any) => sum + (Number(row.remaining) || 0), 0);
-
-    return NextResponse.json({ ok: true, balance }, { status: 200 });
+    return NextResponse.json({ ok: true, balance: Number(data ?? 0) }, { status: 200 });
   } catch (e) {
     console.error("meta balance route error:", e);
     return NextResponse.json({ ok: false, reason: "server_error" }, { status: 500 });

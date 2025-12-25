@@ -6,7 +6,7 @@ import { createServerClient } from "@supabase/ssr";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type Plan = "free" | "pro";
+type Plan = "free" | "pro"; // eliteがあるなら足してOK
 type FeatureKey =
   | "case_interview"
   | "case_generate"
@@ -15,7 +15,7 @@ type FeatureKey =
   | "ai_training"
   | "es_correction";
 
-// ✅ “無料枠”だけを定義（proは無制限）
+// ✅ “無料枠”だけ（proは無制限）
 const FREE_LIMITS: Record<FeatureKey, number> = {
   case_interview: 3,
   case_generate: 8,
@@ -62,51 +62,11 @@ async function createSupabaseFromCookies() {
   );
 }
 
-// ✅ profiles は cookie付き supabase で取る（無ければ作る）
-// ✅ 方針：profiles.id = auth.uid() に統一する
-async function getOrCreateProfile(
-  supabase: Awaited<ReturnType<typeof createSupabaseFromCookies>>,
-  authUserId: string
-) {
-  // まず id で探す（= auth.uid と一致する前提）
-  const { data: existing, error: selErr } = await supabase
-    .from("profiles")
-    .select("id, plan, meta_balance")
-    .eq("id", authUserId)
-    .maybeSingle();
-
-  if (selErr) {
-    console.error("profiles select error:", selErr);
-    return null;
-  }
-  if (existing) {
-    return existing as { id: string; plan: Plan | null; meta_balance: number | null };
-  }
-
-  // 無ければ作る（id も auth_user_id も authUserId に揃える）
-  const { data: created, error: insErr } = await supabase
-    .from("profiles")
-    .insert({
-      id: authUserId,
-      auth_user_id: authUserId,
-      plan: "free",
-      meta_balance: 0,
-    })
-    .select("id, plan, meta_balance")
-    .single();
-
-  if (insErr) {
-    console.error("profiles insert error:", insErr);
-    return null;
-  }
-  return created as { id: string; plan: Plan | null; meta_balance: number | null };
-}
-
 export async function POST(req: NextRequest) {
   try {
     const supabase = await createSupabaseFromCookies();
 
-    // ✅ userId は body から受け取らない。cookieセッションで確定。
+    // ✅ auth（cookieセッションで確定）
     const { data: auth, error: authErr } = await supabase.auth.getUser();
     const user = auth?.user ?? null;
 
@@ -129,21 +89,26 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const profile = await getOrCreateProfile(supabase, authUserId);
-    if (!profile) {
+    // plan は profiles.auth_user_id で取る（今のあなたの正）
+    const { data: profile, error: pErr } = await supabase
+      .from("profiles")
+      .select("plan")
+      .eq("auth_user_id", authUserId)
+      .maybeSingle<{ plan: Plan | null }>();
+
+    if (pErr || !profile) {
+      console.error("profiles select error:", pErr);
       return NextResponse.json(
-        { ok: false, error: "profile_error", message: "profiles の取得/作成に失敗しました。" },
+        { ok: false, error: "profile_error", message: "profiles の取得に失敗しました。" },
         { status: 500 }
       );
     }
 
     const plan: Plan = (profile.plan ?? "free") as Plan;
-    const startISO = monthStartISO(new Date());
 
     // ✅ PROは無制限：ログだけ残す
     if (plan === "pro") {
       const { error: logErr } = await supabase.from("usage_logs").insert({
-        // user_id は default auth.uid() があるので省略も可だが、明示で入れてOK
         user_id: authUserId,
         feature,
         used_at: new Date().toISOString(),
@@ -156,11 +121,20 @@ export async function POST(req: NextRequest) {
           { status: 500 }
         );
       }
-      return NextResponse.json({ ok: true, feature, plan, chargedMeta: 0 });
+
+      return NextResponse.json({
+        ok: true,
+        feature,
+        plan,
+        mode: "unlimited",
+        chargedMeta: 0,
+      });
     }
 
-    // ✅ FREE: 今月の無料枠カウント（used_at 기준）
+    // ✅ FREE: 今月の無料枠カウント
     const freeLimit = FREE_LIMITS[feature];
+    const startISO = monthStartISO(new Date());
+
     const { count, error: countErr } = await supabase
       .from("usage_logs")
       .select("id", { count: "exact", head: true })
@@ -178,7 +152,7 @@ export async function POST(req: NextRequest) {
 
     const usedThisMonth = count ?? 0;
 
-    // ✅ 無料枠内：メタ消費なし
+    // ✅ 無料枠内：ログだけ（meta消費なし）
     if (usedThisMonth < freeLimit) {
       const { error: logErr } = await supabase.from("usage_logs").insert({
         user_id: authUserId,
@@ -198,69 +172,32 @@ export async function POST(req: NextRequest) {
         ok: true,
         feature,
         plan,
+        mode: "free",
         usedThisMonth: usedThisMonth + 1,
         freeLimit,
         chargedMeta: 0,
+        nextAction: "proceed", // このまま機能実行へ
       });
     }
 
-    // ✅ 無料枠超過：meta を消費
+    // ✅ 無料枠超過：ここでは消費しない。meta消費ルートへ誘導するだけ。
     const cost = META_COST[feature] ?? 1;
-    const balance = Number(profile.meta_balance ?? 0);
 
-    if (balance < cost) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "insufficient_meta",
-          message: "メタが不足しています。購入してください。",
-          feature,
-          plan,
-          required: cost,
-          balance,
-        },
-        { status: 402 }
-      );
-    }
-
-    // ✅ meta 減算（profiles.id = auth.uid()）
-    const { error: updErr } = await supabase
-      .from("profiles")
-      .update({ meta_balance: balance - cost })
-      .eq("id", authUserId);
-
-    if (updErr) {
-      console.error("profiles meta_balance update error:", updErr);
-      return NextResponse.json(
-        { ok: false, error: "meta_update_failed", message: "メタ消費に失敗しました。" },
-        { status: 500 }
-      );
-    }
-
-    // ✅ 利用ログ（課金後）
-    const { error: logErr } = await supabase.from("usage_logs").insert({
-      user_id: authUserId,
-      feature,
-      used_at: new Date().toISOString(),
-    });
-
-    if (logErr) {
-      console.error("usage_logs insert error (charged):", logErr);
-      return NextResponse.json(
-        { ok: false, error: "insert_failed", message: "利用ログの保存に失敗しました。" },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({
-      ok: true,
-      feature,
-      plan,
-      usedThisMonth: usedThisMonth + 1,
-      freeLimit,
-      chargedMeta: cost,
-      metaBalanceAfter: balance - cost,
-    });
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "need_meta",
+        message: "今月の無料枠を使い切りました。METAを消費して続行できます。",
+        feature,
+        plan,
+        usedThisMonth,
+        freeLimit,
+        requiredMeta: cost,
+        // UI/呼び出し側が迷わないための指示
+        nextAction: "consume_meta_then_retry",
+      },
+      { status: 402 }
+    );
   } catch (e) {
     console.error("usage/consume server_error:", e);
     return NextResponse.json(

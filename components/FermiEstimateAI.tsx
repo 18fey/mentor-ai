@@ -4,11 +4,13 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createBrowserClient } from "@supabase/ssr";
 import { UpgradeModal } from "@/components/UpgradeModal";
+import { MetaConfirmModal } from "@/components/MetaConfirmModal";
+
 
 /* ============================
    型定義
 ============================ */
-type Plan = "free" | "pro" ;
+type Plan = "free" | "pro";
 
 type FermiCategory = "daily" | "business" | "consulting";
 type FermiDifficulty = "easy" | "medium" | "hard";
@@ -67,7 +69,7 @@ type EvalRes = {
   score: FermiScore;
   feedback: FermiFeedback;
   totalScore?: number;
-  logId?: number | string | null; // ✅保存判定/保存キー
+  logId?: number | string | null;
 };
 
 type SaveItem = {
@@ -100,7 +102,6 @@ type ApiErr = {
    メインコンポーネント
 ============================ */
 export const FermiEstimateAI: React.FC = () => {
-  // ✅ Caseと同じ：clientはuseMemoで固定
   const supabase = useMemo(
     () =>
       createBrowserClient(
@@ -146,16 +147,30 @@ export const FermiEstimateAI: React.FC = () => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isEvaluating, setIsEvaluating] = useState(false);
 
-  // 🔒 課金モーダル
+  // 🔒 サブスク誘導モーダル（既存）
   const [upgradeOpen, setUpgradeOpen] = useState(false);
   const [upgradeMessage, setUpgradeMessage] = useState<string | undefined>();
 
-  // ✅ 保存（Caseと同じ）
+  // ✅ 保存
   const [isSaving, setIsSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [lastLogId, setLastLogId] = useState<number | string | null>(null);
 
-  // auth確認（Caseと同じ）
+  // ✅ META確認モーダル（追加）
+  const [metaConfirmOpen, setMetaConfirmOpen] = useState(false);
+  const [metaCost, setMetaCost] = useState<number>(1);
+  const [metaBalance, setMetaBalance] = useState<number>(0);
+  const [pendingEvaluate, setPendingEvaluate] = useState(false); // OK押したら再実行用
+
+  // ✅ meta balance 取得
+  const fetchMetaBalance = async (): Promise<number> => {
+    const r = await fetch("/api/meta/balance", { cache: "no-store" });
+    const j = await r.json().catch(() => null);
+    if (!r.ok) return 0;
+    return Number(j?.balance ?? 0);
+  };
+
+  // auth確認
   useEffect(() => {
     (async () => {
       setAuthError(null);
@@ -172,7 +187,7 @@ export const FermiEstimateAI: React.FC = () => {
   }, [supabase]);
 
   /* -------------------------------
-     UI初期化（Caseのreset相当）
+     UI初期化
   -------------------------------- */
   const resetForNewProblem = () => {
     setResult("");
@@ -214,7 +229,7 @@ export const FermiEstimateAI: React.FC = () => {
   };
 
   /* -------------------------------
-     新規問題生成（/api/fermi/new）
+     新規問題生成
   -------------------------------- */
   const generateNewProblem = async () => {
     setUiError(null);
@@ -302,7 +317,7 @@ export const FermiEstimateAI: React.FC = () => {
   };
 
   /* -------------------------------
-     計算（× / + 対応）
+     計算
   -------------------------------- */
   const handleCompute = () => {
     try {
@@ -326,7 +341,64 @@ export const FermiEstimateAI: React.FC = () => {
   };
 
   /* -------------------------------
-     AI採点（/api/eval/fermi）
+     AI採点 実行本体（meta確認OK後もここに入る）
+  -------------------------------- */
+  const runEvaluate = async () => {
+    const payload = {
+      question,
+      formula,
+      unit,
+      factors,
+      sanityComment,
+      result,
+      problemId: currentProblemId,
+      category,
+      difficulty,
+    };
+
+    const res = await fetch("/api/eval/fermi", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const json = (await res.json().catch(() => null)) as EvalRes | ApiErr | any;
+
+    if (!res.ok) {
+      // meta不足（featureGateが返す想定）
+      if (res.status === 402 && json?.reason === "insufficient_meta") {
+        // 購入導線へ（pricing）
+        setUpgradeMessage("METAが不足しています。購入してください。");
+        setUpgradeOpen(true);
+        return;
+      }
+
+      if (res.status === 401) {
+        setUiError("ログインが必要です。いったんログインし直してください。");
+        return;
+      }
+
+      setUiError(json?.message ?? "AI採点に失敗しました。");
+      return;
+    }
+
+    const data = json as EvalRes;
+    setPlan(data.plan ?? plan);
+
+    if (data.score) setScore(data.score);
+    if (data.feedback) setFeedback(data.feedback);
+
+    setLastLogId(data.logId ?? null);
+    setSaved(false);
+
+    // ✅ 実行後にmeta表示を更新したいなら（ヘッダーが listen してるなら）
+    window.dispatchEvent(new Event("meta:refresh"));
+  };
+
+  /* -------------------------------
+     AI採点（入口）
+     - まず usage/consume を叩く
+     - need_meta なら MetaConfirmModal を出す
   -------------------------------- */
   const handleEvaluate = async () => {
     setUiError(null);
@@ -334,7 +406,6 @@ export const FermiEstimateAI: React.FC = () => {
     if (!isAuthed) return setUiError("ログインが必要です。");
     if (!question.trim()) return setUiError("お題（Question）を入力してください。");
 
-    // Caseと同じ：最低限の入力チェック（短すぎ防止）
     const totalLen =
       question.length +
       formula.length +
@@ -356,62 +427,67 @@ export const FermiEstimateAI: React.FC = () => {
       return;
     }
 
-    const payload = {
-      question,
-      formula,
-      unit,
-      factors,
-      sanityComment,
-      result,
-      problemId: currentProblemId,
-      category,
-      difficulty,
-    };
-
     try {
       setIsEvaluating(true);
 
-      const res = await fetch("/api/eval/fermi", {
+      // 1) 無料枠チェック（free内ならログが入る想定）
+      const usageRes = await fetch("/api/usage/consume", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ feature: "fermi" }),
       });
 
-      const json = (await res.json().catch(() => null)) as EvalRes | ApiErr | null;
+      const usageJson = await usageRes.json().catch(() => ({} as any));
 
-      if (!res.ok) {
-        if (
-          res.status === 403 &&
-          ((json as ApiErr | null)?.error === "limit_exceeded" ||
-            (json as ApiErr | null)?.error === "upgrade_required")
-        ) {
-          setUpgradeMessage(
-            (json as ApiErr | null)?.message ??
-              "フェルミAIの今月の無料利用回数が上限に達しました。"
-          );
+      // 無料枠内 or pro → そのまま実行
+      if (usageRes.ok) {
+        // remaining/freeLimitなど返ってくるならここでUI更新
+        if (typeof usageJson?.usedThisMonth === "number") setRemaining(null); // ここは好みで
+        await runEvaluate();
+        return;
+      }
+
+      // need_meta → MetaConfirmModal 表示（ここが本命）
+      if (usageRes.status === 402 && usageJson?.error === "need_meta") {
+        const cost = Number(usageJson?.requiredMeta ?? 1);
+        const balance = await fetchMetaBalance();
+
+        setMetaCost(cost);
+        setMetaBalance(balance);
+
+        // Proは本来ここに来ないはずだが念のため
+        if (plan === "pro") {
+          await runEvaluate();
+          return;
+        }
+
+        // 残高が足りない → そのまま購入導線（UpgradeModalを流用）
+        if (balance < cost) {
+          setUpgradeMessage("METAが不足しています。購入してください。");
           setUpgradeOpen(true);
           return;
         }
 
-        if (res.status === 401) {
-          setUiError("ログインが必要です。いったんログインし直してください。");
-          return;
-        }
-
-        setUiError((json as ApiErr | null)?.message ?? "AI採点に失敗しました。");
+        // 残高がある → 確認モーダル
+        setPendingEvaluate(true);
+        setMetaConfirmOpen(true);
         return;
       }
 
-      const data = json as EvalRes;
-      setPlan(data.plan ?? plan);
-      if (typeof data.remaining === "number") setRemaining(data.remaining);
+      // 既存仕様の403 upgrade_required等も残しておく（保険）
+      if (
+        usageRes.status === 403 &&
+        (usageJson?.error === "limit_exceeded" || usageJson?.error === "upgrade_required")
+      ) {
+        setUpgradeMessage(
+          usageJson?.message ?? "フェルミAIの今月の無料利用回数が上限に達しました。"
+        );
+        setUpgradeOpen(true);
+        return;
+      }
 
-      if (data.score) setScore(data.score);
-      if (data.feedback) setFeedback(data.feedback);
-
-      // ✅ Caseと同じ：評価結果のlogIdを保持 → 保存ボタン/保存判定に使う
-      setLastLogId(data.logId ?? null);
-      setSaved(false);
+      console.error("usage/consume unexpected:", usageRes.status, usageJson);
+      setUiError("利用状況の確認に失敗しました。");
     } catch (e) {
       console.error(e);
       setUiError("通信エラーが発生しました。時間をおいて再度お試しください。");
@@ -420,9 +496,24 @@ export const FermiEstimateAI: React.FC = () => {
     }
   };
 
+  // ✅ MetaConfirmModal OK押下
+  const handleMetaConfirm = async () => {
+    setMetaConfirmOpen(false);
+    if (!pendingEvaluate) return;
+
+    try {
+      setIsEvaluating(true);
+      setPendingEvaluate(false);
+
+      // OK押されたので本処理（サーバ側でmeta消費が走る）
+      await runEvaluate();
+    } finally {
+      setIsEvaluating(false);
+    }
+  };
+
   /* -------------------------
-     保存状態チェック（評価が来たら）
-     - lastLogId をキーに「learning 保存済みか」確認（Caseと同じ）
+     保存状態チェック
   ------------------------- */
   useEffect(() => {
     if (!lastLogId) return;
@@ -450,14 +541,13 @@ export const FermiEstimateAI: React.FC = () => {
         );
         setSaved(exists);
       } catch {
-        // 無視（UI崩さない）
+        // 無視
       }
     })();
   }, [lastLogId, isAuthed]);
 
   /* -------------------------
-     保存（Caseと同じ：/api/saves/toggle）
-     - ストーリーカードで後で見返せるpayloadを保存
+     保存
   ------------------------- */
   const handleSave = async () => {
     setUiError(null);
@@ -469,9 +559,10 @@ export const FermiEstimateAI: React.FC = () => {
       setIsSaving(true);
 
       const title = `【フェルミ】${question || "Fermi"}`;
-      const summary = `合計 ${typeof feedback.totalScore === "number" ? feedback.totalScore : "-"}点｜${category}/${difficulty}`;
+      const summary = `合計 ${
+        typeof feedback.totalScore === "number" ? feedback.totalScore : "-"
+      }点｜${category}/${difficulty}`;
 
-      // ✅ Caseと同じ：スナップショットpayload（Storyカードでそのまま復元できる形）
       const payload = {
         input: {
           problem: {
@@ -592,9 +683,7 @@ export const FermiEstimateAI: React.FC = () => {
                 onClick={generateNewProblem}
                 disabled={isGenerating}
                 className={`rounded-full px-3 py-1.5 text-xs font-semibold text-white shadow-sm ${
-                  isGenerating
-                    ? "cursor-not-allowed bg-slate-300"
-                    : "bg-sky-500 hover:bg-sky-600"
+                  isGenerating ? "cursor-not-allowed bg-slate-300" : "bg-sky-500 hover:bg-sky-600"
                 }`}
               >
                 {isGenerating ? "生成中…" : "🎲 新しい問題を出す"}
@@ -742,9 +831,7 @@ export const FermiEstimateAI: React.FC = () => {
                       <input
                         className="mt-1 w-full rounded-lg border border-slate-200 bg-white/80 px-2 py-1 text-xs"
                         value={factor.assumption}
-                        onChange={(e) =>
-                          updateFactor(factor.id, "assumption", e.target.value)
-                        }
+                        onChange={(e) => updateFactor(factor.id, "assumption", e.target.value)}
                       />
                     </div>
 
@@ -753,9 +840,7 @@ export const FermiEstimateAI: React.FC = () => {
                       <input
                         className="mt-1 w-full rounded-lg border border-slate-200 bg-white/80 px-2 py-1 text-xs"
                         value={factor.rationale}
-                        onChange={(e) =>
-                          updateFactor(factor.id, "rationale", e.target.value)
-                        }
+                        onChange={(e) => updateFactor(factor.id, "rationale", e.target.value)}
                       />
                     </div>
                   </div>
@@ -805,7 +890,7 @@ export const FermiEstimateAI: React.FC = () => {
             />
           </section>
 
-          {/* ✅ 評価 + 保存（Caseと同じ並び） */}
+          {/* ✅ 評価 + 保存 */}
           <section className="mb-2 flex justify-end gap-2">
             <button
               type="button"
@@ -834,7 +919,7 @@ export const FermiEstimateAI: React.FC = () => {
             </button>
           </section>
 
-          {/* フィードバック表示 */}
+          {/* フィードバック */}
           {feedback && (
             <section className="mb-8 rounded-2xl border border-violet-100 bg-violet-50/60 p-4 shadow-sm">
               <h3 className="mb-2 text-xs font-semibold text-violet-700">
@@ -867,14 +952,10 @@ export const FermiEstimateAI: React.FC = () => {
                 </div>
               </div>
 
-              <p className="mb-2 text-[11px] text-slate-600">
-                アドバイス：{feedback.advice}
-              </p>
+              <p className="mb-2 text-[11px] text-slate-600">アドバイス：{feedback.advice}</p>
 
               <div className="rounded-xl border border-slate-100 bg-white/90 px-3 py-2">
-                <p className="mb-1 text-[11px] font-semibold text-slate-700">
-                  模範回答イメージ
-                </p>
+                <p className="mb-1 text-[11px] font-semibold text-slate-700">模範回答イメージ</p>
                 <pre className="whitespace-pre-wrap text-[11px] text-slate-700">
                   {feedback.sampleAnswer}
                 </pre>
@@ -883,7 +964,7 @@ export const FermiEstimateAI: React.FC = () => {
           )}
         </div>
 
-        {/* 右カラム：スコアパネル */}
+        {/* 右カラム：スコア */}
         <aside className="w-64 shrink-0 space-y-4">
           <div className="rounded-2xl border border-sky-100 bg-sky-50/70 p-4 shadow-sm">
             <h3 className="mb-2 text-xs font-semibold tracking-wide text-sky-700">
@@ -916,16 +997,27 @@ export const FermiEstimateAI: React.FC = () => {
           {feedback && (
             <div className="rounded-2xl border border-violet-100 bg-white/80 p-4 shadow-sm">
               <p className="mb-1 text-[11px] text-slate-500">合計スコア</p>
-              <p className="text-2xl font-semibold text-slate-900">
-                {feedback.totalScore}
-              </p>
+              <p className="text-2xl font-semibold text-slate-900">{feedback.totalScore}</p>
               <p className="mt-1 text-[11px] text-slate-500">※ 50点満点（5軸×10点）</p>
             </div>
           )}
         </aside>
       </div>
 
-      {/* 共通 課金モーダル */}
+      {/* ✅ META確認モーダル（追加） */}
+      <MetaConfirmModal
+        open={metaConfirmOpen}
+        onClose={() => {
+          setMetaConfirmOpen(false);
+          setPendingEvaluate(false);
+        }}
+        onConfirm={handleMetaConfirm}
+        featureLabel="フェルミ推定AI（採点）"
+        cost={metaCost}
+        balance={metaBalance}
+      />
+
+      {/* 既存：サブスク誘導モーダル（残す） */}
       <UpgradeModal
         open={upgradeOpen}
         onClose={() => setUpgradeOpen(false)}
