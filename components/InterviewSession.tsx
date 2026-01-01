@@ -171,7 +171,7 @@ export function InterviewSession() {
             className="px-4 py-2 bg-sky-500 text-white rounded-full hover:bg-sky-600"
             type="button"
           >
-            面接を開始する
+            面接を開始するC
           </button>
         )}
 

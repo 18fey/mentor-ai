@@ -1,15 +1,40 @@
 // app/api/interview-eval/route.ts
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
 import personasConfig from "@/config/personas.json";
 import scoringConfig from "@/config/scoring_config.json";
+import { requireFeatureOrConsumeMeta } from "@/lib/payment/featureGate"; // ✅ “課金の真実” はAPI側で
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-type QA = {
-  question: string;
-  answer: string;
-};
+type Database = any;
 
+async function createSupabaseFromCookies() {
+  const cookieStore = await cookies();
+  return createServerClient<Database>(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value;
+        },
+        set(name: string, value: string, options: any) {
+          cookieStore.set({ name, value, ...options });
+        },
+        remove(name: string, options: any) {
+          cookieStore.set({ name, value: "", ...options });
+        },
+      },
+    }
+  );
+}
+
+type QA = { question: string; answer: string };
 type Persona = (typeof personasConfig)["personas"][number];
 
 type EvaluationResult = {
@@ -36,35 +61,102 @@ const DEFAULT_RESULT: EvaluationResult = {
     improvement_points: [
       "具体例や数字をもう一歩踏み込んで伝えると、説得力がさらに増します。",
     ],
-    one_sentence_advice: "一番伝えたいメッセージを最初に置き、そこに向けてSTARで話しましょう。",
+    one_sentence_advice:
+      "一番伝えたいメッセージを最初に置き、そこに向けてSTARで話しましょう。",
   },
 };
 
 function findPersona(personaId?: string): Persona {
   const list = personasConfig.personas as Persona[];
-  const found =
-    (personaId && list.find((p) => p.id === personaId)) || list[0];
-  return found;
+  return (personaId && list.find((p) => p.id === personaId)) || list[0];
+}
+
+function safeStr(v: unknown, maxLen: number) {
+  if (typeof v !== "string") return "";
+  return v.slice(0, maxLen);
+}
+
+function toSafeEval(parsed: any): EvaluationResult {
+  const safe: EvaluationResult = {
+    ...DEFAULT_RESULT,
+    ...(parsed ?? {}),
+    auto_feedback: {
+      ...DEFAULT_RESULT.auto_feedback,
+      ...((parsed?.auto_feedback ?? {}) as any),
+    },
+  };
+
+  const clamp = (n: any) => {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return 60;
+    return Math.max(0, Math.min(100, Math.round(x)));
+  };
+
+  return {
+    ...safe,
+    total_score: clamp(safe.total_score),
+    star_score: clamp(safe.star_score),
+    content_depth_score: clamp(safe.content_depth_score),
+    clarity_score: clamp(safe.clarity_score),
+    delivery_score: clamp(safe.delivery_score),
+    auto_feedback: {
+      good_points: Array.isArray(safe.auto_feedback.good_points)
+        ? safe.auto_feedback.good_points
+        : DEFAULT_RESULT.auto_feedback.good_points,
+      improvement_points: Array.isArray(safe.auto_feedback.improvement_points)
+        ? safe.auto_feedback.improvement_points
+        : DEFAULT_RESULT.auto_feedback.improvement_points,
+      one_sentence_advice:
+        typeof safe.auto_feedback.one_sentence_advice === "string"
+          ? safe.auto_feedback.one_sentence_advice
+          : DEFAULT_RESULT.auto_feedback.one_sentence_advice,
+    },
+  };
 }
 
 export async function POST(req: Request) {
   try {
-    if (!OPENAI_API_KEY) {
+    // ✅ まず featureGate（課金の真実）
+    const gate = await requireFeatureOrConsumeMeta("interview_10");
+    if (!gate.ok) {
       return NextResponse.json(
-        { error: "OPENAI_API_KEY is not set" },
-        { status: 500 }
+        {
+          ok: false,
+          reason: gate.reason,
+          required: gate.required ?? undefined,
+        },
+        { status: gate.status }
       );
     }
 
-    const body = await req.json().catch(() => ({}));
-    const qaList: QA[] = body.qaList ?? [];
-    const personaId: string | undefined = body.persona_id;
+    if (!OPENAI_API_KEY) {
+      console.error("OPENAI_API_KEY is not set");
+    }
+
+    const supabase = await createSupabaseFromCookies();
+    const { data: auth, error: authErr } = await supabase.auth.getUser();
+    const user = auth?.user ?? null;
+
+    if (authErr || !user?.id) {
+      return NextResponse.json({ error: "not_authenticated" }, { status: 401 });
+    }
+    const authUserId = user.id;
+
+    const body = (await req.json().catch(() => ({}))) as {
+      qaList?: QA[];
+      persona_id?: string;
+      topic?: string;
+      is_sensitive?: boolean;
+    };
+
+    const qaList: QA[] = Array.isArray(body.qaList) ? body.qaList : [];
+    const personaId =
+      typeof body.persona_id === "string" ? body.persona_id : undefined;
+    const topic = safeStr(body.topic, 120) || "一般面接";
+    const isSensitive = Boolean(body.is_sensitive);
 
     if (!qaList.length) {
-      return NextResponse.json(
-        { error: "qaList is required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "qaList is required" }, { status: 400 });
     }
 
     const persona = findPersona(personaId);
@@ -72,14 +164,15 @@ export async function POST(req: Request) {
     const interviewLog = qaList
       .map(
         (qa, idx) =>
-          `Q${idx + 1}: ${qa.question}\nA${idx + 1}: ${qa.answer || "（無回答）"}`
+          `Q${idx + 1}: ${safeStr(qa.question, 2000)}\nA${idx + 1}: ${
+            safeStr(qa.answer, 4000) || "（無回答）"
+          }`
       )
       .join("\n\n");
 
-    const criteriaDescription = scoringConfig.criteria
+    const criteriaDescription = (scoringConfig as any).criteria
       .map(
-        (c: any) =>
-          `- ${c.id} (${c.label}): weight=${c.weight} / ${c.description}`
+        (c: any) => `- ${c.id} (${c.label}): weight=${c.weight} / ${c.description}`
       )
       .join("\n");
 
@@ -104,69 +197,156 @@ ${interviewLog}
 このログをもとに、以下の形式の JSON を日本語で返してください。
 
 {
-  "total_score": number,              // 0〜100
-  "star_score": number,               // 0〜100
-  "content_depth_score": number,      // 0〜100
-  "clarity_score": number,            // 0〜100
-  "delivery_score": number,           // 0〜100
+  "total_score": number,
+  "star_score": number,
+  "content_depth_score": number,
+  "clarity_score": number,
+  "delivery_score": number,
   "auto_feedback": {
-    "good_points": string[],          // 箇条書きで3点程度
-    "improvement_points": string[],   // 箇条書きで3点程度
-    "one_sentence_advice": string     // 一言アドバイス（1〜2文）
+    "good_points": string[],
+    "improvement_points": string[],
+    "one_sentence_advice": string
   }
 }
 
 注意:
 - 候補者にとってわかりやすい言葉で書いてください。
 - 厳しめの評価でも構いませんが、必ず前向きなトーンを維持してください。
-`;
+`.trim();
 
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-      }),
-    });
+    let safeEval: EvaluationResult = DEFAULT_RESULT;
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      console.error("interview-eval OpenAI error:", errText);
-      return NextResponse.json(DEFAULT_RESULT, { status: 200 });
-    }
-
-    const data = await res.json();
-    const content = data?.choices?.[0]?.message?.content;
-
-    let parsed: EvaluationResult = DEFAULT_RESULT;
-
-    if (content) {
+    if (OPENAI_API_KEY) {
       try {
-        parsed = JSON.parse(content);
+        const res = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "gpt-4o-mini",
+            response_format: { type: "json_object" },
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userPrompt },
+            ],
+          }),
+        });
+
+        if (!res.ok) {
+          const errText = await res.text().catch(() => "");
+          console.error("interview-eval OpenAI error:", errText);
+        } else {
+          const data = await res.json();
+          const content = data?.choices?.[0]?.message?.content;
+
+          if (content) {
+            try {
+              const parsed = JSON.parse(content);
+              safeEval = toSafeEval(parsed);
+            } catch (e) {
+              console.error("JSON parse error (interview-eval):", e, content);
+            }
+          }
+        }
       } catch (e) {
-        console.error("JSON parse error (interview-eval):", e, content);
+        console.error("OpenAI call crash (interview-eval):", e);
       }
     }
 
-    // 最低限のフィールド保証
-    const safe: EvaluationResult = {
-      ...DEFAULT_RESULT,
-      ...parsed,
-      auto_feedback: {
-        ...DEFAULT_RESULT.auto_feedback,
-        ...(parsed.auto_feedback ?? {}),
-      },
-    };
+    const nowIso = new Date().toISOString();
 
-    return NextResponse.json(safe);
+    // 1) usage_logs（横串）
+    try {
+      const { error } = await supabase.from("usage_logs").insert({
+        user_id: authUserId,
+        feature: "interview_10",
+        used_at: nowIso,
+      });
+      if (error) console.error("usage_logs insert error (interview-eval):", error);
+    } catch (e) {
+      console.error("usage_logs insert crash (interview-eval):", e);
+    }
+
+    // 2) growth_logs（タイムライン）
+    try {
+      const { error } = await supabase.from("growth_logs").insert({
+        user_id: authUserId,
+        source: "interview",
+        title: `面接評価：${topic}`,
+        description: "模擬面接の回答を評価し、フィードバックを生成しました。",
+        metadata: {
+          feature: "interview_10",
+          persona_id: personaId ?? null,
+          topic,
+          scores: {
+            total: safeEval.total_score,
+            star: safeEval.star_score,
+            content_depth: safeEval.content_depth_score,
+            clarity: safeEval.clarity_score,
+            delivery: safeEval.delivery_score,
+          },
+        },
+        created_at: nowIso,
+      });
+      if (error) console.error("growth_logs insert error (interview-eval):", error);
+    } catch (e) {
+      console.error("growth_logs insert crash (interview-eval):", e);
+    }
+
+    // 3) 面接DB（既存テーブル）
+    try {
+      const { data: session, error: sessionErr } = await supabase
+        .from("interview_sessions")
+        .insert({
+          user_id: authUserId,
+          topic,
+          is_sensitive: isSensitive,
+          created_at: nowIso,
+        })
+        .select("id")
+        .single();
+
+      if (sessionErr) {
+        console.error("interview_sessions insert error:", sessionErr);
+      } else {
+        const sessionId = session?.id;
+
+        const turns = qaList
+          .flatMap((qa) => {
+            const q = safeStr(qa.question, 2000);
+            const a = safeStr(qa.answer, 4000);
+            return [
+              { role: "question", message: q },
+              { role: "answer", message: a || "（無回答）" },
+            ];
+          })
+          .map((t) => ({
+            session_id: sessionId,
+            user_id: authUserId,
+            role: t.role,
+            message: t.message,
+            is_sensitive: isSensitive,
+            created_at: nowIso,
+          }));
+
+        const { error: turnsErr } = await supabase.from("interview_turns").insert(turns);
+        if (turnsErr) console.error("interview_turns insert error:", turnsErr);
+
+        const { error: logsErr } = await supabase.from("interview_logs").insert({
+          user_id: authUserId,
+          qas: qaList,
+          score: Math.round(safeEval.total_score),
+          created_at: nowIso,
+        });
+        if (logsErr) console.error("interview_logs insert error:", logsErr);
+      }
+    } catch (e) {
+      console.error("interview tables insert crash:", e);
+    }
+
+    return NextResponse.json(safeEval);
   } catch (e: any) {
     console.error("interview-eval route error:", e);
     return NextResponse.json(DEFAULT_RESULT, { status: 200 });

@@ -792,7 +792,7 @@ export default function Diagnosis16TypePage() {
     const url =
       typeof window !== "undefined"
         ? window.location.origin + "/diagnosis-16type"
-        : "https://mentor-ai.net";
+        : "https://www.mentor-ai.net";
 
     const text = `Mentor.AI 16タイプ診断の結果は「${profile.nameEn}（${profile.nameJa}）」でした🧠✨\nAIとの付き合い方が可視化される診断。\n${url}`;
 

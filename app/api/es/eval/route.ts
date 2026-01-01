@@ -1,39 +1,20 @@
 // app/api/es/eval/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { createServerClient } from "@supabase/ssr";
+import { createServerSupabase } from "@/utils/supabase/server";
+import { getUserPlan } from "@/lib/plan";
+import { requireFeatureOrConsumeMeta } from "@/lib/payment/featureGate";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL_ES = process.env.OPENAI_MODEL_EVAL_ES || "gpt-4.1-mini";
 
-if (!OPENAI_API_KEY) {
-  console.warn("❗ OPENAI_API_KEY が設定されていません。.env.local を確認してください。");
-}
+// ✅ usage側の feature key（/api/usage/consume に合わせる）
+const USAGE_FEATURE_KEY = "es_correction";
 
-type Database = any;
-
-async function createSupabaseFromCookies() {
-  const cookieStore = await cookies();
-  return createServerClient<Database>(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        get(name: string) {
-          return cookieStore.get(name)?.value;
-        },
-        set(name: string, value: string, options: any) {
-          cookieStore.set({ name, value, ...options });
-        },
-        remove(name: string, options: any) {
-          cookieStore.set({ name, value: "", ...options });
-        },
-      },
-    }
-  );
-}
+// ✅ featureGate側の FeatureId（FEATURE_META_COST に存在するキーに合わせる）
+const GATE_FEATURE_ID = "es_correction";
 
 // 許可する設問タイプ
 const ALLOWED_QTYPES = ["self_pr", "gakuchika", "why_company", "why_industry", "other"] as const;
@@ -44,6 +25,9 @@ type EvalRequestBody = {
   company?: string;
   qType?: string;
   limit?: number;
+
+  // ⚠️ 互換用：送ってきても無視する（cookieセッションで確定する）
+  userId?: string;
 };
 
 function clampInt(n: unknown, min: number, max: number, fallback: number) {
@@ -51,7 +35,6 @@ function clampInt(n: unknown, min: number, max: number, fallback: number) {
   if (!Number.isFinite(x)) return fallback;
   return Math.max(min, Math.min(max, Math.floor(x)));
 }
-
 function safeStr(v: unknown, maxLen: number) {
   if (typeof v !== "string") return "";
   return v.slice(0, maxLen);
@@ -60,23 +43,31 @@ function safeStr(v: unknown, maxLen: number) {
 export async function POST(req: NextRequest) {
   try {
     if (!OPENAI_API_KEY) {
-      return NextResponse.json({ ok: false, error: "Missing OPENAI_API_KEY" }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: "server_config", message: "Missing OPENAI_API_KEY" },
+        { status: 500 }
+      );
     }
 
-    // ✅ userId はセッションから確定
-    const supabase = await createSupabaseFromCookies();
+    // ✅ cookieセッションから本人確定（body.userIdは使わない）
+    const supabase = await createServerSupabase();
     const { data: auth, error: authErr } = await supabase.auth.getUser();
     const user = auth?.user ?? null;
 
     if (authErr || !user?.id) {
-      return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: "unauthorized", message: "login required" },
+        { status: 401 }
+      );
     }
-
-    const authUserId = user.id;
+    const userId = user.id;
 
     const body = (await req.json().catch(() => null)) as EvalRequestBody | null;
     if (!body) {
-      return NextResponse.json({ ok: false, error: "Invalid JSON body" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "bad_request", message: "Invalid JSON body" },
+        { status: 400 }
+      );
     }
 
     const text = typeof body.text === "string" ? body.text : "";
@@ -84,14 +75,14 @@ export async function POST(req: NextRequest) {
     const qTypeRaw = typeof body.qType === "string" ? body.qType : "";
     const safeQType: QuestionType =
       (ALLOWED_QTYPES as readonly string[]).includes(qTypeRaw) ? (qTypeRaw as QuestionType) : "other";
-
     const safeLimit = clampInt(body.limit, 1, 4000, 400);
 
     if (!text || text.trim().length < 50) {
       return NextResponse.json(
         {
           ok: false,
-          error: "ES本文が短すぎるか空です。少なくとも50文字以上の本文を送信してください。",
+          error: "bad_request",
+          message: "ES本文が短すぎるか空です。少なくとも50文字以上の本文を送信してください。",
         },
         { status: 400 }
       );
@@ -99,6 +90,42 @@ export async function POST(req: NextRequest) {
 
     const MAX_ES_LENGTH = 4000;
     const truncatedText = text.length > MAX_ES_LENGTH ? text.slice(0, MAX_ES_LENGTH) : text;
+
+    // ✅ usage/consume：内部fetchはCookieが勝手につかないので転送
+    const baseUrl = new URL(req.url).origin;
+    const cookieHeader = req.headers.get("cookie") ?? "";
+
+    const usageRes = await fetch(`${baseUrl}/api/usage/consume`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookieHeader,
+      },
+      body: JSON.stringify({ feature: USAGE_FEATURE_KEY }),
+    });
+
+    const usageJson = await usageRes.json().catch(() => null);
+
+    // ✅ 無料枠を超えていたら → meta消費（唯一の消費場所）
+    if (!usageRes.ok) {
+      if (usageRes.status === 402 && usageJson?.error === "need_meta") {
+        const gate = await requireFeatureOrConsumeMeta(GATE_FEATURE_ID);
+
+        if (!gate.ok) {
+          // gate は {ok:false, status:402, requiredMeta, balance, ...} を想定
+          return NextResponse.json(gate, { status: gate.status });
+        }
+        // gate.ok なら続行（＝meta消費済み）
+      } else {
+        console.error("usage/consume error:", usageRes.status, usageJson);
+        return NextResponse.json(
+          { ok: false, error: "usage_error", message: "Failed to check usage" },
+          { status: 500 }
+        );
+      }
+    }
+
+    const plan = await getUserPlan(userId);
 
     const systemPrompt =
       "あなたは日本の就活に詳しいES添削のプロです。与えられたESを評価し、指定されたJSON形式だけを返してください。";
@@ -120,7 +147,6 @@ ${truncatedText}
 }
 `.trim();
 
-    // ✅ OpenAI call
     const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -128,89 +154,50 @@ ${truncatedText}
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "gpt-4.1-mini",
+        model: OPENAI_MODEL_ES,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
         ],
         temperature: 0.3,
         response_format: { type: "json_object" },
-        max_tokens: 800,
+        max_tokens: 900,
       }),
     });
 
-    const data = await openaiRes.json();
-
+    const data = await openaiRes.json().catch(() => null);
     if (!openaiRes.ok) {
       console.error("OpenAI API error:", data);
-      return NextResponse.json({ ok: false, error: "OpenAI API error", detail: data }, { status: 500 });
+      return NextResponse.json({ ok: false, error: "openai_error", detail: data }, { status: 500 });
     }
 
-    const content = data.choices?.[0]?.message?.content;
+    const content = data?.choices?.[0]?.message?.content;
     if (!content) {
-      return NextResponse.json({ ok: false, error: "No content from OpenAI" }, { status: 500 });
+      return NextResponse.json({ ok: false, error: "openai_empty" }, { status: 500 });
     }
 
     let parsed: any;
     try {
       parsed = JSON.parse(content);
     } catch {
-      return NextResponse.json({ ok: false, error: "Failed to parse OpenAI JSON", raw: content }, { status: 500 });
+      return NextResponse.json({ ok: false, error: "parse_error", raw: content }, { status: 500 });
     }
 
+    // ✅ 形の最低限チェック
     const s = parsed?.score;
-    if (!s || typeof s.structure !== "number" || !parsed.feedback) {
-      return NextResponse.json({ ok: false, error: "Invalid JSON shape from OpenAI", raw: parsed }, { status: 500 });
+    if (!s || typeof s.structure !== "number" || !parsed?.feedback) {
+      return NextResponse.json({ ok: false, error: "invalid_shape", raw: parsed }, { status: 500 });
     }
 
-    const avgScore = Math.round((s.structure + s.logic + s.clarity + s.companyFit + s.lengthFit) / 5);
-
-    // ✅ ログ保存（profiles 依存を完全に排除 / user_id 統一）
-    // ここが「ログ溜まらない」を直す本丸
-    try {
-      // es_logs: user_id で保存（profile_id不要）
-      const { error: esLogErr } = await supabase.from("es_logs").insert({
-        user_id: authUserId,
-        company_name: company || null,
-        es_question: safeQType,
-        es_before: truncatedText,
-        es_after: null,
-        mode: "eval",
-        score: avgScore,
-        created_at: new Date().toISOString(), // defaultがあるなら不要
-      });
-
-      if (esLogErr) {
-        console.error("es_logs insert error:", esLogErr);
-      }
-
-      // growth_logs: user_id で保存
-      const { error: growthErr } = await supabase.from("growth_logs").insert({
-        user_id: authUserId,
-        source: "es",
-        title: `${company ? `ES評価：${company}` : "ES評価"} [Score]`,
-        description: "ESのスコアリングとフィードバックを実施しました。",
-        metadata: {
-          mode: "eval",
-          company: company || null,
-          qType: safeQType,
-          score: parsed.score,
-        },
-        created_at: new Date().toISOString(), // defaultがあるなら不要
-      });
-
-      if (growthErr) {
-        console.error("growth_logs insert error:", growthErr);
-      }
-    } catch (logErr) {
-      console.error("logging error in /api/es/eval:", logErr);
-    }
-
-    // ✅ UIに返す
-    // 今まで通り parsed を返してOK（互換維持）
-    return NextResponse.json(parsed);
+    return NextResponse.json({
+      ok: true,
+      plan,
+      usedThisMonth: typeof usageJson?.usedThisMonth === "number" ? usageJson.usedThisMonth : null,
+      freeLimit: typeof usageJson?.freeLimit === "number" ? usageJson.freeLimit : null,
+      ...parsed,
+    });
   } catch (e) {
     console.error("POST /api/es/eval error:", e);
-    return NextResponse.json({ ok: false, error: "Unexpected error" }, { status: 500 });
+    return NextResponse.json({ ok: false, error: "server_error", message: "server error" }, { status: 500 });
   }
 }

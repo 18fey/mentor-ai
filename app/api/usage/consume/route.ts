@@ -10,29 +10,41 @@ type Plan = "free" | "pro"; // eliteがあるなら足してOK
 type FeatureKey =
   | "case_interview"
   | "case_generate"
+  | "fermi_generate"
   | "fermi"
-  | "general_interview"
+  | "interview_10"
   | "ai_training"
-  | "es_correction";
+  | "es_correction"
+  | "industry_insight"
+  | "enterprise_qgen" 
+  |  "es_draft";
 
 // ✅ “無料枠”だけ（proは無制限）
 const FREE_LIMITS: Record<FeatureKey, number> = {
   case_interview: 3,
-  case_generate: 8,
-  fermi: 7,
-  general_interview: 1,
-  ai_training: 1,
-  es_correction: 1,
+  case_generate: 3,
+  fermi: 3,
+  fermi_generate: 3,
+  interview_10: 1,
+  ai_training: 3,
+  es_correction: 3,
+  industry_insight: 3,
+  enterprise_qgen: 5,
+  es_draft : 0
 };
 
 // ✅ 無料枠を超えたら必要な meta（都度課金）
 const META_COST: Record<FeatureKey, number> = {
-  case_interview: 1,
-  case_generate: 1,
+  es_correction: 1,
   fermi: 1,
-  general_interview: 2,
-  ai_training: 2,
-  es_correction: 2,
+  interview_10: 2,
+  industry_insight: 2,
+  case_interview: 1,
+  enterprise_qgen: 2,
+  ai_training: 1,
+  case_generate: 1,
+  fermi_generate: 1,
+  es_draft: 0
 };
 
 function monthStartISO(now = new Date()) {

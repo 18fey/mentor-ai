@@ -15,7 +15,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type FeatureId =
-  | "es_check"
+  | "es_correction"
   | "fermi"
   | "light_questions"
   | "interview_10"
@@ -26,11 +26,11 @@ type FeatureId =
   | "enterprise_qgen";
 
 const FEATURE_META_COST: Record<FeatureId, number> = {
-  es_check: 1,
+  es_correction: 1,
   fermi: 1,
   light_questions: 1,
   interview_10: 3,
-  industry_insight: 3,
+  industry_insight: 2,
   case_interview: 4,
   fit_analysis: 6,
   deep_16type: 10,

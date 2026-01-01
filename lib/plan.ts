@@ -5,11 +5,15 @@ export type Plan = "free" | "pro" | "elite";
 
 // ✅ 利用制限の単位（ここに追加するだけで全APIが型エラーなく増やせる）
 export type UsageFeature =
+  | "case_interview"
   | "case_generate"
   | "fermi_generate"
-  | "case_fermi"
-  | "interview"
-  | "ai_training";
+  | "fermi"
+  | "interview_10"
+  | "ai_training"
+  | "es_correction"
+  | "industry_insight" 
+  |  "es_draft";
 
 function isUnlimited(plan: Plan) {
   return plan === "pro" || plan === "elite";

@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { StatCard } from "@/components/StatCard";
 import { InterviewRecorder } from "@/components/InterviewRecorder";
+import { MetaConfirmModal } from "@/components/MetaConfirmModal";
 import { useRouter } from "next/navigation";
 import { createBrowserClient } from "@supabase/ssr";
 import type { TopicType } from "@/lib/types/story";
@@ -35,7 +36,11 @@ type Profile = {
 
 const MAX_Q = 10 as const;
 
-// 5人格（Evaluation APIと同じID）
+// ✅ featureGate.ts の interview_10 と “必ず一致” させる
+const FEATURE_ID = "interview_10";
+const FEATURE_LABEL = "一般面接AI（音声版）";
+const REQUIRED_META = 2; // ←ここが違うと事故るので必ず統一
+
 const PERSONAS = [
   { id: "consulting_finance", label: "コンサル・外銀系" },
   { id: "sales_trading_commerce", label: "商社・営業・流通系" },
@@ -49,13 +54,11 @@ const TOPIC_LABEL: Record<TopicType, string> = {
   self_pr: "自己PR",
   why_company: "志望動機（企業）",
   why_industry: "志望動機（業界）",
-  general: "",
+  general: "一般面接",
 };
 
-// ✅ editing 追加
 type Step = "idle" | "asking" | "thinking" | "editing" | "evaluating" | "finished";
 
-// 学びテキストから「就活の軸」タグをざっくり抽出（いまは未使用だが、今後のために残しておく）
 function extractAxesFromLearnings(text: string): string[] {
   const axes: string[] = [];
   const t = text.toLowerCase();
@@ -78,7 +81,6 @@ function extractAxesFromLearnings(text: string): string[] {
   return axes;
 }
 
-// プロフィール有無で質問文を少しだけ変える
 function buildQuestions(profile: Profile | null): string[] {
   const hasProfile = !!profile;
   const name = profile?.name || "あなた";
@@ -89,15 +91,13 @@ function buildQuestions(profile: Profile | null): string[] {
 
   const baseIntro = hasProfile
     ? `まずは ${name} さんの簡単な自己紹介をお願いします。（${uni}${faculty ? ` / ${faculty}` : ""}${grade ? ` / ${grade}年` : ""} などを含めて）`
-    : "それでは模擬面接を始めます。まずは簡単に自己紹介をお願いします。";
+    : "それでは模擬面接を始めます。まずは簡単な自己紹介をお願いします。";
 
   const baseGakuchika = hasProfile
     ? `${uni} での学生生活の中で、特に力を入れた取り組みを教えてください。`
     : "学生時代に最も力を入れた取り組みを教えてください。";
 
-  const industryTail = mainIndustry
-    ? `（特に ${mainIndustry} を志望している前提で考えてみてください）`
-    : "";
+  const industryTail = mainIndustry ? `（特に ${mainIndustry} を志望している前提で考えてみてください）` : "";
 
   return [
     baseIntro,
@@ -111,6 +111,19 @@ function buildQuestions(profile: Profile | null): string[] {
     "あなたらしさが最も現れている部分はどこですか？",
     "最後に、この経験を通じて言える“あなたの強み”は何ですか？",
   ];
+}
+
+async function fetchMyMetaBalance(): Promise<number | null> {
+  try {
+    const res = await fetch("/api/meta/balance", { method: "GET" });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) return null;
+    if (!data?.ok) return null;
+    const b = Number(data?.balance ?? 0);
+    return Number.isFinite(b) ? b : null;
+  } catch {
+    return null;
+  }
 }
 
 export default function InterviewPage() {
@@ -147,12 +160,22 @@ export default function InterviewPage() {
   const [evaluation, setEvaluation] = useState<EvaluationResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // ✅ 編集用（一時置き）
   const [pendingTranscript, setPendingTranscript] = useState<string>("");
   const [isCommitting, setIsCommitting] = useState(false);
 
   const [isCreatingCard, setIsCreatingCard] = useState(false);
   const [createMessage, setCreateMessage] = useState<string | null>(null);
+
+  // ✅ meta不足時の導線（評価APIで402になった時）
+  const [needMeta, setNeedMeta] = useState<number | null>(null);
+
+  // ✅ 開始時に確認するためのモーダル
+  const [metaModalOpen, setMetaModalOpen] = useState(false);
+  const [metaBalance, setMetaBalance] = useState<number | null>(null);
+  const [metaMode, setMetaMode] = useState<"confirm" | "purchase">("confirm");
+
+  // “開始確定”の実行予約
+  const pendingStartRef = useRef<null | (() => void)>(null);
 
   const logRef = useRef<HTMLDivElement | null>(null);
 
@@ -167,7 +190,7 @@ export default function InterviewPage() {
         setUserId(user.id);
 
         const res = await fetch(`/api/profile/get?userId=${encodeURIComponent(user.id)}`);
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (data.profile) setProfile(data.profile);
       } catch (e) {
         console.error("Failed to fetch auth/profile:", e);
@@ -189,7 +212,8 @@ export default function InterviewPage() {
     }, 120);
   };
 
-  const startInterview = () => {
+  // ✅ 本体：面接を開始する（ここは今のstartInterviewと同じ）
+  const startInterviewCore = () => {
     if (!authChecked || !userId) {
       router.push("/auth");
       return;
@@ -200,27 +224,71 @@ export default function InterviewPage() {
     setCurrentQuestion(questions[0]);
     setStep("asking");
     setError(null);
+    setNeedMeta(null);
     setCreateMessage(null);
     setPendingTranscript("");
     setIsCommitting(false);
     scrollToBottom();
   };
 
-  // ✅ 10問終了 → /api/interview-eval
+  // ✅ 入口：開始ボタン押下 → meta確認 → モーダル
+  const startInterview = async () => {
+    if (!authChecked || !userId) {
+      router.push("/auth");
+      return;
+    }
+    if (step !== "idle" && step !== "finished") return;
+
+    setError(null);
+    setNeedMeta(null);
+
+    const balance = await fetchMyMetaBalance(); // ✅ meta_lots 正（RPC）
+    setMetaBalance(balance);
+
+    const hasEnough = typeof balance === "number" ? balance >= REQUIRED_META : true; // 取得失敗ならconfirmで進める
+    setMetaMode(hasEnough ? "confirm" : "purchase");
+
+    // “確定”で開始するように予約
+    pendingStartRef.current = () => startInterviewCore();
+
+    setMetaModalOpen(true);
+  };
+
+  const closeMetaModal = () => {
+    setMetaModalOpen(false);
+  };
+
+  // ✅ 10問終了 → /api/interview-eval（ここで課金の真実）
   const runEvaluation = async (finishedList: QA[]) => {
     try {
       setStep("evaluating");
+      setError(null);
+      setNeedMeta(null);
       scrollToBottom();
+
+      const topicLabel = TOPIC_LABEL[topicType] || "一般面接";
 
       const res = await fetch("/api/interview-eval", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ persona_id: personaId, qaList: finishedList, userId }),
+        body: JSON.stringify({
+          persona_id: personaId,
+          qaList: finishedList,
+          topic: topicLabel,
+          is_sensitive: false,
+        }),
       });
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || "面接評価APIでエラーが発生しました。");
+
+        if (res.status === 402) {
+          const required = Number(data?.required ?? data?.requiredMeta ?? REQUIRED_META);
+          setNeedMeta(required);
+          throw new Error("METAが不足しています。購入後に再度お試しください。");
+        }
+
+        throw new Error(data.error || data.message || "面接評価APIでエラーが発生しました。");
       }
 
       const evalData = (await res.json()) as EvaluationResult;
@@ -234,7 +302,6 @@ export default function InterviewPage() {
     }
   };
 
-  // ✅ 録音完了 → /api/transcribe → editingへ（ここではQA保存しない）
   const handleRecorded = async (blob: Blob) => {
     try {
       setStep("thinking");
@@ -260,15 +327,11 @@ export default function InterviewPage() {
       scrollToBottom();
     } catch (e: any) {
       console.error(e);
-      setError(
-        e?.message ||
-          "文字起こし中にエラーが発生しました。通信環境を確認して、もう一度お試しください。"
-      );
+      setError(e?.message || "文字起こし中にエラーが発生しました。通信環境を確認して、もう一度お試しください。");
       setStep("asking");
     }
   };
 
-  // ✅ 確定：QAに保存 → 次へ or 評価へ
   const commitEditedTranscript = async () => {
     if (isCommitting) return;
     setIsCommitting(true);
@@ -281,7 +344,6 @@ export default function InterviewPage() {
       const nextList = [...qaList, newQA];
       setQAList(nextList);
 
-      // 次に持ち越さない
       setPendingTranscript("");
 
       const nextIdx = currentIdx + 1;
@@ -304,7 +366,6 @@ export default function InterviewPage() {
     }
   };
 
-  // ✅ やり直し：同じ質問で再録音（QAには保存しない）
   const retryAnswer = () => {
     setPendingTranscript("");
     setError(null);
@@ -312,9 +373,6 @@ export default function InterviewPage() {
     scrollToBottom();
   };
 
-  // -------------------------------------
-  // このセッション → ストーリーカード作成（from-audio API を使用）
-  // -------------------------------------
   const createStoryCardFromSession = async () => {
     if (!userId) {
       router.push("/auth");
@@ -365,6 +423,40 @@ export default function InterviewPage() {
 
   return (
     <div className="px-10 py-8 space-y-8">
+      {/* ✅ 開始時の meta 確認モーダル（新規追加なし / 既存コンポーネント流用） */}
+      <MetaConfirmModal
+        open={metaModalOpen}
+        onClose={closeMetaModal}
+        featureLabel={FEATURE_LABEL}
+        requiredMeta={REQUIRED_META}
+        balance={metaBalance}
+        mode={metaMode}
+        title={
+          metaMode === "purchase"
+            ? "METAが不足しています"
+            : "面接を開始しますか？"
+        }
+        message={
+          metaMode === "purchase"
+            ? `この練習を開始するには META が ${REQUIRED_META} 必要です。購入して続行してください。`
+            : `開始します。10問終了後の評価時に META を ${REQUIRED_META} 消費します。`
+        }
+        confirmLabel="開始する"
+        cancelLabel="キャンセル"
+        purchaseLabel="METAを購入する"
+        onConfirm={() => {
+          setMetaModalOpen(false);
+          const fn = pendingStartRef.current;
+          pendingStartRef.current = null;
+          fn?.();
+        }}
+        onPurchase={() => {
+          setMetaModalOpen(false);
+          pendingStartRef.current = null;
+          router.push("/pricing");
+        }}
+      />
+
       <div className="flex flex-col gap-1">
         <h1 className="text-2xl font-semibold">一般面接AI（音声版）</h1>
         <p className="text-sm text-slate-500">
@@ -382,7 +474,6 @@ export default function InterviewPage() {
       <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,2fr)_minmax(280px,360px)] gap-6 items-start">
         {/* 左 */}
         <div className="rounded-3xl bg-white shadow-sm px-6 py-6 flex flex-col gap-4">
-          {/* ヘッダー行 */}
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
             <div>
               <h2 className="text-base font-semibold">音声模擬面接（一般質問 × 10問）</h2>
@@ -442,11 +533,7 @@ export default function InterviewPage() {
             </div>
           </div>
 
-          {/* Q&Aログ */}
-          <div
-            ref={logRef}
-            className="flex-1 max-h-[420px] overflow-y-auto space-y-3 pr-1 pt-2"
-          >
+          <div ref={logRef} className="flex-1 max-h-[420px] overflow-y-auto space-y-3 pr-1 pt-2">
             {qaList.length === 0 && step === "idle" && (
               <p className="text-xs text-slate-400">
                 「面接を開始する」を押すと、Q1から順番に音声面接がスタートします。
@@ -464,21 +551,16 @@ export default function InterviewPage() {
               </div>
             ))}
 
-            {/* 現在の質問 */}
             {step !== "idle" && step !== "finished" && (
               <div className="space-y-1">
                 <div className="bg-slate-100 px-4 py-2 rounded-xl text-xs text-slate-800">
                   <span className="font-semibold text-sky-700">Q{currentIdx + 1}</span>：{currentQuestion}
                 </div>
-
-                {step === "thinking" && (
-                  <p className="text-[11px] text-slate-500 pl-1">文字起こし中…</p>
-                )}
+                {step === "thinking" && <p className="text-[11px] text-slate-500 pl-1">文字起こし中…</p>}
               </div>
             )}
           </div>
 
-          {/* ✅ editing UI */}
           {step === "editing" && (
             <div className="pt-3 border-t border-slate-100">
               <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 space-y-3">
@@ -519,7 +601,6 @@ export default function InterviewPage() {
             </div>
           )}
 
-          {/* 録音 */}
           {step === "asking" && (
             <div className="pt-3 border-t border-slate-100">
               <InterviewRecorder onRecorded={handleRecorded} />
@@ -533,9 +614,18 @@ export default function InterviewPage() {
           )}
 
           {error && (
-            <p className="text-[11px] text-red-500 bg-red-50 rounded-xl px-3 py-2 mt-2">
-              {error}
-            </p>
+            <div className="mt-2 space-y-2">
+              <p className="text-[11px] text-red-500 bg-red-50 rounded-xl px-3 py-2">{error}</p>
+              {needMeta != null && (
+                <button
+                  type="button"
+                  onClick={() => router.push("/pricing")}
+                  className="rounded-full bg-slate-900 text-white text-xs px-4 py-2 hover:bg-slate-800"
+                >
+                  METAを購入する（必要: {needMeta}）
+                </button>
+              )}
+            </div>
           )}
         </div>
 
@@ -607,8 +697,7 @@ export default function InterviewPage() {
                   <div className="rounded-2xl bg-slate-50 px-3 py-3">
                     <p className="font-semibold text-slate-700 mb-1">一言アドバイス</p>
                     <p className="text-slate-600">
-                      {evaluation.auto_feedback?.one_sentence_advice ??
-                        "次回以降の面接のポイントがここに表示されます。"}
+                      {evaluation.auto_feedback?.one_sentence_advice ?? "次回以降の面接のポイントがここに表示されます。"}
                     </p>
                   </div>
                 </div>

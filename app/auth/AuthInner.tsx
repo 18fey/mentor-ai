@@ -10,7 +10,7 @@ type AuthTab = "login" | "signup";
 
 // 本番URL（env があればそっち優先）
 const SITE_URL =
-  process.env.NEXT_PUBLIC_SITE_URL || "https://mentor-ai-2rw9.vercel.app";
+  process.env.NEXT_PUBLIC_SITE_URL || "https://www.mentor-ai.net";
 
 // クライアント用 Supabase インスタンス
 const supabase = createBrowserClient(

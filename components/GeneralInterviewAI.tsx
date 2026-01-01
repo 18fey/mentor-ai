@@ -349,7 +349,7 @@ export const GeneralInterviewAI: React.FC = () => {
       const usageRes = await fetch("/api/usage/consume", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ feature: "general_interview" }),
+        body: JSON.stringify({ feature: "interview_10" }),
       });
 
       const usageBody: any = await usageRes.json().catch(() => ({}));

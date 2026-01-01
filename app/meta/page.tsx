@@ -25,7 +25,7 @@ type ProfileMetaBalanceRow = {
 // 1. 機能ID（/api/meta/use と揃える）
 // -----------------------------
 type FeatureId =
-  | "es_check"
+  | "es_correction"
   | "fermi"
   | "light_questions"
   | "interview_10"
@@ -37,11 +37,11 @@ type FeatureId =
 
 // 機能ごとの Meta 消費（/api/meta/use と同じ）
 const FEATURE_META_COST: Record<FeatureId, number> = {
-  es_check: 1,
+  es_correction: 1,
   fermi: 1,
   light_questions: 1,
-  interview_10: 3,
-  industry_insight: 3,
+  interview_10: 2,
+  industry_insight: 2,
   case_interview: 2,
   fit_analysis: 6,
   deep_16type: 10,
@@ -55,7 +55,7 @@ const FEATURE_LIST: {
   note: string;
 }[] = [
   {
-    id: "es_check",
+    id: "es_correction",
     label: "ES 添削（1本）",
     note: "ガクチカ・自己PR など 1 本あたり",
   },
@@ -154,7 +154,7 @@ export default function MetaPage() {
 
   // シミュレーター用：機能ごとの利用回数
   const [usagePlan, setUsagePlan] = useState<Record<FeatureId, number>>(() => ({
-    es_check: 0,
+    es_correction: 0,
     fermi: 0,
     light_questions: 0,
     interview_10: 0,

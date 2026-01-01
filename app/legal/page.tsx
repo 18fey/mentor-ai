@@ -38,7 +38,7 @@ export default function LegalPage() {
 
         <div>
           <dt className="font-semibold">販売URL</dt>
-          <dd>https://mentor-ai-2rw9.vercel.app/</dd>
+          <dd>https://www.mentor-ai.net</dd>
         </div>
 
         <div>

@@ -258,11 +258,12 @@ export default function IndustryInsights() {
     setMetaTitle(undefined);
     setMetaMessage(undefined);
 
-    setPendingAction(async () => {
-      await onProceed();
-      const bb = await fetchMyBalance();
-      if (typeof bb === "number") setMetaBalance(bb);
-    });
+    setPendingAction(() => async () => {
+  await onProceed();
+  const bb = await fetchMyBalance();
+  if (typeof bb === "number") setMetaBalance(bb);
+});
+
 
     setMetaModalOpen(true);
   };
@@ -617,11 +618,16 @@ export default function IndustryInsights() {
         title={metaTitle}
         message={metaMessage}
         onConfirm={async () => {
-          const fn = pendingAction;
-          closeMetaModal();
-          if (!fn) return;
-          await fn();
-        }}
+        const fn = pendingAction;
+        closeMetaModal();
+        if (!fn) return;
+        try {
+        await fn();
+        } catch (e) {
+        console.error(e);
+        }
+      }}
+
         onPurchase={() => router.push("/pricing")}
       />
     </>

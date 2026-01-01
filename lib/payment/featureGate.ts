@@ -5,30 +5,28 @@ import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
 
 export type FeatureId =
-  | "es_check"
+  | "es_correction"
   | "fermi"
-  | "light_questions"
   | "interview_10"
   | "industry_insight"
   | "case_interview"
-  | "fit_analysis"
-  | "deep_16type"
   | "enterprise_qgen"
-  | "career_gap_deep";
+  | "career_gap_deep"
+  | "ai_training"
+  |  "es_draft";
 
 type PlanName = "free" | "pro" | "elite" ;
 
 export const FEATURE_META_COST: Record<FeatureId, number> = {
-  es_check: 1,
+  es_correction: 1,
   fermi: 1,
-  light_questions: 1,
   interview_10: 2,
   industry_insight: 2,
-  case_interview: 2,
-  fit_analysis: 2,
-  deep_16type: 2,
+  case_interview: 1,
   enterprise_qgen: 2,
-  career_gap_deep: 2,
+  career_gap_deep: 3,
+  ai_training: 1,
+  es_draft : 1
 };
 
 export type FeatureGateOk = {
