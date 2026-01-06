@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
 
     const limit = await checkMonthlyLimit({
       userId,
-      feature: "interview",
+      feature: "interview_10",
       freeLimit: 1,
     });
 
@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
     // TODO: ここで session 作成など（body は userId 無しで使う）
     // const session = await createInterviewSession(userId, body);
 
-    await logUsage(userId, "interview");
+    await logUsage(userId, "interview_10");
 
     return NextResponse.json({
       ok: true,

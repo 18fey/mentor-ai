@@ -273,7 +273,7 @@ ${interviewLog}
     try {
       const { error } = await supabase.from("growth_logs").insert({
         user_id: authUserId,
-        source: "interview",
+        source: "interview_10",
         title: `面接評価：${topic}`,
         description: "模擬面接の回答を評価し、フィードバックを生成しました。",
         metadata: {

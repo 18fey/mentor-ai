@@ -7,6 +7,7 @@ import {
   ThinkingTypeId,
 } from "@/lib/careerFitMap";
 import { requireFeatureOrConsumeMeta } from "@/lib/payment/featureGate";
+import { createServerSupabase } from "@/utils/supabase/server";
 
 const FIT_SYMBOL_DESC: Record<FitSymbol, string> = {
   "◎": "とても相性が良い（タイプの強みと業界の求める力がかなり重なる）",
@@ -60,8 +61,25 @@ type Body = {
   mode?: "basic" | "deep";
 };
 
+// profiles に保存する mode（UI表示用）
+type SavedCareerGapMode = "lite" | "deep";
+
 export async function POST(req: Request) {
   try {
+    // ✅ サーバー側Supabase（cookie連携）
+    const supabase = await createServerSupabase();
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 }
+      );
+    }
+
     const body = (await req.json().catch(() => ({}))) as Body;
 
     const thinkingTypeId = String(body.thinkingTypeId || "");
@@ -74,7 +92,9 @@ export async function POST(req: Request) {
 
     const mode: "basic" | "deep" = body.mode === "deep" ? "deep" : "basic";
 
-    const raw = Array.isArray(body.desiredIndustryIds) ? body.desiredIndustryIds : [];
+    const raw = Array.isArray(body.desiredIndustryIds)
+      ? body.desiredIndustryIds
+      : [];
     if (raw.length === 0) {
       return NextResponse.json(
         { error: "desiredIndustryIds is required" },
@@ -83,7 +103,8 @@ export async function POST(req: Request) {
     }
 
     // basic=1業界 / deep=最大3業界
-    const desiredIndustryIds = mode === "deep" ? raw.slice(0, 3) : raw.slice(0, 1);
+    const desiredIndustryIds =
+      mode === "deep" ? raw.slice(0, 3) : raw.slice(0, 1);
 
     // Deepは課金ゲート（402返す）
     if (mode === "deep") {
@@ -146,7 +167,10 @@ ${mode === "deep" ? "Deep（有料）として詳しく。" : "ライト（無�
 
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
-      return NextResponse.json({ error: "Server configuration error" }, { status: 500 });
+      return NextResponse.json(
+        { error: "Server configuration error" },
+        { status: 500 }
+      );
     }
 
     const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -158,9 +182,12 @@ ${mode === "deep" ? "Deep（有料）として詳しく。" : "ライト（無�
       body: JSON.stringify({
         model: "gpt-4.1-mini",
         temperature: mode === "deep" ? 0.7 : 0.5,
-        max_tokens: mode === "deep" ? 1200 : 650,
+        max_tokens: mode === "deep" ? 2400 : 650,
         messages: [
-          { role: "system", content: mode === "deep" ? SYSTEM_PROMPT_DEEP : SYSTEM_PROMPT_BASIC },
+          {
+            role: "system",
+            content: mode === "deep" ? SYSTEM_PROMPT_DEEP : SYSTEM_PROMPT_BASIC,
+          },
           { role: "user", content: userPrompt },
         ],
       }),
@@ -169,11 +196,69 @@ ${mode === "deep" ? "Deep（有料）として詳しく。" : "ライト（無�
     if (!openaiRes.ok) {
       const errText = await openaiRes.text();
       console.error("OpenAI API error:", openaiRes.status, errText);
-      return NextResponse.json({ error: "OpenAI API error", detail: errText }, { status: 500 });
+      return NextResponse.json(
+        { error: "OpenAI API error", detail: errText },
+        { status: 500 }
+      );
     }
 
     const data = (await openaiRes.json()) as any;
     const content = data.choices?.[0]?.message?.content ?? "生成に失敗しました。";
+
+    // ✅ ここが本丸：成功したら「次の実行まで固定」するため profiles に保存（上書き）
+    // - basic -> lite / deep -> deep
+    const savedMode: SavedCareerGapMode = mode === "deep" ? "deep" : "lite";
+    const nowISO = new Date().toISOString();
+
+    // profiles のキーが環境で違っても落ちないように、まず id、それでダメなら auth_user_id を試す
+    const { data: updatedById, error: updErr1 } = await supabase
+      .from("profiles")
+      .update({
+        career_gap_mode: savedMode,
+        career_gap_result: content,
+        career_gap_updated_at: nowISO,
+      })
+      .eq("id", user.id)
+      .select("id")
+      .maybeSingle();
+
+    if (updErr1) {
+      console.error("profiles update error (by id):", updErr1);
+    }
+
+    if (!updatedById && !updErr1) {
+      const { error: updErr2 } = await supabase
+        .from("profiles")
+        .update({
+          career_gap_mode: savedMode,
+          career_gap_result: content,
+          career_gap_updated_at: nowISO,
+        })
+        .eq("auth_user_id", user.id);
+
+      if (updErr2) {
+        console.error("profiles update error (by auth_user_id):", updErr2);
+      }
+    }
+
+    // ✅ growth_logs にも記録（履歴）
+    const { error: logErr } = await supabase.from("growth_logs").insert({
+      user_id: user.id,
+      source: "career_gap",
+      title: "キャリアマッチ診断を実施",
+      description:
+        savedMode === "deep" ? "Deep版（最大3業界比較）" : "ライト版（1業界）",
+      metadata: {
+        mode: savedMode,
+        thinkingTypeId,
+        usedIndustryIds: desiredIndustryIds,
+      },
+    });
+
+    if (logErr) {
+      // ログ失敗してもレポートは返す（UX優先）
+      console.error("growth_logs insert error:", logErr);
+    }
 
     return NextResponse.json({
       result: content,

@@ -50,7 +50,7 @@ export async function POST() {
     // 2) profiles を Service Role で読む（auth_user_id で一致させる）
     const { data: profile, error: profileErr } = await supabaseServer
       .from("profiles")
-      .select("id, onboarding_cc, referred_by")
+      .select("id, onboarding_completed, referred_by")
       .eq("id", user.id) 
       .single();
 
@@ -63,14 +63,14 @@ export async function POST() {
     }
 
     // 3) 多重実行対策：すでに完了ならOK
-    if (profile.onboarding_cc) {
+    if (profile.onboarding_completed) {
       return NextResponse.json({ ok: true, already: true });
     }
 
     // 4) 完了フラグを立てる
     const { error: markErr } = await supabaseServer
       .from("profiles")
-      .update({ onboarding_cc: true })
+      .update({ onboarding_completed: true })
       .eq("id", user.id) ;
 
     if (markErr) {

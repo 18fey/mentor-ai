@@ -44,7 +44,8 @@ const META_COST: Record<FeatureKey, number> = {
   ai_training: 1,
   case_generate: 1,
   fermi_generate: 1,
-  es_draft: 0
+  es_draft: 1,
+  
 };
 
 function monthStartISO(now = new Date()) {

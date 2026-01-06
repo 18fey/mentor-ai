@@ -793,7 +793,7 @@ export const GeneralInterviewAI: React.FC = () => {
             )}
 
             <p className="mt-2 text-[10px] text-slate-400">
-              ES添削AIでも、このデータを共有できます。
+            　　ESタブでも、このデータを共有できます。
             </p>
           </div>
         </aside>

@@ -26,7 +26,7 @@ export const FEATURE_META_COST: Record<FeatureId, number> = {
   enterprise_qgen: 2,
   career_gap_deep: 3,
   ai_training: 1,
-  es_draft : 1
+  es_draft: 1,
 };
 
 export type FeatureGateOk = {

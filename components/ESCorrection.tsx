@@ -38,7 +38,7 @@ const QUESTION_LABEL: Record<QuestionType, string> = {
 // usage/consume 側
 const USAGE_FEATURE_EVAL = "es_correction";
 // draft も同じ枠でカウントするなら同一でOK
-const USAGE_FEATURE_DRAFT = "es_correction";
+const USAGE_FEATURE_DRAFT = "es_draft";
 
 type StoryCard = {
   id: string;
@@ -111,6 +111,9 @@ export const ESCorrection: React.FC = () => {
   const [metaMessage, setMetaMessage] = useState<string | undefined>(undefined);
   const [pendingAction, setPendingAction] = useState<null | (() => Promise<void>)>(null);
 
+  // ✅ ① 追加：モーダル表示用ラベル（スコアリング/ドラフトで切替）
+  const [metaFeatureLabel, setMetaFeatureLabel] = useState<string>("スコアリング");
+
   const closeMetaModal = () => {
     setMetaModalOpen(false);
     setMetaTitle(undefined);
@@ -135,7 +138,10 @@ export const ESCorrection: React.FC = () => {
     featureLabel: string;
     onProceed: () => Promise<void>;
   }) => {
-    const { requiredMeta, onProceed } = params;
+    const { requiredMeta, onProceed, featureLabel } = params;
+
+    // ✅ ② 修正：呼び出し側のラベルをモーダルへ反映
+    setMetaFeatureLabel(featureLabel);
 
     const b = await fetchMyBalance();
     setMetaNeed(requiredMeta);
@@ -199,7 +205,8 @@ export const ESCorrection: React.FC = () => {
         const mapped: StoryCard[] = rows.map((row: any) => {
           let axes: string[] = [];
           if (Array.isArray(row.axes)) axes = row.axes.filter((v: any) => typeof v === "string");
-          else if (typeof row.axes === "string" && row.axes.length > 0) axes = row.axes.split(",").map((s: string) => s.trim());
+          else if (typeof row.axes === "string" && row.axes.length > 0)
+            axes = row.axes.split(",").map((s: string) => s.trim());
 
           return {
             id: row.id,
@@ -303,6 +310,9 @@ export const ESCorrection: React.FC = () => {
       // ✅ サーバで meta 不足 (402) が来たら purchase
       if (!res.ok) {
         if (res.status === 402) {
+          // ✅ ③ 修正：直purchaseルートでもラベルを切替
+          setMetaFeatureLabel("スコアリング（構成・ロジックチェック）");
+
           const requiredMeta = Number(data?.required ?? data?.requiredMeta ?? 1);
           const b =
             typeof data?.balance === "number" ? Number(data.balance) : await fetchMyBalance();
@@ -372,7 +382,7 @@ export const ESCorrection: React.FC = () => {
 
         await openMetaModalFor({
           requiredMeta,
-          featureLabel: "ES添削AI（構成・ロジックチェック）",
+          featureLabel: "スコアリング（構成・ロジックチェック）",
           onProceed: async () => {
             await evaluateCore();
           },
@@ -393,8 +403,8 @@ export const ESCorrection: React.FC = () => {
    AIドラフト生成（/api/es/draft が featureGate で 402 を返す想定）
   ------------------------------*/
   const generateDraftCore = async () => {
-    if (!selectedCardId) {
-      setErrorMessage("カードを1つ選択してください。");
+    if (!selectedCardId && text.trim().length < 30) {
+      setErrorMessage("カードを選ぶか、本文を30文字以上入力してください。");
       return;
     }
 
@@ -405,13 +415,22 @@ export const ESCorrection: React.FC = () => {
       const res = await fetch("/api/es/draft", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ storyCardId: selectedCardId }),
+        body: JSON.stringify({
+          storyCardId: selectedCardId ?? undefined,
+          text: selectedCardId ? undefined : text,
+          company,
+          qType,
+          limit,
+        }),
       });
 
       const data: any = await res.json().catch(() => ({}));
 
       if (!res.ok) {
         if (res.status === 402) {
+          // ✅ ④ 修正：直purchaseルートでもラベルを切替
+          setMetaFeatureLabel("AIドラフト生成（ES）");
+
           const requiredMeta = Number(data?.required ?? data?.requiredMeta ?? 1);
           const b =
             typeof data?.balance === "number" ? Number(data.balance) : await fetchMyBalance();
@@ -447,8 +466,8 @@ export const ESCorrection: React.FC = () => {
   };
 
   const handleGenerateDraft = async () => {
-    if (!selectedCardId) {
-      setErrorMessage("カードを1つ選択してください。");
+    if (!selectedCardId && text.trim().length < 30) {
+      setErrorMessage("カードを選ぶか、本文を30文字以上入力してください。");
       return;
     }
     if (isCheckingGate || draftLoading) return;
@@ -511,6 +530,9 @@ export const ESCorrection: React.FC = () => {
     );
   }
 
+  // ✅ ⑤ 追加：ドラフトボタンの「押せる条件」を1箇所に集約（見た目/disabled一致）
+  const canGenerateDraft = selectedCardId !== null || text.trim().length >= 30;
+
   return (
     <>
       <div className="flex h-full gap-6">
@@ -519,7 +541,9 @@ export const ESCorrection: React.FC = () => {
           {/* Header */}
           <section className="rounded-2xl border bg-white/80 p-4 shadow-sm">
             <h1 className="mb-1 text-sm font-semibold">ES添削AI（構成・ロジックチェック）</h1>
-            <p className="text-[11px] text-slate-600">ペーストしたESに対してAIが採点・改善ポイントを返します。</p>
+            <p className="text-[11px] text-slate-600">
+              ペーストしたESに対してAIが採点・改善ポイントを返します。
+            </p>
           </section>
 
           {/* メタ情報 */}
@@ -590,6 +614,21 @@ export const ESCorrection: React.FC = () => {
             />
 
             <div className="flex justify-end gap-2">
+              {/* ✅ AIドラフト生成（左） */}
+              <button
+                onClick={handleGenerateDraft}
+                disabled={!canGenerateDraft || draftLoading || isCheckingGate}
+                className={`rounded-full px-5 py-2 text-xs font-semibold ${
+                  // ✅ ⑥ 修正：見た目の判定も disabled と同じ条件にする
+                  !canGenerateDraft || draftLoading || isCheckingGate
+                    ? "cursor-not-allowed bg-slate-200"
+                    : "bg-indigo-500 text-white hover:bg-indigo-600"
+                }`}
+              >
+                {draftLoading ? "生成中…" : isCheckingGate ? "確認中…" : "ESドラフト生成"}
+              </button>
+
+              {/* ✅ ES評価（右） */}
               <button
                 onClick={handleEvaluate}
                 disabled={!text.trim() || isEvaluating || isCheckingGate}
@@ -599,7 +638,7 @@ export const ESCorrection: React.FC = () => {
                     : "bg-violet-500 text-white hover:bg-violet-600"
                 }`}
               >
-                {isEvaluating ? "評価中…" : isCheckingGate ? "確認中…" : "AIに添削してもらう"}
+                {isEvaluating ? "評価中…" : isCheckingGate ? "確認中…" : "スコアリング"}
               </button>
             </div>
 
@@ -692,25 +731,9 @@ export const ESCorrection: React.FC = () => {
             <section className="rounded-2xl border bg-indigo-50/80 p-4 text-[11px] shadow-sm">
               <h2 className="text-xs font-semibold text-indigo-800">AI 書き直しドラフト</h2>
 
-              <div
-                className={
-                  locked ? "rounded-xl bg-white p-3 opacity-70 blur-[1.5px]" : "rounded-xl bg-white p-3"
-                }
-              >
+              <div className="rounded-xl bg-white p-3">
                 <pre className="whitespace-pre-wrap">{aiDraft}</pre>
               </div>
-
-              {locked && (
-                <div className="mt-2 text-center">
-                  <button
-                    type="button"
-                    onClick={() => router.push("/pricing")}
-                    className="rounded-full bg-violet-500 px-4 py-2 text-[11px] text-white"
-                  >
-                    METAを購入して全文を見る
-                  </button>
-                </div>
-              )}
             </section>
           )}
         </div>
@@ -719,18 +742,6 @@ export const ESCorrection: React.FC = () => {
         <aside className="w-80 shrink-0 space-y-4">
           <div className="rounded-2xl border bg-sky-50/80 p-4 text-[11px] shadow-sm">
             <p className="mb-1 font-semibold text-sky-800">ストーリーカードからひな型を作る</p>
-
-            <button
-              onClick={handleGenerateDraft}
-              disabled={!selectedCardId || draftLoading || isCheckingGate}
-              className={`w-full rounded-full px-3 py-1.5 text-[10px] font-semibold ${
-                !selectedCardId || draftLoading || isCheckingGate
-                  ? "cursor-not-allowed bg-slate-200"
-                  : "bg-indigo-500 text-white"
-              }`}
-            >
-              {draftLoading ? "生成中…" : isCheckingGate ? "確認中…" : "AIドラフト生成"}
-            </button>
 
             {cardsLoading ? (
               <p className="mt-2">読み込み中…</p>
@@ -773,7 +784,8 @@ export const ESCorrection: React.FC = () => {
       <MetaConfirmModal
         open={metaModalOpen}
         onClose={closeMetaModal}
-        featureLabel="ES添削AI"
+        // ✅ ⑦ 修正：固定 "スコアリング" をやめて state を渡す
+        featureLabel={metaFeatureLabel}
         requiredMeta={metaNeed}
         balance={metaBalance}
         mode={metaMode}

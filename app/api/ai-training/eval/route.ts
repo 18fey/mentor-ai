@@ -13,8 +13,6 @@ type ScenarioKey = "consulting" | "finance" | "bizdev" | "backoffice" | "student
 type ModifierGrade = "A" | "B" | "C";
 type AiTypeKey = "sensory" | "overSpec" | "logical" | "dependent" | "strategic";
 
-type Step = 1 | 2 | 3 | 4 | 5;
-
 type LegacyScores = {
   clarity: number; // 1-5
   structure: number; // 1-5
@@ -44,6 +42,14 @@ type LegacyBody = {
   finalOutput?: string;
   durationSec?: number;
   version?: string;
+
+  // optional tracking (BtoB future)
+  org_id?: string | null;
+  department_id?: string | null;
+  task_id?: string | null;
+  task_variant_id?: string | null;
+  task_seed?: number | null; // int8想定（JS numberで持てる範囲のみ）
+  task_mode?: string | null;
 };
 
 type NewUiBody = {
@@ -54,11 +60,27 @@ type NewUiBody = {
   optional_notes?: string;
   time_spent_sec?: number;
   turn_count?: number;
+
+  // optional tracking (BtoB future)
+  org_id?: string | null;
+  department_id?: string | null;
+  task_id?: string | null;
+  task_variant_id?: string | null;
+  task_seed?: number | null;
+  task_mode?: string | null;
+
+  // optional AI meta (if UI sends it)
+  used_ai_provider?: string | null;
+  used_ai_model?: string | null;
+  used_ai_temp?: number | null;
+  used_ai_tools?: any | null;
+  system_prompt?: string | null;
+  used_ai_mode?: string | null;
 };
 
-// UI が期待してる返却形式
+// UIが期待してる返却形式（0-9）
 type AcsScores0to9 = {
-  goal_framing: number; // 0.0-9.0
+  goal_framing: number;
   constraint_design: number;
   structuring: number;
   evaluation: number;
@@ -94,18 +116,14 @@ const FEATURE_ID = "ai_training" as const;
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
-
 function round1(n: number) {
   return Math.round(n * 10) / 10;
 }
-
 function to0to9(from0to10: number) {
-  // 10点満点 → 9点満点へ縮尺
   return round1(clamp((from0to10 / 10) * 9, 0, 9));
 }
 
 function gradeFromTurnsOrLength(turns: number, totalLen: number): ModifierGrade {
-  // turnsが取れればそっち優先
   if (turns > 0) {
     if (turns <= 6) return "A";
     if (turns <= 10) return "B";
@@ -117,15 +135,8 @@ function gradeFromTurnsOrLength(turns: number, totalLen: number): ModifierGrade 
 }
 
 function applyModifiers(base: number, m: Modifiers) {
-  // ざっくり補正（必要なら後で調整）
-  // Compliance: A +0.2 / B +0.0 / C -0.3
-  const comp =
-    m.compliance === "A" ? 0.2 : m.compliance === "B" ? 0.0 : -0.3;
-
-  // Efficiency: A +0.1 / B +0.0 / C -0.2
-  const eff =
-    m.efficiency === "A" ? 0.1 : m.efficiency === "B" ? 0.0 : -0.2;
-
+  const comp = m.compliance === "A" ? 0.2 : m.compliance === "B" ? 0.0 : -0.3;
+  const eff = m.efficiency === "A" ? 0.1 : m.efficiency === "B" ? 0.0 : -0.2;
   return round1(clamp(base + comp + eff, 0, 9));
 }
 
@@ -182,8 +193,7 @@ function evaluateLegacy(answers: Record<number, string>): LegacyScores {
   else reproducibility = 5;
 
   let strategy = 1;
-  const hasSplit =
-    /AIに任せ|人間|自分が|役割分担/.test(a4) || /(①|②|③|④)/.test(a4);
+  const hasSplit = /AIに任せ|人間|自分が|役割分担/.test(a4) || /(①|②|③|④)/.test(a4);
   const mentionsReason = /(理由|から|ため)/.test(a4);
 
   if (len4 < 20) strategy = 1;
@@ -240,13 +250,8 @@ function scoreCore10(answers: Record<number, string>, legacy: LegacyScores): Cor
   return { goal_framing, constraint_design, structuring, evaluation, refinement, output_quality };
 }
 
-function scoreModifiers(body: LegacyBody): Modifiers {
-  const text =
-    JSON.stringify(body.answers) +
-    " " +
-    (body.finalOutput ?? "") +
-    " " +
-    (body.promptText ?? "");
+function scoreModifiers(answers: Record<number, string>, dialogLen: number): Modifiers {
+  const text = Object.values(answers ?? {}).join("\n");
 
   const compliance: ModifierGrade =
     /(社外秘|個人情報|機密|守秘|NDA|断定しない|仮説|前提|注意書き|免責)/.test(text)
@@ -255,9 +260,8 @@ function scoreModifiers(body: LegacyBody): Modifiers {
       ? "B"
       : "C";
 
-  const turns = body.dialog?.length ?? 0;
-  const totalLen = Object.values(body.answers ?? {}).join("\n").length;
-  const efficiency: ModifierGrade = gradeFromTurnsOrLength(turns, totalLen);
+  const totalLen = text.length;
+  const efficiency: ModifierGrade = gradeFromTurnsOrLength(dialogLen, totalLen);
 
   return { compliance, efficiency };
 }
@@ -265,49 +269,65 @@ function scoreModifiers(body: LegacyBody): Modifiers {
 // =====================
 // Body normalization (旧/新両対応)
 // =====================
-function normalizeBody(raw: any): LegacyBody | null {
+function normalizeBody(raw: any): { body: LegacyBody; aiMeta: Partial<NewUiBody> } | null {
   // 旧形式
   if (raw?.scenario && raw?.answers) {
-    return raw as LegacyBody;
+    const b = raw as LegacyBody;
+    return { body: b, aiMeta: {} };
   }
 
   // 新UI形式
   if (raw?.scenario_key && raw?.user_prompt != null) {
     const b = raw as NewUiBody;
 
-    // 新UIは step が 3つなので、heuristic用に 4/5 を補う
-    return {
+    // 新UIは step が3つ寄りなので、heuristic用に 4/5 を補う
+    const body: LegacyBody = {
       scenario: b.scenario_key,
       answers: {
         1: b.user_prompt ?? "",
         2: b.dialogue_log ?? "",
         3: b.final_output ?? "",
         4: b.optional_notes ?? "",
-        5: b.final_output ?? "", // v1: 最終成果物を “改善後” とみなして流用
+        5: b.final_output ?? "",
       },
       promptText: b.user_prompt ?? "",
       finalOutput: b.final_output ?? "",
       durationSec: b.time_spent_sec ?? undefined,
       version: "v1-ui",
-      // dialog_json を入れたいなら、ここで dialogue_log を分解してもOK（今はnullでOK）
+      org_id: b.org_id ?? null,
+      department_id: b.department_id ?? null,
+      task_id: b.task_id ?? null,
+      task_variant_id: b.task_variant_id ?? null,
+      task_seed: b.task_seed ?? null,
+      task_mode: b.task_mode ?? null,
     };
+
+    const aiMeta: Partial<NewUiBody> = {
+      used_ai_provider: b.used_ai_provider ?? null,
+      used_ai_model: b.used_ai_model ?? null,
+      used_ai_temp: b.used_ai_temp ?? null,
+      used_ai_tools: b.used_ai_tools ?? null,
+      system_prompt: b.system_prompt ?? null,
+      used_ai_mode: b.used_ai_mode ?? null,
+    };
+
+    return { body, aiMeta };
   }
 
   return null;
 }
 
 // =====================
-// Evidence / diagnosis / flags (simple)
+// Evidence / diagnosis / flags
 // =====================
 function buildFlags(text: string, aiType: AiTypeKey) {
   const pii_or_secret_risk = /(住所|電話|メール|口座|顧客名|社外秘|機密|NDA)/.test(text);
   const hallucination_risk = /(断定|必ず|確実|絶対)/.test(text) && /(出典|参照|ソース)/.test(text) === false;
   const overdelegation_risk = aiType === "dependent" || /(丸投げ|全部AI)/.test(text);
-
   return { pii_or_secret_risk, hallucination_risk, overdelegation_risk };
 }
 
-function buildEvidence(legacy: LegacyScores, core10: Core10, modifiers: Modifiers) {
+function buildEvidence(core10: Core10, modifiers: Modifiers) {
   const positive: string[] = [];
   const risk: string[] = [];
 
@@ -316,7 +336,7 @@ function buildEvidence(legacy: LegacyScores, core10: Core10, modifiers: Modifier
   if (core10.structuring >= 7) positive.push("構造化（箇条書き/テンプレ）で収束しやすい。");
 
   if (modifiers.compliance === "C") risk.push("前提・注意書きが薄く、断定や漏洩リスクが上がりやすい。");
-  if (modifiers.efficiency === "C") risk.push("往復が増えやすい書き方。最初の制約と出力形式を固定すると良い。");
+  if (modifiers.efficiency === "C") risk.push("往復が増えやすい。最初に出力形式と制約を固定すると良い。");
   if (core10.output_quality <= 4) risk.push("最終成果物の“そのまま使える度”が弱い（結論/要点/次アクション不足）。");
 
   return { positive: positive.slice(0, 5), risk: risk.slice(0, 5) };
@@ -339,8 +359,8 @@ function buildDiagnosis(scores0to9: AcsScores0to9, aiType: AiTypeKey) {
   if (scores0to9.iterative_refinement >= 7.0) strengths.push("修正指示で質を上げられる");
   else gaps.push("修正は“差分指示（ここをこう）”で短く行う");
 
-  next.push("最初のプロンプトに「前提/禁止/出力テンプレ」を必ずセットで入れる");
-  next.push("1回目のAI出力に対して「不足3点→差分修正」で2往復以内に収束させる");
+  next.push("最初のプロンプトに「前提/禁止/出力テンプレ」をセットで入れる");
+  next.push("1回目の出力に対し「不足3点→差分修正」で2往復以内に収束させる");
   next.push("最終成果物に「リスク/前提/チェック観点」を1文だけ足してComplianceを上げる");
 
   const one_liner =
@@ -367,7 +387,6 @@ function buildDiagnosis(scores0to9: AcsScores0to9, aiType: AiTypeKey) {
 // =====================
 export async function POST(req: Request) {
   try {
-    // ✅ feature gate + consume meta if needed
     const gate = await requireFeatureOrConsumeMeta(FEATURE_ID as any);
     if (!gate.ok) {
       return NextResponse.json(
@@ -377,19 +396,21 @@ export async function POST(req: Request) {
     }
 
     const raw = await req.json().catch(() => ({}));
-    const body = normalizeBody(raw);
-
-    if (!body?.scenario || !body?.answers) {
+    const normalized = normalizeBody(raw);
+    if (!normalized?.body?.scenario || !normalized.body.answers) {
       return NextResponse.json({ ok: false, error: "INVALID_BODY" }, { status: 400 });
     }
+
+    const { body, aiMeta } = normalized;
 
     // score
     const legacy = evaluateLegacy(body.answers);
     const aiType = detectAiType(body.answers, legacy);
     const core10 = scoreCore10(body.answers, legacy);
-    const modifiers = scoreModifiers(body);
 
-    // to UI scores (0-9)
+    const dialogLen = body.dialog?.length ?? 0;
+    const modifiers = scoreModifiers(body.answers, dialogLen);
+
     const scores0to9: AcsScores0to9 = {
       goal_framing: to0to9(core10.goal_framing),
       constraint_design: to0to9(core10.constraint_design),
@@ -407,8 +428,7 @@ export async function POST(req: Request) {
         scores0to9.structuring +
         scores0to9.evaluation +
         scores0to9.iterative_refinement +
-        scores0to9.final_output_quality) /
-      6;
+        scores0to9.final_output_quality) / 6;
 
     scores0to9.base_acs = round1(clamp(base, 0, 9));
     scores0to9.final_acs = applyModifiers(scores0to9.base_acs, modifiers);
@@ -421,7 +441,7 @@ export async function POST(req: Request) {
       (body.finalOutput ?? "");
 
     const flags = buildFlags(allText, aiType);
-    const evidence = buildEvidence(legacy, core10, modifiers);
+    const evidence = buildEvidence(core10, modifiers);
     const diagnosis = buildDiagnosis(scores0to9, aiType);
 
     const result: AcsResult = {
@@ -437,7 +457,7 @@ export async function POST(req: Request) {
     const supabase = makeSupabaseAdmin();
     const authUserId = gate.authUserId;
 
-    const insertPayload = {
+    const insertPayload: any = {
       auth_user_id: authUserId,
       scenario: body.scenario,
       version: body.version ?? "v1",
@@ -446,23 +466,32 @@ export async function POST(req: Request) {
       dialog_json: body.dialog ?? null,
       final_output: body.finalOutput ?? null,
       user_notes: body.answers?.[4] ?? null,
-      scores_json: {
-        legacy,
-        core10,
-        scores0to9,
-      },
+      scores_json: { legacy, core10, scores0to9 },
       modifiers_json: modifiers,
       ai_type: aiType,
       eval_method: "heuristic",
       eval_model: null,
       eval_trace: null,
+
+      // BtoB future axes (nullable)
+      org_id: body.org_id ?? null,
+      department_id: body.department_id ?? null,
+      task_id: body.task_id ?? null,
+      task_variant_id: body.task_variant_id ?? null,
+      task_seed: body.task_seed ?? null,
+      task_mode: body.task_mode ?? null,
+
+      // optional AI meta (nullable)
+      used_ai_provider: (aiMeta as any).used_ai_provider ?? null,
+      used_ai_model: (aiMeta as any).used_ai_model ?? null,
+      used_ai_temp: (aiMeta as any).used_ai_temp ?? null,
+      used_ai_tools: (aiMeta as any).used_ai_tools ?? null,
+      system_prompt: (aiMeta as any).system_prompt ?? null,
+      used_ai_mode: (aiMeta as any).used_ai_mode ?? null,
     };
 
     const { error: dbErr } = await supabase.from("acs_attempts").insert(insertPayload);
-    if (dbErr) {
-      // DB失敗してもUIは返したい（体験優先）
-      console.error("acs_attempts insert error:", dbErr);
-    }
+    if (dbErr) console.error("acs_attempts insert error:", dbErr);
 
     return NextResponse.json(result, { status: 200 });
   } catch (e: any) {

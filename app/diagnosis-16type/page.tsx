@@ -1050,7 +1050,7 @@ function ResultSection({
         <div className="mb-2 flex items-center justify-between">
           <div className="flex flex-col gap-0.5">
             <p className="text-[11px] font-semibold text-slate-800">
-              志望業界とのフィット感（ライト版）
+              志望業界とのフィット感を見てみよう
             </p>
             <p className="text-[10px] text-slate-500">
               あなたの16タイプと、興味のありそうな業界との「ざっくりフィット」を可視化します。

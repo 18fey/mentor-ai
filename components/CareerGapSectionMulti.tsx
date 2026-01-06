@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { INDUSTRIES, IndustryId, ThinkingTypeId } from "@/lib/careerFitMap";
 import { CareerGapResult } from "@/components/CareerGapResult";
+import { MetaConfirmModal } from "@/components/MetaConfirmModal";
 
 type Props = {
   thinkingTypeId: ThinkingTypeId;
@@ -12,31 +13,10 @@ type Props = {
 };
 
 type Mode = "basic" | "deep";
-
-type PendingPayload = {
-  thinkingTypeId: string;
-  thinkingTypeNameJa: string;
-  thinkingTypeNameEn: string;
-  typeDescription: string;
-  desiredIndustryIds: IndustryId[];
-  userReason: string;
-  userExperienceSummary: string;
-  mode: Mode;
-};
-
-const PENDING_KEY = "mentorai:career_gap_pending_v1";
+type SavedCareerGapMode = "lite" | "deep";
 
 function uniqIndustries(ids: IndustryId[]) {
   return Array.from(new Set(ids));
-}
-
-function safeParse<T>(raw: string | null): T | null {
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
 }
 
 export const CareerGapSectionMulti: React.FC<Props> = ({
@@ -56,10 +36,14 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
   const [resultMarkdown, setResultMarkdown] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
 
-  // Deep導線
-  const [deepIntent, setDeepIntent] = useState(false); // UI上で「Deepをやりたい」状態
-  const [upgradeOpen, setUpgradeOpen] = useState(false);
-  const [upgradeMessage, setUpgradeMessage] = useState<string>("");
+  // Deep導線（比較UIを有効化するだけ）
+  const [deepIntent, setDeepIntent] = useState(false);
+
+  // ✅ Meta消費確認モーダル
+  const [metaConfirmOpen, setMetaConfirmOpen] = useState(false);
+
+  // ✅ last結果読み込み状態
+  const [hydrating, setHydrating] = useState(true);
 
   const select2Ref = useRef<HTMLSelectElement | null>(null);
   const select3Ref = useRef<HTMLSelectElement | null>(null);
@@ -72,31 +56,63 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
   }, [industry1]);
 
   const deepIndustryIds = useMemo(() => {
-    const raw = [
-      industry1 || null,
-      industry2 || null,
-      industry3 || null,
-    ].filter(Boolean) as IndustryId[];
+    const raw = [industry1 || null, industry2 || null, industry3 || null].filter(
+      Boolean
+    ) as IndustryId[];
     return uniqIndustries(raw);
   }, [industry1, industry2, industry3]);
 
   const canRunBasic = basicIndustryIds.length === 1 && !loadingMode;
   const canRunDeep = industry1 !== "" && !loadingMode;
 
-  // ---- UX: Deep押下で業界2へフォーカス（業界2/3が有効になる）
   const armDeep = () => {
     setDeepIntent(true);
     setError(null);
-
-    // 先に業界1が入ってるなら業界2へ
-    setTimeout(() => {
-      if (select2Ref.current) {
-        select2Ref.current.focus();
-      }
-    }, 0);
+    setTimeout(() => select2Ref.current?.focus(), 0);
   };
 
-  // ---- 実行（/api/career-gap に統一）
+  // ✅ 初回：profiles から last結果を持ってくる（リロードでも維持）
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadLast = async () => {
+      setHydrating(true);
+      try {
+        const res = await fetch("/api/career-gap/last", { method: "GET" });
+        if (!res.ok) return;
+
+        const data = (await res.json()) as {
+          ok?: boolean;
+          mode?: SavedCareerGapMode | null;
+          result?: string | null;
+          updatedAt?: string | null;
+        };
+
+        if (cancelled) return;
+
+        const last = (data?.result ?? "") as string;
+        if (last) {
+          setResultMarkdown(last);
+
+          // 任意：Deepの結果が最後なら、比較UIも解放しておく（診断と同じ“状態維持”感）
+          if (data?.mode === "deep") {
+            setDeepIntent(true);
+          }
+        }
+      } catch (e) {
+        // ここは落ちてもOK（UX優先）
+        console.error(e);
+      } finally {
+        if (!cancelled) setHydrating(false);
+      }
+    };
+
+    loadLast();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const run = async (mode: Mode) => {
     setLoadingMode(mode);
     setError(null);
@@ -110,13 +126,12 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
       const desiredIndustryIds =
         mode === "deep" ? deepIndustryIds.slice(0, 3) : basicIndustryIds;
 
-      // basicは「1業界固定」
       if (mode === "basic" && desiredIndustryIds.length !== 1) {
         setError("ライト版は志望業界は1つだけ選択してください。");
         return;
       }
 
-      const payload: PendingPayload = {
+      const payload = {
         thinkingTypeId,
         thinkingTypeNameJa,
         thinkingTypeNameEn,
@@ -133,29 +148,18 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
         body: JSON.stringify(payload),
       });
 
-      // 401: ログイン
       if (res.status === 401) {
         setError("レポートを見るにはログインが必要です。");
         return;
       }
 
-      // 402: 課金モーダル
+      // 402: Meta不足（アップグレードなし）
       if (res.status === 402) {
         const data = await res.json().catch(() => null);
-
-        // Deepを押してる＝比較価値が見えてる状態なので、モーダルで気持ちよく課金へ
-        setUpgradeMessage(
+        setError(
           data?.message ||
-            data?.error ||
-            "Deep版（最大3業界比較）は Meta または Pro プランで利用できます。"
+            "METAが不足しています。METAを購入してから再度お試しください。"
         );
-        setUpgradeOpen(true);
-
-        // 購入後に戻ってきたら自動再実行できるように保存
-        try {
-          localStorage.setItem(PENDING_KEY, JSON.stringify(payload));
-        } catch {}
-
         return;
       }
 
@@ -167,9 +171,11 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
       const data = await res.json();
       setResultMarkdown(data.result ?? "");
 
-      // 結果へスクロール（気持ちよさ）
       setTimeout(() => {
-        resultAnchorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        resultAnchorRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
       }, 50);
     } catch (e) {
       console.error(e);
@@ -178,38 +184,6 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
       setLoadingMode(null);
     }
   };
-
-  // ---- 購入後の復帰: ?run=deep なら、保存してたpayloadで自動再実行
-  useEffect(() => {
-    // SSR安全
-    const params = new URLSearchParams(window.location.search);
-    const shouldRunDeep = params.get("run") === "deep";
-    if (!shouldRunDeep) return;
-
-    const pending = safeParse<PendingPayload>(localStorage.getItem(PENDING_KEY));
-    if (!pending) return;
-
-    // このページのタイプが違うならやめる（誤爆防止）
-    if (pending.thinkingTypeId !== thinkingTypeId) return;
-
-    // UIへ復元
-    setDeepIntent(true);
-    setIndustry1((pending.desiredIndustryIds?.[0] as IndustryId) ?? "");
-    setIndustry2((pending.desiredIndustryIds?.[1] as IndustryId) ?? "");
-    setIndustry3((pending.desiredIndustryIds?.[2] as IndustryId) ?? "");
-    setUserReason(pending.userReason ?? "");
-    setUserExperienceSummary(pending.userExperienceSummary ?? "");
-
-    // 自動再実行
-    setTimeout(() => {
-      run("deep");
-      // 成功/失敗に関係なく pending は消す（無限ループ防止）
-      try {
-        localStorage.removeItem(PENDING_KEY);
-      } catch {}
-    }, 200);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [thinkingTypeId]);
 
   const locked = !deepIntent;
 
@@ -235,7 +209,7 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
           <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-sky-600 text-[10px] font-semibold text-white">
             i
           </span>
-          <span>ライト版は無料 / Deep版は Meta または Pro</span>
+          <span>ライト版は無料 / Deep版は META 消費</span>
         </div>
       </div>
 
@@ -296,6 +270,7 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
               />
             )}
           </div>
+
           {locked ? (
             <button
               type="button"
@@ -403,9 +378,7 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
         <div className="rounded-2xl border border-sky-100 bg-sky-50/70 p-4">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <p className="text-xs font-semibold text-slate-900">
-                Deep版（Meta / Pro）
-              </p>
+              <p className="text-xs font-semibold text-slate-900">Deep版（META）</p>
               <ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] leading-relaxed text-slate-600">
                 <li>最大3業界を比較（どこが勝てるかが一瞬で見える）</li>
                 <li>攻め/守りの戦い方、企業選びの軸、ギャップの埋め方</li>
@@ -424,24 +397,23 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
             type="button"
             disabled={!canRunDeep}
             onClick={() => {
-              // まだDeep意図がないなら先に有効化してフォーカス
               if (!deepIntent) {
                 armDeep();
                 return;
               }
-              run("deep");
+              setMetaConfirmOpen(true);
             }}
             className="mt-3 inline-flex w-full items-center justify-center rounded-full bg-sky-600 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-sky-700 disabled:opacity-60"
           >
             {loadingMode === "deep"
               ? "Deepレポート生成中…"
               : deepIntent
-              ? "Deepレポートを出す（有料）"
+              ? "Deepレポートを出す（META消費）"
               : "Deepで比較する（業界2/3を有効化）"}
           </button>
 
           <p className="mt-2 text-[11px] text-sky-700/80">
-            ※ Deepを押すと、業界2/3が選べるようになります
+            ※ Deepを押す前に「META消費の確認」が出ます
           </p>
         </div>
       </div>
@@ -450,68 +422,46 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
       {error && (
         <div className="mt-4 rounded-2xl border border-rose-100 bg-rose-50/70 px-3 py-2 text-xs text-rose-700">
           {error}
+          <div className="mt-2">
+            <a
+              href="/pricing#meta"
+              className="text-[11px] font-semibold text-rose-700 underline underline-offset-2"
+            >
+              METAを購入する →
+            </a>
+          </div>
         </div>
       )}
 
       {/* Result */}
       <div ref={resultAnchorRef} />
+      {hydrating && !resultMarkdown && (
+        <div className="mt-6 rounded-2xl border border-slate-100 bg-slate-50 px-3 py-3 text-xs text-slate-600">
+          前回の結果を読み込み中…
+        </div>
+      )}
+
       {resultMarkdown && (
         <div className="mt-6">
           <CareerGapResult markdown={resultMarkdown} />
         </div>
       )}
 
-      {/* 402 Upgrade Modal */}
-      {upgradeOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
-          <div className="w-full max-w-lg rounded-3xl border border-slate-100 bg-white p-5 shadow-xl">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-600">
-                  Deep is locked
-                </p>
-                <h4 className="mt-1 text-sm font-semibold text-slate-900">
-                  Deep版で「勝ち筋」と「次の打ち手」まで出します
-                </h4>
-                <p className="mt-2 text-xs leading-relaxed text-slate-600">
-                  {upgradeMessage}
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setUpgradeOpen(false)}
-                className="rounded-full px-3 py-1 text-xs font-semibold text-slate-500 hover:bg-slate-50"
-              >
-                閉じる
-              </button>
-            </div>
-
-            <div className="mt-4 grid gap-2 md:grid-cols-2">
-              <a
-                href="/pricing#meta"
-                className="inline-flex items-center justify-center rounded-full bg-sky-600 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-sky-700"
-              >
-                Metaで今すぐ使う
-              </a>
-
-              <a
-                href="/pricing"
-                className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50"
-              >
-                Proプランを見る
-              </a>
-            </div>
-
-            <div className="mt-3 rounded-2xl bg-slate-50 p-3">
-              <p className="text-[11px] leading-relaxed text-slate-600">
-                購入後にこのページへ戻ってきたら自動でDeepを再実行できます。
-                （リダイレクトに <span className="font-semibold">?run=deep</span> を付けるだけ）
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* ✅ Meta Confirm Modal */}
+      <MetaConfirmModal
+        open={metaConfirmOpen}
+        onClose={() => setMetaConfirmOpen(false)}
+        title="METAを消費してDeepレポートを実行しますか？"
+        message="Deep版はMETAを消費して生成します。よろしければ続行してください。"
+        requiredMeta={1} // ← career_gap_deep のコストに合わせて
+        mode="confirm"
+        confirmLabel="METAを使って続行"
+        cancelLabel="やめる"
+        onConfirm={() => {
+          setMetaConfirmOpen(false);
+          run("deep");
+        }}
+      />
     </section>
   );
 };

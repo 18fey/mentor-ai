@@ -17,8 +17,13 @@ type GrowthLog = {
 const SOURCE_LABEL: Record<string, { label: string; emoji: string }> = {
   diagnosis: { label: "AI思考タイプ診断", emoji: "🧠" },
   career_gap: { label: "キャリア相性レポート", emoji: "💼" },
-  es: { label: "ES添削", emoji: "📝" },
-  interview: { label: "AI面接", emoji: "🎤" },
+
+  // ES
+  es_correction: { label: "ES添削", emoji: "📝" },
+  es_draft: { label: "ESドラフト", emoji: "📝" },
+
+  // 面接
+  interview_10: { label: "一般面接（10問）", emoji: "🎤" },
 };
 
 function formatJpDate(iso: string) {
@@ -32,7 +37,7 @@ function formatJpDate(iso: string) {
 }
 
 export default async function GrowthPage() {
-  const supabase = await createServerSupabase(); // ★ ここだけ変更
+  const supabase = await createServerSupabase();
 
   const {
     data: { user },
@@ -41,9 +46,7 @@ export default async function GrowthPage() {
   if (!user) {
     return (
       <main className="mx-auto max-w-3xl px-4 py-12">
-        <h1 className="text-xl font-semibold text-slate-900">
-          Growth Inbox
-        </h1>
+        <h1 className="text-xl font-semibold text-slate-900">Growth Inbox</h1>
         <p className="mt-3 text-sm text-slate-600">
           成長ログを見るにはログインが必要です。
         </p>
@@ -75,11 +78,11 @@ export default async function GrowthPage() {
       <header className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-slate-900">
-            Growth Inbox
+            アクティビティ
           </h1>
           <p className="mt-1 text-sm text-slate-600">
             Mentor.AIでの診断・ギャップ分析・ES添削・面接など、
-            あなたの成長ログがここに時系列でたまっていきます。
+            あなたの利用履歴がここに時系列でたまっていきます。
           </p>
         </div>
       </header>
@@ -97,6 +100,7 @@ export default async function GrowthPage() {
               label: "その他",
               emoji: "✨",
             };
+
             const mode =
               typeof log.metadata?.mode === "string"
                 ? (log.metadata.mode as string)
@@ -114,6 +118,7 @@ export default async function GrowthPage() {
                       <p className="text-xs font-medium text-slate-500">
                         {meta.label}
                       </p>
+
                       {mode && (
                         <span
                           className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
@@ -126,15 +131,18 @@ export default async function GrowthPage() {
                         </span>
                       )}
                     </div>
+
                     <h2 className="mt-1 text-sm font-semibold text-slate-900">
                       {log.title}
                     </h2>
+
                     {log.description && (
                       <p className="mt-1 text-xs text-slate-600">
                         {log.description}
                       </p>
                     )}
                   </div>
+
                   <p className="mt-1 text-[11px] text-slate-400">
                     {formatJpDate(log.created_at)}
                   </p>

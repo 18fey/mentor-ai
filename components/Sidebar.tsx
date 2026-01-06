@@ -30,8 +30,8 @@ const sections: MenuSection[] = [
     items: [
       { label: "ケース面接AI", path: "/case" },
       { label: "フェルミ推定AI", path: "/fermi" },
-      { label: "一般面接AI（模擬）", path: "/general" },
-      { label: "ES添削AI", path: "/es" },
+      { label: "一般面接（模擬）", path: "/general" },
+      { label: "ES", path: "/es" },
       { label: "業界インサイト", path: "/industry" },
     ],
   },

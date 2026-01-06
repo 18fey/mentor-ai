@@ -189,7 +189,7 @@ const Settings: React.FC = () => {
           },
           {
             featureKey: "esCorrection",
-            label: "ES添削AI",
+            label: "スコアリング",
             description:
               "構成・ロジック・文字数フィットなどの自動チェック（詳細フィードバックは PRO）。",
             count: data.usage.esCorrection.count,
