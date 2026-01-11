@@ -19,6 +19,20 @@ function uniqIndustries(ids: IndustryId[]) {
   return Array.from(new Set(ids));
 }
 
+type GateLike = {
+  ok?: boolean;
+  status?: number;
+  error?: string;
+  message?: string;
+
+  feature?: string;
+  requiredMeta?: number;
+  balance?: number | null;
+
+  // あっても無くてもOK（互換）
+  cost?: number;
+};
+
 export const CareerGapSectionMulti: React.FC<Props> = ({
   thinkingTypeId,
   thinkingTypeNameJa,
@@ -41,9 +55,15 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
 
   // ✅ Meta消費確認モーダル
   const [metaConfirmOpen, setMetaConfirmOpen] = useState(false);
+  const [metaRequired, setMetaRequired] = useState<number>(1);
+  const [metaBalance, setMetaBalance] = useState<number | null>(null);
+  const [metaMessage, setMetaMessage] = useState<string>(
+    "Deep版はMETAを消費して生成します。よろしければ続行してください。"
+  );
 
-  // ✅ last結果読み込み状態
-  const [hydrating, setHydrating] = useState(true);
+  // ✅ 前回結果情報（任意表示用）
+  const [lastMode, setLastMode] = useState<SavedCareerGapMode | null>(null);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
 
   const select2Ref = useRef<HTMLSelectElement | null>(null);
   const select3Ref = useRef<HTMLSelectElement | null>(null);
@@ -71,45 +91,33 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
     setTimeout(() => select2Ref.current?.focus(), 0);
   };
 
-  // ✅ 初回：profiles から last結果を持ってくる（リロードでも維持）
+  // ✅ リロードしても「前回結果」を復元
   useEffect(() => {
-    let cancelled = false;
+    let mounted = true;
 
-    const loadLast = async () => {
-      setHydrating(true);
+    (async () => {
       try {
-        const res = await fetch("/api/career-gap/last", { method: "GET" });
+        const res = await fetch("/api/career-gap/last", { cache: "no-store" });
         if (!res.ok) return;
+        const data = await res.json().catch(() => null);
 
-        const data = (await res.json()) as {
-          ok?: boolean;
-          mode?: SavedCareerGapMode | null;
-          result?: string | null;
-          updatedAt?: string | null;
-        };
+        if (!mounted) return;
 
-        if (cancelled) return;
+        if (data?.ok && data?.result) {
+          setResultMarkdown(String(data.result));
+          setLastMode((data.mode ?? null) as SavedCareerGapMode | null);
+          setLastUpdatedAt((data.updatedAt ?? null) as string | null);
 
-        const last = (data?.result ?? "") as string;
-        if (last) {
-          setResultMarkdown(last);
-
-          // 任意：Deepの結果が最後なら、比較UIも解放しておく（診断と同じ“状態維持”感）
-          if (data?.mode === "deep") {
-            setDeepIntent(true);
-          }
+          // 前回が deep なら比較UIもONにしておく（任意）
+          if (data.mode === "deep") setDeepIntent(true);
         }
       } catch (e) {
-        // ここは落ちてもOK（UX優先）
-        console.error(e);
-      } finally {
-        if (!cancelled) setHydrating(false);
+        console.error("career-gap last load failed:", e);
       }
-    };
+    })();
 
-    loadLast();
     return () => {
-      cancelled = true;
+      mounted = false;
     };
   }, []);
 
@@ -153,13 +161,23 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
         return;
       }
 
-      // 402: Meta不足（アップグレードなし）
+      // ✅ 402: gateからの応答（need_meta / confirm_needed など）
       if (res.status === 402) {
-        const data = await res.json().catch(() => null);
-        setError(
-          data?.message ||
-            "METAが不足しています。METAを購入してから再度お試しください。"
+        const gate = (await res.json().catch(() => null)) as GateLike | null;
+
+        const required =
+          (gate?.requiredMeta ?? gate?.cost ?? 1) as number;
+        const balance =
+          (gate?.balance ?? null) as number | null;
+
+        // まずは「確認」モーダルを出す（他機能と同じUX）
+        setMetaRequired(required);
+        setMetaBalance(balance);
+        setMetaMessage(
+          gate?.message ||
+            "Deep版はMETAを消費して生成します。よろしければ続行してください。"
         );
+        setMetaConfirmOpen(true);
         return;
       }
 
@@ -170,6 +188,17 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
 
       const data = await res.json();
       setResultMarkdown(data.result ?? "");
+
+      // ✅ 反映：保存済みのlastも更新されてるはずなので軽く取り直す（任意）
+      try {
+        const last = await fetch("/api/career-gap/last", {
+          cache: "no-store",
+        }).then((r) => r.json());
+        if (last?.ok) {
+          setLastMode((last.mode ?? null) as SavedCareerGapMode | null);
+          setLastUpdatedAt((last.updatedAt ?? null) as string | null);
+        }
+      } catch {}
 
       setTimeout(() => {
         resultAnchorRef.current?.scrollIntoView({
@@ -203,6 +232,13 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
             <span className="font-semibold text-slate-700"> 最大3業界を比較</span>
             して、勝ち筋と3ヶ月アクションまで落とし込みます。
           </p>
+
+          {/* 任意：前回結果の情報 */}
+          {(lastMode || lastUpdatedAt) && (
+            <p className="mt-2 text-[11px] text-slate-400">
+              前回：{lastMode ?? "-"} / {lastUpdatedAt ?? "-"}
+            </p>
+          )}
         </div>
 
         <div className="flex items-center gap-2 rounded-2xl bg-sky-50 px-3 py-2 text-xs text-sky-700">
@@ -401,6 +437,10 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
                 armDeep();
                 return;
               }
+              // ✅ ここで MetaConfirmModal を開く（requiredMeta/balanceは一旦未確定なので仮値）
+              setMetaRequired(3);
+              setMetaBalance(null);
+              setMetaMessage("Deep版はMETAを消費して生成します。よろしければ続行してください。");
               setMetaConfirmOpen(true);
             }}
             className="mt-3 inline-flex w-full items-center justify-center rounded-full bg-sky-600 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-sky-700 disabled:opacity-60"
@@ -435,12 +475,6 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
 
       {/* Result */}
       <div ref={resultAnchorRef} />
-      {hydrating && !resultMarkdown && (
-        <div className="mt-6 rounded-2xl border border-slate-100 bg-slate-50 px-3 py-3 text-xs text-slate-600">
-          前回の結果を読み込み中…
-        </div>
-      )}
-
       {resultMarkdown && (
         <div className="mt-6">
           <CareerGapResult markdown={resultMarkdown} />
@@ -452,14 +486,19 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
         open={metaConfirmOpen}
         onClose={() => setMetaConfirmOpen(false)}
         title="METAを消費してDeepレポートを実行しますか？"
-        message="Deep版はMETAを消費して生成します。よろしければ続行してください。"
-        requiredMeta={1} // ← career_gap_deep のコストに合わせて
+        message={metaMessage}
+        requiredMeta={metaRequired}
+        balance={metaBalance}
         mode="confirm"
         confirmLabel="METAを使って続行"
         cancelLabel="やめる"
         onConfirm={() => {
           setMetaConfirmOpen(false);
           run("deep");
+        }}
+        onPurchase={() => {
+          // 既存の購入導線へ
+          window.location.href = "/pricing#meta";
         }}
       />
     </section>

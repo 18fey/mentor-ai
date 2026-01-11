@@ -53,11 +53,13 @@ export function AppHeader() {
       }
 
       // plan は profiles から
-      const { data: profile, error } = await supabase
-        .from("profiles")
-        .select("plan")
-        .eq("auth_user_id", authUser.id)
-        .maybeSingle<ProfileRow>();
+      // components/AppHeader.tsx （差分）
+const { data: profile, error } = await supabase
+  .from("profiles")
+  .select("plan")
+  .eq("id", authUser.id) // ✅ ここ
+  .maybeSingle<ProfileRow>();
+
 
       if (error) {
         console.error("profile_load_error:", error);

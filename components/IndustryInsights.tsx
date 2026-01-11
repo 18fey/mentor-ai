@@ -1,7 +1,7 @@
 // src/components/IndustryInsights.tsx
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { MetaConfirmModal } from "@/components/MetaConfirmModal";
 
@@ -183,6 +183,29 @@ const DEFAULT_SAMPLE: InsightResult = {
 - ここには、業界に関連する直近1〜2年のニュースと、その面接での語り方のヒントが表示されます。`,
 };
 
+type ApiErr = {
+  ok?: false;
+  error?: string;
+  message?: string;
+  requiredMeta?: number;
+  balance?: number | null;
+};
+
+/** ===== Idempotency / Recovery ===== */
+const FEATURE_ID = "industry_insight";
+const LS_KEY = `last_job:${FEATURE_ID}`;
+
+function newIdempotencyKey() {
+  // SafariでもOK（crypto.randomUUIDが使えない環境はまず無いが、念のためfallback）
+  // @ts-ignore
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 export default function IndustryInsights() {
   const router = useRouter();
 
@@ -204,10 +227,7 @@ export default function IndustryInsights() {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
 
-  // ✅ gate用（usage/meta）
-  const [isCheckingGate, setIsCheckingGate] = useState(false);
-
-  // ✅ 共通METAモーダル
+  // ✅ 共通METAモーダル（ケース面接と同じ）
   const [metaModalOpen, setMetaModalOpen] = useState(false);
   const [metaBalance, setMetaBalance] = useState<number | null>(null);
   const [metaNeed, setMetaNeed] = useState<number>(3);
@@ -215,6 +235,9 @@ export default function IndustryInsights() {
   const [metaTitle, setMetaTitle] = useState<string | undefined>(undefined);
   const [metaMessage, setMetaMessage] = useState<string | undefined>(undefined);
   const [pendingAction, setPendingAction] = useState<null | (() => Promise<void>)>(null);
+
+  // ✅ 復帰用：最後の key
+  const [lastJobKey, setLastJobKey] = useState<string | null>(null);
 
   const selectedGroup = useMemo(
     () => INDUSTRY_GROUPS.find((g) => g.id === selectedGroupId) ?? INDUSTRY_GROUPS[0],
@@ -240,46 +263,103 @@ export default function IndustryInsights() {
     }
   };
 
-  const openMetaModalFor = async (params: {
-    requiredMeta: number;
-    featureLabel: string;
-    onProceed: () => Promise<void>;
-  }) => {
-    const { requiredMeta, onProceed } = params;
-
-    const b = await fetchMyBalance();
-    setMetaNeed(requiredMeta);
-    setMetaBalance(typeof b === "number" ? b : metaBalance);
-
-    const mode: "confirm" | "purchase" =
-      typeof b === "number" && b < requiredMeta ? "purchase" : "confirm";
-
-    setMetaMode(mode);
-    setMetaTitle(undefined);
-    setMetaMessage(undefined);
-
-    setPendingAction(() => async () => {
-  await onProceed();
-  const bb = await fetchMyBalance();
-  if (typeof bb === "number") setMetaBalance(bb);
-});
-
-
-    setMetaModalOpen(true);
+  /** ✅ status API で復帰 */
+  const fetchJobStatus = async (key: string) => {
+    const url = `/api/generation-jobs/status?feature=${FEATURE_ID}&key=${encodeURIComponent(
+      key
+    )}`;
+    const res = await fetch(url, { method: "GET" });
+    const data: any = await res.json().catch(() => ({}));
+    if (!res.ok) return { ok: false as const, status: res.status, data };
+    return { ok: true as const, data };
   };
 
-  /* ------------------------------
-   core generate
-  ------------------------------*/
-  const generateCore = async () => {
+  /** ✅ ポーリング（エラー時の救済や、ユーザーが戻ってきたとき用） */
+  const pollJobUntilDone = async (key: string, maxTries = 20, intervalMs = 1000) => {
+    for (let i = 0; i < maxTries; i++) {
+      const st = await fetchJobStatus(key);
+      if (st.ok && st.data?.ok && st.data?.job) {
+        const job = st.data.job;
+        const status = String(job.status ?? "");
+        if (status === "succeeded" && job.result) {
+          setResult(job.result);
+          setHasGenerated(true);
+          return { done: true as const, status: "succeeded" as const };
+        }
+        if (status === "failed") {
+          return {
+            done: true as const,
+            status: "failed" as const,
+            message: job.error_message,
+          };
+        }
+      }
+      await sleep(intervalMs);
+    }
+    return { done: false as const };
+  };
+
+  /** ✅ 起動時：last_job があれば復帰 */
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (!raw) return;
+      const j = JSON.parse(raw);
+      if (!j?.key) return;
+
+      const key: string = j.key;
+      setLastJobKey(key);
+
+      (async () => {
+        const st = await fetchJobStatus(key);
+        if (st.ok && st.data?.ok && st.data?.job) {
+          const job = st.data.job;
+          const status = String(job.status ?? "");
+
+          if (status === "succeeded" && job.result) {
+            setResult(job.result);
+            setHasGenerated(true);
+            return;
+          }
+
+          // 走ってる途中なら軽くポーリング（長く待たない）
+          if (status === "running" || status === "queued") {
+            await pollJobUntilDone(key, 10, 800);
+          }
+        }
+      })();
+    } catch {
+      // ignore
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** ✅ 実行（keyを外から渡せる & confirm対応） */
+  const generateCore = async (opts?: { key?: string; metaConfirm?: boolean }) => {
+    if (isLoading) return;
+
     setIsLoading(true);
     setErrorMessage("");
     setHasGenerated(true);
 
+    const key = opts?.key ?? newIdempotencyKey();
+    setLastJobKey(key);
+
+    // ✅ 復帰用に保存（成功・失敗関係なく「最後に投げたジョブ」を記録）
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify({ key, createdAt: Date.now() }));
+    } catch {
+      // ignore
+    }
+
     try {
       const res = await fetch("/api/industry-insights", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Idempotency-Key": key,
+          ...(opts?.metaConfirm ? { "X-Meta-Confirm": "1" } : {}),
+        },
         body: JSON.stringify({
           industryGroup: selectedGroup.label,
           industrySub: selectedSub,
@@ -292,21 +372,48 @@ export default function IndustryInsights() {
       const data: any = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        // ✅ featureGate側でmeta不足など (402)
-        if (res.status === 402) {
-          const requiredMeta = Number(data?.required ?? data?.requiredMeta ?? 3);
+        // ✅ META不足（402）→ モーダル → confirm で「同じkey」で再実行
+        if (res.status === 402 && (data?.error === "need_meta" || data?.requiredMeta)) {
+          const requiredMeta = Number(data?.requiredMeta ?? data?.required ?? 3);
           const b =
-            typeof data?.balance === "number"
-              ? Number(data.balance)
-              : await fetchMyBalance();
+            typeof data?.balance === "number" ? Number(data.balance) : await fetchMyBalance();
 
           setMetaNeed(requiredMeta);
-          setMetaBalance(typeof b === "number" ? b : metaBalance);
-          setMetaMode("purchase");
-          setMetaTitle("METAが不足しています");
-          setMetaMessage(`この実行には META が ${requiredMeta} 必要です。購入して続行してください。`);
-          setMetaModalOpen(true);
+          setMetaBalance(typeof b === "number" ? b : null);
 
+          const mode: "confirm" | "purchase" =
+            typeof b === "number" && b < requiredMeta ? "purchase" : "confirm";
+
+          setMetaMode(mode);
+          setMetaTitle("METAが必要です");
+          setMetaMessage(`この実行には META が ${requiredMeta} 必要です。続行しますか？`);
+
+          // ✅ 重要：purchase のときは pendingAction を入れない（UI側の二重防衛）
+          if (mode === "confirm") {
+            setPendingAction(() => async () => {
+              // ✅ confirm後は「同じkey」で metaConfirm=true を付けて再実行
+              await generateCore({ key, metaConfirm: true });
+
+              // 残高更新
+              const bb = await fetchMyBalance();
+              if (typeof bb === "number") setMetaBalance(bb);
+            });
+          } else {
+            setPendingAction(null);
+          }
+
+          setMetaModalOpen(true);
+          setResult(null);
+          return;
+        }
+
+        // 無料枠終了（旧仕様互換があるなら）
+        if (res.status === 403 && data?.error === "limit_exceeded") {
+          setMetaMode("purchase");
+          setMetaTitle("無料枠終了");
+          setMetaMessage(data?.message ?? "今月の無料利用回数が上限に達しました。");
+          setMetaNeed(0);
+          setMetaModalOpen(true);
           setResult(null);
           return;
         }
@@ -315,68 +422,40 @@ export default function IndustryInsights() {
         throw new Error(data?.message ?? "サーバーエラーが発生しました");
       }
 
-      // 期待形に寄せる
       const normalized: InsightResult = {
         insight: String(data?.insight ?? ""),
         questions: String(data?.questions ?? ""),
         news: String(data?.news ?? ""),
       };
       setResult(normalized);
+
+      // ついでに残高更新（表示してるなら）
+      const bb = await fetchMyBalance();
+      if (typeof bb === "number") setMetaBalance(bb);
     } catch (err: any) {
       console.error(err);
       setErrorMessage(
-        err?.message ||
-          "インサイトの生成に失敗しました。時間をおいて再度お試しください。"
+        err?.message || "インサイトの生成に失敗しました。時間をおいて再度お試しください。"
       );
       setResult(null);
+
+      // ✅ 途中で成功してる可能性があるので、最後のkeyで軽く救済
+      if (key) {
+        try {
+          await pollJobUntilDone(key, 8, 900);
+        } catch {
+          // ignore
+        }
+      }
     } finally {
       setIsLoading(false);
     }
   };
 
-  /* ------------------------------
-   gate + generate
-  ------------------------------*/
+  // ✅ クリックは「本体APIを叩くだけ」
   const handleGenerate = async () => {
-    if (isCheckingGate || isLoading) return;
-
-    setIsCheckingGate(true);
-    setErrorMessage("");
-
-    try {
-      // ✅ ① 無料枠チェック（usage）
-      const usageRes = await fetch("/api/usage/consume", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ feature: "industry_insight" }),
-      });
-      const usageBody: any = await usageRes.json().catch(() => ({}));
-
-      if (usageRes.ok) {
-        await generateCore();
-        return;
-      }
-
-      if (usageRes.status === 402 && usageBody?.error === "need_meta") {
-        const requiredMeta = Number(usageBody.requiredMeta ?? 3);
-
-        await openMetaModalFor({
-          requiredMeta,
-          featureLabel: "業界別インサイト",
-          onProceed: async () => {
-            await generateCore();
-          },
-        });
-        return;
-      }
-
-      console.error("usage/consume unexpected", usageRes.status, usageBody);
-      setErrorMessage("実行条件の確認に失敗しました。時間をおいて再度お試しください。");
-    } catch {
-      setErrorMessage("ネットワークエラーが発生しました。");
-    } finally {
-      setIsCheckingGate(false);
-    }
+    if (isLoading) return;
+    await generateCore();
   };
 
   const getDisplayText = () => {
@@ -401,9 +480,7 @@ export default function IndustryInsights() {
       <div className="flex flex-col gap-6 w-full h-full">
         {/* タイトル */}
         <div>
-          <h1 className="text-2xl font-semibold text-slate-900 mb-1">
-            業界別インサイト
-          </h1>
+          <h1 className="text-2xl font-semibold text-slate-900 mb-1">業界別インサイト</h1>
           <p className="text-sm text-slate-500">
             建設・金融・商社・IT・コンサル・投資銀行 など、志望業界ごとの
             「構造」「想定質問」「直近ニュース」「企業の強み/弱み・将来性」を一度に整理できます。
@@ -423,14 +500,18 @@ export default function IndustryInsights() {
                 key={group.id}
                 onClick={() => {
                   setSelectedGroupId(group.id);
-                  setSelectedSub(group.subs[0]); // 大分類切り替え時は最初の小分類にリセット
+                  setSelectedSub(group.subs[0]);
                   setActiveTab("insight");
-                  // ※ result は残してもいいが、UX的に古い結果に見えるのでクリア推奨
                   setResult(null);
                   setHasGenerated(false);
+
+                  // ✅ グループ切替時：復帰キーを消しておく（邪魔になりがちなので安全）
+                  try {
+                    localStorage.removeItem(LS_KEY);
+                  } catch {}
+                  setLastJobKey(null);
                 }}
-                className={`px-3 py-1.5 rounded-full text-xs md:text-sm border transition
-                ${
+                className={`px-3 py-1.5 rounded-full text-xs md:text-sm border transition ${
                   selectedGroupId === group.id
                     ? "bg-sky-500 text-white border-sky-500"
                     : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
@@ -451,9 +532,13 @@ export default function IndustryInsights() {
                   setActiveTab("insight");
                   setResult(null);
                   setHasGenerated(false);
+
+                  try {
+                    localStorage.removeItem(LS_KEY);
+                  } catch {}
+                  setLastJobKey(null);
                 }}
-                className={`px-3 py-1.5 rounded-full text-xs border transition
-                ${
+                className={`px-3 py-1.5 rounded-full text-xs border transition ${
                   selectedSub === sub
                     ? "bg-sky-100 text-sky-800 border-sky-300"
                     : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
@@ -487,9 +572,7 @@ export default function IndustryInsights() {
           {/* 入力フォーム */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
             <div className="flex flex-col gap-1">
-              <label className="text-xs font-medium text-slate-600">
-                志望企業（任意）
-              </label>
+              <label className="text-xs font-medium text-slate-600">志望企業（任意）</label>
               <input
                 value={targetCompany}
                 onChange={(e) => setTargetCompany(e.target.value)}
@@ -532,20 +615,23 @@ export default function IndustryInsights() {
             <div className="flex flex-col items-end gap-1">
               <button
                 onClick={handleGenerate}
-                disabled={isLoading || isCheckingGate}
+                disabled={isLoading}
                 className="inline-flex items-center justify-center px-4 py-2 rounded-xl text-sm font-medium bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-60 disabled:cursor-not-allowed shadow-sm"
               >
-                {isLoading ? "生成中..." : isCheckingGate ? "確認中..." : "インサイトを生成する"}
+                {isLoading ? "生成中..." : "インサイトを生成する"}
               </button>
               <p className="text-[11px] text-slate-400">
                 ボタンを押すと、選んだ業界×企業×テーマに合わせて、インサイト・想定質問・直近ニュースがタブごとに表示されます。
               </p>
+
+              {/* ✅ デバッグしたい時だけ出してもOK（本番は消して） */}
+              {lastJobKey && (
+                <p className="text-[10px] text-slate-300 mt-1">job key: {lastJobKey.slice(0, 8)}…</p>
+              )}
             </div>
           </div>
 
-          {errorMessage && (
-            <p className="text-xs text-red-500 mt-1">{errorMessage}</p>
-          )}
+          {errorMessage && <p className="text-xs text-red-500 mt-1">{errorMessage}</p>}
         </div>
 
         {/* 結果表示 */}
@@ -579,11 +665,7 @@ export default function IndustryInsights() {
 
           {/* 本文エリア */}
           <div className="flex-1 overflow-auto">
-            {isLoading && (
-              <p className="text-sm text-slate-500">
-                インサイトを生成しています…
-              </p>
-            )}
+            {isLoading && <p className="text-sm text-slate-500">インサイトを生成しています…</p>}
 
             {!isLoading && (
               <div className="prose prose-sm max-w-none text-slate-800">
@@ -617,17 +699,21 @@ export default function IndustryInsights() {
         mode={metaMode}
         title={metaTitle}
         message={metaMessage}
-        onConfirm={async () => {
-        const fn = pendingAction;
-        closeMetaModal();
-        if (!fn) return;
-        try {
-        await fn();
-        } catch (e) {
-        console.error(e);
+        onConfirm={
+          metaMode === "confirm"
+            ? async () => {
+                const fn = pendingAction;
+                closeMetaModal();
+                if (!fn) return;
+                try {
+                  await fn();
+                } catch (e) {
+                  console.error(e);
+                  setErrorMessage("実行に失敗しました。時間をおいて再度お試しください。");
+                }
+              }
+            : undefined
         }
-      }}
-
         onPurchase={() => router.push("/pricing")}
       />
     </>

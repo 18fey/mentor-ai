@@ -1,7 +1,7 @@
 // app/profile/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createBrowserClient } from "@supabase/ssr";
 
@@ -20,8 +20,8 @@ function createClientSupabase() {
 // =========================
 
 type ProfileRow = {
-  id: string; // profiles のPK（uuid）
-  auth_user_id: string | null; // auth.users.id
+  id: string; // profiles のPK（= auth.users.id に統一）
+  auth_user_id: string | null; // 互換用（常に user.id に矯正する）
   display_name: string | null;
   affiliation: string | null;
   status: string | null; // 学生 / 社会人 など
@@ -32,9 +32,10 @@ type ProfileRow = {
   ai_type_key: string | null; // 16タイプ診断（無料ベース）
   cohort: string | null; // クラスデモ識別用
 
-  // ✅ ここが今回の肝：subscriptions / meta_wallet をやめて profiles に寄せる
-  plan?: "free" | "pro" | null;
-  meta_balance?: number | null;
+  plan?: "free" | "pro" | "elite" | null;
+
+  // ❌ meta_balance は使わない（source of truth が meta_lots/RPC）
+  // meta_balance?: number | null;
 };
 
 // =========================
@@ -43,7 +44,9 @@ type ProfileRow = {
 
 export default function ProfilePage() {
   const router = useRouter();
-  const supabase = createClientSupabase();
+
+  // ✅ 毎レンダーでclientを作り直さない
+  const supabase = useMemo(() => createClientSupabase(), []);
 
   const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [userId, setUserId] = useState<string | null>(null); // auth.users.id
@@ -63,7 +66,7 @@ export default function ProfilePage() {
 
         setUserId(user.id);
 
-        // ✅ profiles は auth_user_id で引く
+        // ✅ profiles は id = user.id で引く（唯一の正）
         const { data, error } = await supabase
           .from("profiles")
           .select("*")
@@ -75,24 +78,39 @@ export default function ProfilePage() {
         }
 
         if (data) {
-          setProfile(data);
+          // ✅ 念のため矯正（過去のnull事故を治す）
+          if (data.auth_user_id !== user.id) {
+            const { data: fixed, error: fixErr } = await supabase
+              .from("profiles")
+              .update({ auth_user_id: user.id })
+              .eq("id", user.id)
+              .select("*")
+              .single<ProfileRow>();
+
+            if (fixErr) console.error("profile auth_user_id fix error:", fixErr);
+            else setProfile(fixed);
+          } else {
+            setProfile(data);
+          }
         } else {
-          // ✅ プロファイルがまだない場合は作成（auth_user_id で作る）
-          const { data: inserted, error: insertError } = await supabase
+          // ✅ 無ければ作る：insertよりupsert（競合に強い）
+          const { data: upserted, error: upsertError } = await supabase
             .from("profiles")
-            .insert({
-              id: user.id,
-              auth_user_id: user.id,
-              plan: "free",
-              meta_balance: 0,
-            })
+            .upsert(
+              {
+                id: user.id,
+                auth_user_id: user.id, // null事故防止
+                plan: "free",
+              },
+              { onConflict: "id" }
+            )
             .select("*")
             .single<ProfileRow>();
 
-          if (insertError) {
-            console.error("profile insert error:", insertError);
+          if (upsertError) {
+            console.error("profile upsert error:", upsertError);
           } else {
-            setProfile(inserted);
+            setProfile(upserted);
           }
         }
       } catch (e) {
@@ -102,7 +120,7 @@ export default function ProfilePage() {
       }
     };
 
-    run();
+    void run();
   }, [supabase, router]);
 
   if (!authChecked) {
@@ -142,9 +160,6 @@ export default function ProfilePage() {
 
       {/* 無料の標準プロフィール */}
       <ProfileStandardSection profile={profile} onUpdated={setProfile} />
-
-      {/* Deepプロフィール（ロックUI付き） */}
-      <ProfileDeepSection />
     </div>
   );
 }
@@ -159,7 +174,7 @@ type ProfileStandardProps = {
 };
 
 function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
-  const supabase = createClientSupabase();
+  const supabase = useMemo(() => createClientSupabase(), []);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -194,10 +209,12 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
             .filter(Boolean)
         : [];
 
-    // ✅ 更新も auth_user_id で絞る
+    // ✅ 更新は id で絞る（唯一の正）
+    // ✅ ついでに auth_user_id を矯正しておく（null事故の治癒）
     const { data, error } = await supabase
       .from("profiles")
       .update({
+        auth_user_id: profile.id,
         display_name: form.display_name || null,
         affiliation: form.affiliation || null,
         status: form.status || null,
@@ -206,7 +223,7 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
         target_companies: targetCompaniesArray,
         onboarding_completed: true,
       })
-      .eq("auth_user_id", profile.auth_user_id)
+      .eq("id", profile.id)
       .select("*")
       .single<ProfileRow>();
 
@@ -238,9 +255,7 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
           <input
             className="border p-2 w-full text-sm rounded"
             value={form.display_name}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, display_name: e.target.value }))
-            }
+            onChange={(e) => setForm((f) => ({ ...f, display_name: e.target.value }))}
           />
         </div>
 
@@ -253,17 +268,13 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
             className="border p-2 w-full text-sm rounded"
             placeholder="例：慶應義塾大学 経済学部 / 社会人 など"
             value={form.affiliation}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, affiliation: e.target.value }))
-            }
+            onChange={(e) => setForm((f) => ({ ...f, affiliation: e.target.value }))}
           />
         </div>
 
         {/* ステータス */}
         <div>
-          <label className="text-xs text-slate-500 mb-1 block">
-            現在のステータス
-          </label>
+          <label className="text-xs text-slate-500 mb-1 block">現在のステータス</label>
           <div className="flex flex-wrap gap-2">
             {["大学生", "大学院生", "社会人", "転職検討中", "その他"].map((s) => (
               <button
@@ -304,9 +315,7 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
                   setForm((f) => ({
                     ...f,
                     purpose:
-                      f.purpose === p.key
-                        ? null
-                        : (p.key as ProfileRow["purpose"]),
+                      f.purpose === p.key ? null : (p.key as ProfileRow["purpose"]),
                   }))
                 }
                 className={`px-3 py-1 rounded-full border text-xs ${
@@ -330,9 +339,7 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
             className="border p-2 w-full text-sm rounded"
             placeholder="例：戦略コンサル, 投資銀行, PE/VC"
             value={form.interestsText}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, interestsText: e.target.value }))
-            }
+            onChange={(e) => setForm((f) => ({ ...f, interestsText: e.target.value }))}
           />
         </div>
 
@@ -358,9 +365,7 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
         <div className="mt-4 rounded-2xl bg-slate-50/80 p-3">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-xs font-semibold text-slate-800">
-                Mentor.AI 16タイプ診断
-              </p>
+              <p className="text-xs font-semibold text-slate-800">Mentor.AI 16タイプ診断</p>
               <p className="mt-1 text-[11px] text-slate-500">
                 あなたの「AIとの付き合い方」と「思考スタイル」を16タイプにマッピングします。
               </p>
@@ -372,6 +377,7 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
               診断ページを開く →
             </a>
           </div>
+
           <p className="mt-2 text-[11px] text-slate-600">
             診断ステータス：{" "}
             {has16Type ? (
@@ -384,6 +390,7 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
               </span>
             )}
           </p>
+
           <p className="mt-1 text-[11px] text-slate-500">
             ※ 診断自体は無料で何度でも受けられます。詳細な解説・企業マッチングは Deep
             機能で拡張予定です。
@@ -399,194 +406,8 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
         >
           {saving ? "保存中..." : "保存する"}
         </button>
-        {message && (
-          <p className="text-xs text-slate-500 whitespace-pre-line">{message}</p>
-        )}
+        {message && <p className="text-xs text-slate-500 whitespace-pre-line">{message}</p>}
       </div>
     </section>
-  );
-}
-
-// =========================
-// Deepプロフィールセクション（ロックUI）
-// ✅ subscriptions / meta_wallet を読まず profiles(plan, meta_balance) のみに統一
-// =========================
-
-function ProfileDeepSection() {
-  const supabase = createClientSupabase();
-
-  const [loading, setLoading] = useState(true);
-  const [isPro, setIsPro] = useState(false);
-  const [metaBalance, setMetaBalance] = useState(0);
-
-  useEffect(() => {
-    const run = async () => {
-      try {
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        if (!user) {
-          setLoading(false);
-          return;
-        }
-
-        const { data: pRow, error } = await supabase
-          .from("profiles")
-          .select("plan, meta_balance")
-          .eq("auth_user_id", user.id)
-          .maybeSingle();
-
-        if (error) console.error("deep profile load error:", error);
-
-        const plan = (pRow?.plan ?? "free") as "free" | "pro";
-        setIsPro(plan === "pro");
-        setMetaBalance(pRow?.meta_balance ?? 0);
-      } catch (e) {
-        console.error("deep profile load error:", e);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    run();
-  }, [supabase]);
-
-  if (loading) {
-    return (
-      <section className="rounded-2xl border bg-white/70 p-6">
-        Deepプロフィールを読み込み中...
-      </section>
-    );
-  }
-
-  return (
-    <section className="rounded-2xl border bg-white/70 p-6 space-y-4">
-      <h2 className="text-xl font-semibold">
-        🔒 あなた専用 Mentor.AI（Deepプロフィール）
-      </h2>
-      <p className="text-sm text-slate-600">
-        16タイプ診断・価値観・ストーリーカードをもとに、
-        あなた専用のMentor.AIモデル「Your Model」を生成する有料機能です。
-        <br />
-        無料版の診断結果に加えて、より深い自己理解・志望業界／企業との詳細マッチング・
-        面接／ESでの「戦い方」の設計までをサポートします。
-      </p>
-
-      <LockBox
-        isPro={isPro}
-        metaBalance={metaBalance}
-        requiredMeta={500} // Deepプロフィール解放に必要なMeta量（仮）
-        onUseMeta={() => {
-          // TODO: Meta消費API（/api/meta/use → RPC consume_meta_fifo）に接続
-          alert("Meta消費APIをここにつなぐ予定です。");
-        }}
-        onUpgradePlan={() => {
-          window.location.href = "/plans";
-        }}
-      >
-        <p className="text-xs text-slate-600">
-          ※ Proプランでは Meta消費なしで常に利用できます。Metaで一時解放も可能です。
-        </p>
-      </LockBox>
-    </section>
-  );
-}
-
-// =========================
-// 共通ロックコンポーネント
-// =========================
-
-type LockBoxProps = {
-  isPro: boolean;
-  metaBalance: number;
-  requiredMeta: number;
-  onUseMeta: () => void;
-  onUpgradePlan: () => void;
-  children: React.ReactNode;
-};
-
-function LockBox({
-  isPro,
-  metaBalance,
-  requiredMeta,
-  onUseMeta,
-  onUpgradePlan,
-  children,
-}: LockBoxProps) {
-  const hasEnoughMeta = metaBalance >= requiredMeta;
-
-  if (isPro) {
-    return (
-      <div className="rounded-xl border border-emerald-300 bg-emerald-50/70 p-4 space-y-3">
-        <div className="text-xs font-semibold text-emerald-700">
-          Proプランで解放済み
-        </div>
-        {children}
-      </div>
-    );
-  }
-
-  if (hasEnoughMeta) {
-    return (
-      <div className="rounded-xl border border-amber-300 bg-amber-50/70 p-4 space-y-3">
-        <div className="flex items-center justify-between text-xs text-amber-700">
-          <span>Metaを使ってこの機能を一時解放できます。</span>
-          <span>
-            残高: {metaBalance} Meta（必要: {requiredMeta} Meta）
-          </span>
-        </div>
-
-        <button
-          type="button"
-          onClick={onUseMeta}
-          className="px-3 py-1 rounded bg-amber-500 text-white text-xs font-semibold"
-        >
-          Metaを使って解放する
-        </button>
-
-        <div className="pt-2 border-t border-amber-100 text-xs text-slate-600">
-          Proプランなら、Meta消費なしでいつでも利用できます。
-          <button
-            type="button"
-            onClick={onUpgradePlan}
-            className="ml-2 underline"
-          >
-            プランを見る
-          </button>
-        </div>
-
-        {children}
-      </div>
-    );
-  }
-
-  return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3 opacity-80">
-      <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
-        <span>🔒 有料機能（Deepプロフィール）</span>
-      </div>
-      <p className="text-xs text-slate-600">
-        あなた専用のMentor.AIを作る「Deepプロフィール」です。
-        Proプラン、または Metaチャージで解放できます。
-      </p>
-
-      <div className="flex flex-wrap gap-2 pt-1">
-        <button
-          type="button"
-          onClick={onUpgradePlan}
-          className="px-3 py-1 rounded bg-sky-500 text-white text-xs font-semibold"
-        >
-          プランを見る
-        </button>
-        <a
-          href="/meta"
-          className="px-3 py-1 rounded border text-xs text-sky-600"
-        >
-          Metaをチャージする
-        </a>
-      </div>
-
-      {children}
-    </div>
   );
 }

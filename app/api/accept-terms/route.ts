@@ -31,9 +31,14 @@ async function createSupabaseFromCookies() {
   );
 }
 
-export async function POST(_req: NextRequest) {
+type AcceptTermsBody = {
+  // ✅ userId は受け取らない（偽装不可）
+  is_adult: boolean;     // チェックボックス or 生年月日判定結果
+  terms_version: string; // "2025-12-02" など（あなたが管理するバージョン）
+};
+
+export async function POST(req: NextRequest) {
   try {
-    // ✅ userId を body から受け取らない。セッションから確定
     const supabase = await createSupabaseFromCookies();
     const { data: auth, error: authErr } = await supabase.auth.getUser();
     const user = auth?.user ?? null;
@@ -45,21 +50,42 @@ export async function POST(_req: NextRequest) {
       );
     }
 
-    const authUserId = user.id;
+    // body validate（軽く）
+    let body: AcceptTermsBody | null = null;
+    try {
+      body = (await req.json()) as AcceptTermsBody;
+    } catch {
+      body = null;
+    }
 
-    // ✅ profiles は auth_user_id で特定（偽装不可）
+    if (!body || typeof body.is_adult !== "boolean" || !body.terms_version) {
+      return NextResponse.json(
+        { ok: false, error: "invalid_body" },
+        { status: 400 }
+      );
+    }
+
+    const nowIso = new Date().toISOString();
+
+    // ✅ profiles.id === auth.users.id ルールに完全準拠
+    // ✅ upsert で「空行が無い」事故でも OK
+    const payload = {
+      id: user.id,
+      agreed_terms: true,
+      agreed_terms_at: nowIso,
+      terms_version: body.terms_version,
+      is_adult: body.is_adult,
+      is_adult_at: nowIso,
+    };
+
     const { error } = await supabaseServer
       .from("profiles")
-      .update({
-        accepted_terms: true,
-        accepted_terms_at: new Date().toISOString(),
-      })
-      .eq("id", user.id) ;
+      .upsert(payload, { onConflict: "id" });
 
     if (error) {
-      console.error("[accept-terms] Supabase update error:", error);
+      console.error("[accept-terms] Supabase upsert error:", error);
       return NextResponse.json(
-        { ok: false, error: "supabase_update_failed" },
+        { ok: false, error: "supabase_upsert_failed" },
         { status: 500 }
       );
     }

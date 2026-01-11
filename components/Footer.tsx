@@ -26,6 +26,10 @@ export function Footer() {
           <Link href="/legal" className="hover:text-slate-800">
             特定商取引法に基づく表記
           </Link>
+          {/* ✅ 追加：返金ポリシー */}
+          <Link href="/refund" className="hover:text-slate-800">
+            返金ポリシー（Metaコイン）
+          </Link>
         </div>
       </div>
     </footer>

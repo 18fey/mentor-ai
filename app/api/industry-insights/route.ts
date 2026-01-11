@@ -2,14 +2,22 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
-import { requireFeatureOrConsumeMeta } from "@/lib/payment/featureGate"; // ✅ interview-evalと同じ
+import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = "gpt-4.1-mini";
+
+// service role（Route内だけ）
+const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
 
 type Database = any;
+type FeatureId = "industry_insight";
 
 async function createSupabaseFromCookies() {
   const cookieStore = await cookies();
@@ -32,53 +40,53 @@ async function createSupabaseFromCookies() {
   );
 }
 
-type InsightResult = {
-  insight: string;
-  questions: string;
-  news: string;
-};
+type InsightResult = { insight: string; questions: string; news: string };
 
 function safeStr(v: unknown, maxLen: number) {
   if (typeof v !== "string") return "";
   return v.slice(0, maxLen);
 }
 
+function rid() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
 export async function POST(req: Request) {
+  const requestId = rid();
+
   try {
-    // ✅ まず gate（interview-evalと同じノリ）
-    // ここで無料枠 or META消費が確定する想定
-    const gate = await requireFeatureOrConsumeMeta("industry_insight"); // ✅ typo禁止
-
-    if (!gate.ok) {
-      // gateが {status:402, requiredMeta, balance...} などを返す設計ならこれでUIに届く
-      return NextResponse.json(
-        {
-          ok: false,
-          reason: gate.reason,
-          required: (gate as any).required ?? undefined,
-          requiredMeta: (gate as any).requiredMeta ?? undefined,
-          balance: (gate as any).balance ?? undefined,
-        },
-        { status: gate.status }
-      );
-    }
-
     if (!OPENAI_API_KEY) {
       return NextResponse.json(
-        { error: "OPENAI_API_KEY is not set" },
+        { ok: false, error: "server_config", message: "OPENAI_API_KEY is not set" },
         { status: 500 }
       );
     }
 
-    // ✅ auth（cookieセッションで確定）
     const supabase = await createSupabaseFromCookies();
     const { data: auth, error: authErr } = await supabase.auth.getUser();
     const user = auth?.user ?? null;
-
     if (authErr || !user?.id) {
-      return NextResponse.json({ error: "not_authenticated" }, { status: 401 });
+      return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
     }
     const authUserId = user.id;
+
+    // ✅ idempotency key（必須）
+    const idempotencyKey =
+      req.headers.get("x-idempotency-key") ||
+      req.headers.get("X-Idempotency-Key") ||
+      "";
+
+    if (!idempotencyKey) {
+      return NextResponse.json(
+        { ok: false, error: "bad_request", message: "idempotency key is required" },
+        { status: 400 }
+      );
+    }
+
+    // ✅ meta confirm（モーダル confirm 後だけ true で来る）
+    const metaConfirm =
+      req.headers.get("x-meta-confirm") === "1" ||
+      req.headers.get("X-Meta-Confirm") === "1";
 
     // ✅ 入力
     const body = (await req.json().catch(() => ({}))) as {
@@ -97,22 +105,156 @@ export async function POST(req: Request) {
 
     if (!industryGroup) {
       return NextResponse.json(
-        { error: "industryGroup is required" },
+        { ok: false, error: "bad_request", message: "industryGroup is required" },
         { status: 400 }
       );
     }
 
+    const feature: FeatureId = "industry_insight";
+
+    // =========================
+    // ✅ 0) generation_jobs upsert
+    // =========================
+    // 既に succeeded なら即返す（再実行しない）
+    const { data: existing, error: exErr } = await supabase
+      .from("generation_jobs")
+      .select("id, status, result")
+      .eq("auth_user_id", authUserId)
+      .eq("feature_id", feature)
+      .eq("idempotency_key", idempotencyKey)
+      .maybeSingle();
+
+    if (exErr) {
+      console.error(`[industry:${requestId}] job lookup error`, exErr);
+      return NextResponse.json({ ok: false, error: "db_error" }, { status: 500 });
+    }
+
+    if (existing?.status === "succeeded" && existing?.result) {
+      return NextResponse.json({ ok: true, ...existing.result, reused: true });
+    }
+
+    // なければ作成、あれば running に更新
+    const jobRequest = {
+      industryGroup,
+      industrySub,
+      targetCompany,
+      focusTopic,
+      includeNews,
+    };
+
+    const { data: upserted, error: upErr } = await supabase
+      .from("generation_jobs")
+      .upsert(
+        {
+          auth_user_id: authUserId,
+          feature_id: feature,
+          idempotency_key: idempotencyKey,
+          status: "running",
+          request: jobRequest,
+          error_code: null,
+          error_message: null,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "auth_user_id,feature_id,idempotency_key" }
+      )
+      .select("id, status")
+      .single();
+
+    if (upErr || !upserted?.id) {
+      console.error(`[industry:${requestId}] job upsert error`, upErr);
+      return NextResponse.json({ ok: false, error: "db_error" }, { status: 500 });
+    }
+    const jobId = upserted.id as string;
+
+    // =========================
+    // ✅ 1) usage/check（消費しない）
+    // =========================
+    const baseUrl = new URL(req.url).origin;
+    const cookieHeader = req.headers.get("cookie") ?? "";
+
+    const checkRes = await fetch(`${baseUrl}/api/usage/check`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookieHeader },
+      body: JSON.stringify({ feature: feature }),
+    });
+
+    const checkBody: any = await checkRes.json().catch(() => ({}));
+
+    if (!checkRes.ok) {
+      if (checkRes.status === 402 && checkBody?.error === "need_meta") {
+        const requiredMeta = Number(checkBody?.requiredMeta ?? 1);
+
+        // ✅ confirm 前は 402 を返して止める（課金はしない）
+        if (!metaConfirm) {
+          await supabase
+            .from("generation_jobs")
+            .update({
+              status: "blocked",
+              error_code: "need_meta",
+              error_message: "need_meta_before_confirm",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", jobId);
+
+          return NextResponse.json(
+            { ok: false, error: "need_meta", requiredMeta },
+            { status: 402 }
+          );
+        }
+        // ✅ confirm 後は続行（ただし後段で残高チェックを挟む）
+      } else if (checkRes.status === 401) {
+        return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
+      } else {
+        console.error(`[industry:${requestId}] usage/check unexpected`, checkRes.status, checkBody);
+        return NextResponse.json({ ok: false, error: "usage_error" }, { status: 500 });
+      }
+    }
+
+    const proceedMode: "unlimited" | "free" | "need_meta" =
+      checkBody?.mode ?? (metaConfirm ? "need_meta" : "free");
+
+    const requiredMeta = Number(checkBody?.requiredMeta ?? 2);
+
+    // =========================
+    // ✅ 1.5) confirm後の“最終防衛”：残高が足りないなら OpenAI を叩かない
+    // =========================
+    if (proceedMode === "need_meta" && metaConfirm) {
+      // ※ テーブル名/カラムはあなたの実DBに合わせて変更してOK
+      // 例: meta_balances(auth_user_id, balance)
+      const { data: mb, error: mbErr } = await supabaseAdmin
+        .from("meta_balances")
+        .select("balance")
+        .eq("auth_user_id", authUserId)
+        .maybeSingle();
+
+      const bal = Number(mb?.balance ?? 0);
+      if (mbErr || !Number.isFinite(bal) || bal < requiredMeta) {
+        await supabase
+          .from("generation_jobs")
+          .update({
+            status: "blocked",
+            error_code: "need_meta",
+            error_message: "insufficient_meta_after_confirm",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", jobId);
+
+        return NextResponse.json(
+          { ok: false, error: "need_meta", requiredMeta, balance: Number.isFinite(bal) ? bal : null },
+          { status: 402 }
+        );
+      }
+    }
+
+    // =========================
+    // ✅ 2) OpenAI
+    // =========================
     const industryLine = industrySub
       ? `対象業界: ${industryGroup} / ${industrySub}`
       : `対象業界: ${industryGroup}`;
 
-    const companyPart = targetCompany
-      ? `志望企業: ${targetCompany}`
-      : "志望企業: 特に指定なし";
-
-    const focusPart = focusTopic
-      ? `特に深掘りしたいテーマ: ${focusTopic}`
-      : "特に深掘りしたいテーマ: 特になし";
+    const companyPart = targetCompany ? `志望企業: ${targetCompany}` : "志望企業: 特に指定なし";
+    const focusPart = focusTopic ? `特に深掘りしたいテーマ: ${focusTopic}` : "特に深掘りしたいテーマ: 特になし";
 
     const newsPart = includeNews
       ? "直近1〜2年のニュース・トレンドも整理してください。"
@@ -133,7 +275,7 @@ JSON の形式は次の通りです：
   "news": "直近ニュース・トレンドと面接での語り方（Markdown 可）"
 }
 
-・コードブロック（\`\`\`json など）で囲まず、純粋な JSON テキストだけを出力してください。
+・コードブロックで囲まず、純粋な JSON テキストだけを出力してください。
 ・「insight」「questions」「news」の3フィールドは必ず含めてください。
 `.trim();
 
@@ -154,14 +296,14 @@ ${focusPart}
 ${newsPart}
 `.trim();
 
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: "gpt-4.1-mini",
+        model: OPENAI_MODEL,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: systemPrompt },
@@ -171,73 +313,141 @@ ${newsPart}
       }),
     });
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      console.error("OpenAI API error:", errText);
-      return NextResponse.json({ error: "OpenAI API error" }, { status: 500 });
+    if (!r.ok) {
+      const errText = await r.text().catch(() => "");
+      console.error(`[industry:${requestId}] openai error`, errText);
+
+      await supabase
+        .from("generation_jobs")
+        .update({
+          status: "failed",
+          error_code: "openai_error",
+          error_message: errText.slice(0, 4000),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
+
+      return NextResponse.json({ ok: false, error: "openai_error" }, { status: 500 });
     }
 
-    const json = await res.json();
-    const content: string | null = json.choices?.[0]?.message?.content ?? null;
-
+    const j = await r.json();
+    const content: string | null = j.choices?.[0]?.message?.content ?? null;
     if (!content) {
-      return NextResponse.json({ error: "Empty content from OpenAI" }, { status: 500 });
+      await supabase
+        .from("generation_jobs")
+        .update({
+          status: "failed",
+          error_code: "empty_content",
+          error_message: "OpenAI returned empty content",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
+
+      return NextResponse.json({ ok: false, error: "empty_content" }, { status: 500 });
     }
 
-    let parsed: Partial<InsightResult>;
+    let parsed: any;
     try {
       parsed = JSON.parse(content);
     } catch (e) {
-      console.error("JSON parse error:", e, content);
-      return NextResponse.json({ error: "JSON parse error" }, { status: 500 });
+      await supabase
+        .from("generation_jobs")
+        .update({
+          status: "failed",
+          error_code: "json_parse_error",
+          error_message: String(e).slice(0, 1000),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
+
+      return NextResponse.json({ ok: false, error: "json_parse_error" }, { status: 500 });
     }
 
     const result: InsightResult = {
-      insight: parsed.insight ?? "インサイト情報を取得できませんでした。",
-      questions: parsed.questions ?? "想定質問情報を取得できませんでした。",
-      news: parsed.news ?? "ニュース情報を取得できませんでした。",
+      insight: String(parsed?.insight ?? "インサイト情報を取得できませんでした。"),
+      questions: String(parsed?.questions ?? "想定質問情報を取得できませんでした。"),
+      news: String(parsed?.news ?? "ニュース情報を取得できませんでした。"),
     };
 
-    // ✅ ログ（いったん現状維持）
-    const nowIso = new Date().toISOString();
+    // =========================
+    // ✅ 3) 成功判定 = generation_jobs に result 保存できた
+    // =========================
+    const { error: saveErr } = await supabase
+      .from("generation_jobs")
+      .update({
+        status: "succeeded",
+        result,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", jobId);
 
-    // 1) usage_logs（※最終的には gate/usageに統一推奨）
-    try {
-      const { error } = await supabase.from("usage_logs").insert({
-        user_id: authUserId,
-        feature: "industry_insight",
-        used_at: nowIso,
-      });
-      if (error) console.error("usage_logs insert error (industry-insights):", error);
-    } catch (e) {
-      console.error("usage_logs insert crash (industry-insights):", e);
+    if (saveErr) {
+      console.error(`[industry:${requestId}] result save failed`, saveErr);
+      // ここで課金しない（＝事故回避）
+      return NextResponse.json({ ok: false, error: "result_save_failed" }, { status: 500 });
     }
 
-    // 2) growth_logs
+    // =========================
+    // ✅ 4) 成功後だけ課金（free: usage/log / meta: consume_meta_fifo）
+    // =========================
+    if (proceedMode === "free") {
+      await fetch(`${baseUrl}/api/usage/log`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookieHeader },
+        body: JSON.stringify({ feature: feature, jobId }),
+      }).catch(() => {});
+    } else if (proceedMode === "need_meta" && metaConfirm) {
+      const { error: consumeErr } = await supabaseAdmin.rpc("consume_meta_fifo", {
+        p_auth_user_id: authUserId,
+        p_cost: requiredMeta,
+      });
+
+      // ✅ ここが課金導線の肝：失敗したら結果を渡さず 402 で戻す
+      if (consumeErr) {
+        await supabase
+          .from("generation_jobs")
+          .update({
+            error_code: "need_meta",
+            error_message: `meta_charge_failed:${String(consumeErr.message ?? "").slice(0, 200)}`,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", jobId);
+
+        return NextResponse.json(
+          { ok: false, error: "need_meta", requiredMeta },
+          { status: 402 }
+        );
+      }
+    }
+
+    // =========================
+    // ✅ 5) 分析ログ（今のまま維持）
+    // =========================
+    const nowIso = new Date().toISOString();
+
     try {
-      const { error } = await supabase.from("growth_logs").insert({
+      await supabase.from("growth_logs").insert({
         user_id: authUserId,
         source: "industry_insight",
         title: `業界インサイト：${industryGroup}${industrySub ? ` / ${industrySub}` : ""}`,
         description: "業界構造・企業論点・想定質問・ニュース整理を生成しました。",
         metadata: {
           feature: "industry_insight",
+          jobId,
+          idempotencyKey,
           industryGroup,
           industrySub,
           targetCompany,
           focusTopic,
           includeNews,
+          proceedMode,
         },
         created_at: nowIso,
       });
-      if (error) console.error("growth_logs insert error (industry-insights):", error);
-    } catch (e) {
-      console.error("growth_logs insert crash (industry-insights):", e);
-    }
+    } catch {}
 
-    // 3) industry_research_logs
     try {
-      const { error } = await supabase.from("industry_research_logs").insert({
+      await supabase.from("industry_research_logs").insert({
         user_id: authUserId,
         industry_group: industryGroup,
         industry_sub: industrySub,
@@ -247,27 +457,19 @@ ${newsPart}
         result,
         created_at: nowIso,
       });
-      if (error) console.error("industry_research_logs insert error:", error);
-    } catch (e) {
-      console.error("industry_research_logs insert crash:", e);
-    }
+    } catch {}
 
-    return NextResponse.json({ ok: true, ...result });
+    return NextResponse.json({
+      ok: true,
+      ...result,
+      jobId,
+      idempotencyKey,
+    });
   } catch (error: any) {
-    // gateがthrowする実装にも備える（interview-evalが握りつぶしてるのを改善）
-    if (error?.status === 402 || error?.code === "NEED_META") {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "need_meta",
-          requiredMeta: error?.requiredMeta ?? error?.required ?? 3,
-          balance: error?.balance ?? null,
-        },
-        { status: 402 }
-      );
-    }
-
     console.error("Industry Insights API error:", error);
-    return NextResponse.json({ error: "インサイト生成に失敗しました" }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: "server_error", message: "インサイト生成に失敗しました" },
+      { status: 500 }
+    );
   }
 }

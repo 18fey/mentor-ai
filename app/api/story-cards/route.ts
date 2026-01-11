@@ -43,34 +43,9 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const authUserId = user.id;
+    // ✅ profileId = authUserId で確定（profiles.id統一）
+    const profileId = user.id;
 
-    // ✅ profiles を auth_user_id で引く（あなたの設計）
-    const { data: profile, error: profErr } = await supabase
-      .from("profiles")
-      .select("id")
-      .eq("auth_user_id", authUserId)
-      .maybeSingle();
-
-    if (profErr) {
-      console.error("profiles select error:", profErr);
-      return NextResponse.json(
-        { ok: false, error: "profile_fetch_failed" },
-        { status: 500 }
-      );
-    }
-
-    if (!profile?.id) {
-      // 作れてないなら、UI側で profile 作る導線が必要
-      return NextResponse.json(
-        { ok: true, storyCards: [], message: "profile が未作成です。" },
-        { status: 200 }
-      );
-    }
-
-    const profileId = profile.id;
-
-    // ✅ story_cards.user_id は「profile.id」が入ってる前提で取得
     const { data, error } = await supabase
       .from("story_cards")
       .select("*")

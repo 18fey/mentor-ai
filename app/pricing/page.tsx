@@ -10,6 +10,9 @@ export default function PricingPage() {
   const [loadingPack, setLoadingPack] = useState<MetaPack | null>(null);
   const [loadingPro, setLoadingPro] = useState<ProPlan | null>(null);
 
+  // ✅ 追加：購入前同意（Meta / Pro 共通で使えるが、まずはMetaで効かせる）
+  const [agree, setAgree] = useState(false);
+
   const handleBuyPro = async (plan: ProPlan = "pro") => {
     try {
       setLoadingPro(plan);
@@ -41,6 +44,12 @@ export default function PricingPage() {
   };
 
   const handleBuyMeta = async (pack: MetaPack) => {
+    // ✅ 追加：購入前同意チェック
+    if (!agree) {
+      alert("購入前に、利用規約・返金ポリシー（Metaコイン）への同意が必要です。");
+      return;
+    }
+
     try {
       setLoadingPack(pack);
       const res = await fetch("/api/meta/checkout", {
@@ -144,11 +153,32 @@ export default function PricingPage() {
             <p>・15 Meta：シーズン通して使いたい方向け</p>
           </div>
 
+          {/* ✅ 追加：購入前の同意ボックス（Metaコイン用） */}
+          <label className="mt-4 flex items-start gap-2 text-[11px] text-slate-600">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={agree}
+              onChange={(e) => setAgree(e.target.checked)}
+              disabled={isAnyLoading}
+            />
+            <span>
+              利用規約・返金ポリシー（Metaコイン）を確認し、同意します。{" "}
+              <a href="/terms" className="underline hover:text-slate-800">
+                利用規約
+              </a>
+              {" ／ "}
+              <a href="/refund" className="underline hover:text-slate-800">
+                返金ポリシー（Metaコイン）
+              </a>
+            </span>
+          </label>
+
           <div className="mt-4 space-y-2">
             <button
               type="button"
               onClick={() => handleBuyMeta("meta_3")}
-              disabled={isAnyLoading}
+              disabled={isAnyLoading || !agree}
               className="w-full rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-60"
             >
               {loadingPack === "meta_3" ? "生成中…" : "3 Meta を購入（¥500）"}
@@ -156,7 +186,7 @@ export default function PricingPage() {
             <button
               type="button"
               onClick={() => handleBuyMeta("meta_7")}
-              disabled={isAnyLoading}
+              disabled={isAnyLoading || !agree}
               className="w-full rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-60"
             >
               {loadingPack === "meta_7" ? "生成中…" : "7 Meta を購入（¥1,000）"}
@@ -164,7 +194,7 @@ export default function PricingPage() {
             <button
               type="button"
               onClick={() => handleBuyMeta("meta_15")}
-              disabled={isAnyLoading}
+              disabled={isAnyLoading || !agree}
               className="w-full rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-60"
             >
               {loadingPack === "meta_15" ? "生成中…" : "15 Meta を購入（¥2,000）"}
@@ -175,13 +205,37 @@ export default function PricingPage() {
             決済には Stripe を利用します。支払い完了後、自動的に Mentor.AI
             アカウントの Meta 残高が反映されます（Webhook で連携）。
           </p>
+
+          <p className="mt-2 text-[11px] text-slate-500">
+            ※Metaコインは原則返金不可です。詳細は{" "}
+            <a href="/refund" className="underline hover:text-slate-800">
+              返金ポリシー（Metaコイン）
+            </a>{" "}
+            をご確認ください。
+          </p>
         </div>
       </section>
 
       <section className="mt-10 text-[11px] text-slate-500">
         <p>※表記の金額は現時点の想定です。実際の価格は運用時に調整してください。</p>
-        <p>
-          ※購入にはログインが必要です。未ログインの場合は途中でログイン画面に遷移します。
+        <p>※購入にはログインが必要です。未ログインの場合は途中でログイン画面に遷移します。</p>
+        <p className="mt-2">
+          関連ページ：{" "}
+          <a href="/terms" className="underline hover:text-slate-800">
+            利用規約
+          </a>{" "}
+          ｜{" "}
+          <a href="/privacy" className="underline hover:text-slate-800">
+            プライバシーポリシー
+          </a>{" "}
+          ｜{" "}
+          <a href="/legal" className="underline hover:text-slate-800">
+            特定商取引法に基づく表記
+          </a>{" "}
+          ｜{" "}
+          <a href="/refund" className="underline hover:text-slate-800">
+            返金ポリシー（Metaコイン）
+          </a>
         </p>
       </section>
     </main>

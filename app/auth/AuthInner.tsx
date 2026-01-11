@@ -9,8 +9,11 @@ import { createBrowserClient } from "@supabase/ssr";
 type AuthTab = "login" | "signup";
 
 // 本番URL（env があればそっち優先）
-const SITE_URL =
-  process.env.NEXT_PUBLIC_SITE_URL || "https://www.mentor-ai.net";
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://www.mentor-ai.net";
+
+// ✅ 追加：Termsバージョン & localStorage key
+const TERMS_VERSION = "2025-12-02";
+const PENDING_ACCEPT_KEY = "mentorai:pending_accept_terms";
 
 // クライアント用 Supabase インスタンス
 const supabase = createBrowserClient(
@@ -21,7 +24,6 @@ const supabase = createBrowserClient(
 export function AuthInner() {
   const searchParams = useSearchParams();
 
-  // /auth?mode=signup なら最初から新規登録タブ
   const [tab, setTab] = useState<AuthTab>(() =>
     searchParams.get("mode") === "signup" ? "signup" : "login"
   );
@@ -29,13 +31,11 @@ export function AuthInner() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // ✅ 利用規約・プライポリ モーダル用ステート
   const [showTerms, setShowTerms] = useState(false);
   const [showPrivacy, setShowPrivacy] = useState(false);
 
   const router = useRouter();
 
-  // ✅ URLクエリから Supabase 認証エラーを拾う（otp_expired など）
   useEffect(() => {
     const urlError = searchParams.get("error");
     const errorCode = searchParams.get("error_code");
@@ -74,14 +74,10 @@ export function AuthInner() {
     setLoading(false);
 
     if (error) {
-      setError(
-        error.message ||
-          "ログインに失敗しました。もう一度お試しください。"
-      );
+      setError(error.message || "ログインに失敗しました。もう一度お試しください。");
       return;
     }
 
-    // ログイン成功 → 共通のコールバックへ
     router.replace("/auth/callback");
   };
 
@@ -105,7 +101,6 @@ export function AuthInner() {
       email,
       password,
       options: {
-        // ✅ メールの認証後は必ず /auth/callback に戻す
         emailRedirectTo: `${SITE_URL}/auth/callback`,
       },
     });
@@ -113,26 +108,18 @@ export function AuthInner() {
     setLoading(false);
 
     if (error) {
-      // すでに登録済みのメールアドレスなどを少し優しく案内
       if (error.message?.toLowerCase().includes("already registered")) {
-        setError(
-          "このメールアドレスはすでに登録されています。ログインからお進みください。"
-        );
+        setError("このメールアドレスはすでに登録されています。ログインからお進みください。");
         setTab("login");
       } else {
-        setError(
-          error.message ||
-            "登録に失敗しました。もう一度お試しください。"
-        );
+        setError(error.message || "登録に失敗しました。もう一度お試しください。");
       }
       return;
     }
 
-    // メール確認フラグを見て案内画面へ
     if (data.user && !data.user.confirmed_at) {
       router.push(`/auth/email-sent?email=${encodeURIComponent(email)}`);
     } else {
-      // まれに即時確認される場合はそのままコールバックへ
       router.replace("/auth/callback");
     }
   };
@@ -146,9 +133,7 @@ export function AuthInner() {
             <div className="text-xs font-semibold tracking-[0.25em] text-slate-500">
               ELITE CAREER PLATFORM
             </div>
-            <div className="mt-2 text-3xl font-semibold text-slate-900">
-              Mentor.AI
-            </div>
+            <div className="mt-2 text-3xl font-semibold text-slate-900">Mentor.AI</div>
           </div>
 
           <h1 className="mb-6 text-3xl font-semibold leading-snug text-slate-900">
@@ -187,9 +172,7 @@ export function AuthInner() {
                 <div className="text-[10px] font-semibold tracking-[0.25em] text-slate-500">
                   ELITE CAREER PLATFORM
                 </div>
-                <div className="mt-1 text-xl font-semibold text-slate-900">
-                  Mentor.AI
-                </div>
+                <div className="mt-1 text-xl font-semibold text-slate-900">Mentor.AI</div>
               </div>
               <span className="rounded-full bg-sky-100 px-3 py-1 text-[11px] font-medium text-sky-700">
                 Beta
@@ -202,9 +185,7 @@ export function AuthInner() {
                 type="button"
                 onClick={() => setTab("login")}
                 className={`flex-1 rounded-full px-3 py-2 transition ${
-                  tab === "login"
-                    ? "bg-white text-slate-900 shadow-sm"
-                    : "hover:text-slate-800"
+                  tab === "login" ? "bg-white text-slate-900 shadow-sm" : "hover:text-slate-800"
                 }`}
               >
                 ログイン
@@ -213,23 +194,19 @@ export function AuthInner() {
                 type="button"
                 onClick={() => setTab("signup")}
                 className={`flex-1 rounded-full px-3 py-2 transition ${
-                  tab === "signup"
-                    ? "bg-white text-slate-900 shadow-sm"
-                    : "hover:text-slate-800"
+                  tab === "signup" ? "bg-white text-slate-900 shadow-sm" : "hover:text-slate-800"
                 }`}
               >
                 新規登録
               </button>
             </div>
 
-            {/* エラー表示 */}
             {error && (
               <p className="mt-4 rounded-2xl bg-rose-50 px-4 py-2 text-xs text-rose-700">
                 {error}
               </p>
             )}
 
-            {/* フォーム本体 */}
             {tab === "login" ? (
               <LoginForm loading={loading} onSubmit={handleLogin} />
             ) : (
@@ -255,7 +232,6 @@ export function AuthInner() {
         </section>
       </div>
 
-      {/* 利用規約モーダル */}
       {showTerms && (
         <LegalModal
           title="利用規約"
@@ -266,7 +242,6 @@ export function AuthInner() {
         />
       )}
 
-      {/* プライバシーポリシー・モーダル */}
       {showPrivacy && (
         <LegalModal
           title="プライバシーポリシー"
@@ -296,9 +271,7 @@ function LoginForm({ loading, onSubmit }: AuthFormProps) {
   return (
     <form onSubmit={onSubmit} className="mt-6 space-y-5">
       <div>
-        <label className="block text-xs font-medium text-slate-600">
-          メールアドレス
-        </label>
+        <label className="block text-xs font-medium text-slate-600">メールアドレス</label>
         <input
           type="email"
           name="email"
@@ -309,9 +282,7 @@ function LoginForm({ loading, onSubmit }: AuthFormProps) {
       </div>
 
       <div>
-        <label className="block text-xs font-medium text-slate-600">
-          パスワード
-        </label>
+        <label className="block text-xs font-medium text-slate-600">パスワード</label>
         <input
           type="password"
           name="password"
@@ -323,10 +294,7 @@ function LoginForm({ loading, onSubmit }: AuthFormProps) {
 
       <div className="flex items-center justify-between text-xs">
         <div />
-        <Link
-          href="/auth/reset-password"
-          className="text-sky-600 hover:text-sky-700"
-        >
+        <Link href="/auth/reset-password" className="text-sky-600 hover:text-sky-700">
           パスワードをお忘れの方
         </Link>
       </div>
@@ -341,10 +309,7 @@ function LoginForm({ loading, onSubmit }: AuthFormProps) {
 
       <p className="pt-2 text-center text-xs text-slate-500">
         アカウントをお持ちでない方は{" "}
-        <Link
-          href="/auth?mode=signup"
-          className="font-medium text-sky-600 hover:text-sky-700"
-        >
+        <Link href="/auth?mode=signup" className="font-medium text-sky-600 hover:text-sky-700">
           新規登録
         </Link>
       </p>
@@ -352,18 +317,30 @@ function LoginForm({ loading, onSubmit }: AuthFormProps) {
   );
 }
 
-function SignupForm({
-  loading,
-  onSubmit,
-  onOpenTerms,
-  onOpenPrivacy,
-}: SignupFormProps) {
+function SignupForm({ loading, onSubmit, onOpenTerms, onOpenPrivacy }: SignupFormProps) {
+  const [isAdult, setIsAdult] = useState(false);
+
+  // ✅ 追加：SignupForm 内で pending を確実に保存してから submit
+  const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
+    try {
+      localStorage.setItem(
+        PENDING_ACCEPT_KEY,
+        JSON.stringify({
+          is_adult: isAdult,
+          terms_version: TERMS_VERSION,
+        })
+      );
+    } catch {
+      // localStorageが使えない環境でも submit は止めない（callback側で弾く）
+    }
+
+    onSubmit(e);
+  };
+
   return (
-    <form onSubmit={onSubmit} className="mt-6 space-y-5">
+    <form onSubmit={handleSubmit} className="mt-6 space-y-5">
       <div>
-        <label className="block text-xs font-medium text-slate-600">
-          メールアドレス
-        </label>
+        <label className="block text-xs font-medium text-slate-600">メールアドレス</label>
         <input
           type="email"
           name="email"
@@ -374,9 +351,7 @@ function SignupForm({
       </div>
 
       <div>
-        <label className="block text-xs font-medium text-slate-600">
-          パスワード
-        </label>
+        <label className="block text-xs font-medium text-slate-600">パスワード</label>
         <input
           type="password"
           name="password"
@@ -388,9 +363,7 @@ function SignupForm({
       </div>
 
       <div>
-        <label className="block text-xs font-medium text-slate-600">
-          パスワード確認
-        </label>
+        <label className="block text-xs font-medium text-slate-600">パスワード確認</label>
         <input
           type="password"
           name="passwordConfirm"
@@ -401,6 +374,20 @@ function SignupForm({
         />
       </div>
 
+      {/* ✅ 成人（18歳以上）チェック */}
+      <label className="flex items-start gap-2 text-[11px] text-slate-500">
+        <input
+          type="checkbox"
+          name="isAdult"
+          required
+          checked={isAdult}
+          onChange={(e) => setIsAdult(e.target.checked)}
+          className="mt-[3px] h-3 w-3 rounded border-slate-300 text-sky-500 focus:ring-sky-400"
+        />
+        <span>私は18歳以上です</span>
+      </label>
+
+      {/* 既存：規約同意チェック */}
       <label className="flex items-start gap-2 text-[11px] text-slate-500">
         <input
           type="checkbox"
@@ -429,7 +416,7 @@ function SignupForm({
 
       <button
         type="submit"
-        disabled={loading}
+        disabled={loading || !isAdult}
         className="mt-2 flex w-full items-center justify-center rounded-2xl bg-sky-500 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-60"
       >
         {loading ? "送信中..." : "アカウントを作成"}
@@ -437,16 +424,16 @@ function SignupForm({
 
       <p className="pt-2 text-center text-xs text-slate-500">
         すでにアカウントをお持ちの方は{" "}
-        <Link
-          href="/auth"
-          className="font-medium text-sky-600 hover:text-sky-700"
-        >
+        <Link href="/auth" className="font-medium text-sky-600 hover:text-sky-700">
           ログイン
         </Link>
       </p>
     </form>
   );
 }
+
+/* ------------------ モーダルコンポーネント ------------------ */
+// ...（以下そのまま）
 
 /* ------------------ モーダルコンポーネント ------------------ */
 
@@ -458,23 +445,13 @@ type LegalModalProps = {
   linkLabel: string;
 };
 
-function LegalModal({
-  title,
-  body,
-  onClose,
-  linkHref,
-  linkLabel,
-}: LegalModalProps) {
+function LegalModal({ title, body, onClose, linkHref, linkLabel }: LegalModalProps) {
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/40 px-4">
       <div className="w-full max-w-3xl rounded-3xl bg-white p-6 shadow-xl">
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-xs text-slate-400 hover:text-slate-600"
-          >
+          <button type="button" onClick={onClose} className="text-xs text-slate-400 hover:text-slate-600">
             ✕
           </button>
         </div>
@@ -509,7 +486,6 @@ function LegalModal({
 }
 
 // ここは元ファイルにあった定数をそのまま使ってね（長文なので省略していた場合は元のを残してOK）
-
 
 
 
@@ -696,3 +672,6 @@ Mentor.AI
 〒104-0061 東京都中央区銀座一丁目22番11号 銀座大竹ビジデンス2F
 support@mentor-ai.net
 `;
+
+
+

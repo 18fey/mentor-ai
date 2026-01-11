@@ -70,6 +70,16 @@ type UsageSummaryResponse = {
   items: UsageSummaryItem[];
 };
 
+// ✅ Meta lots
+type MetaLot = {
+  id: string;
+  expires_at: string;
+  remaining: number;
+  source: string | null;
+  initial_amount?: number | null;
+  purchased_at?: string | null;
+};
+
 // ------------------------------
 // Labels
 // ------------------------------
@@ -93,6 +103,31 @@ function formatJpShort(iso: string) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+// ✅ META helpers
+function formatDateJP(iso: string) {
+  const d = new Date(iso);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}/${m}/${day}`;
+}
+function daysUntil(iso: string) {
+  const ms = new Date(iso).getTime() - Date.now();
+  return Math.ceil(ms / (1000 * 60 * 60 * 24));
+}
+function sourceLabel(source: string | null) {
+  if (source === "stripe") return "購入";
+  if (source === "grant") return "付与";
+  if (source === "admin") return "付与";
+  if (!source) return "不明";
+  return source;
+}
+function expiryBadge(days: number) {
+  if (days <= 7) return "🔴";
+  if (days <= 30) return "🟠";
+  return "🟢";
 }
 
 function pickNextActions(params: {
@@ -209,6 +244,10 @@ export default function HomePage() {
   const [usage, setUsage] = useState<UsageSummaryResponse | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
 
+  // ✅ META lots（期限付き内訳）
+  const [metaLots, setMetaLots] = useState<MetaLot[]>([]);
+  const [metaLotsLoading, setMetaLotsLoading] = useState(false);
+
   async function fetchUsageSummary() {
     try {
       setUsageLoading(true);
@@ -219,6 +258,20 @@ export default function HomePage() {
       console.error("usage summary fetch error:", e);
     } finally {
       setUsageLoading(false);
+    }
+  }
+
+  async function fetchActiveMetaLots() {
+    try {
+      setMetaLotsLoading(true);
+      const res = await fetch("/api/meta/active-lots", { method: "GET", cache: "no-store" });
+      const json = await res.json();
+      setMetaLots((json?.lots ?? []) as MetaLot[]);
+    } catch (e) {
+      console.error("meta lots fetch error:", e);
+      setMetaLots([]);
+    } finally {
+      setMetaLotsLoading(false);
     }
   }
 
@@ -344,6 +397,8 @@ export default function HomePage() {
 
         // ✅ Usage Summary 取得
         void fetchUsageSummary();
+        // ✅ META lots 取得
+        void fetchActiveMetaLots();
 
         setChecking(false);
       } catch (e) {
@@ -459,6 +514,28 @@ export default function HomePage() {
               ))}
             </div>
           )}
+        </section>
+
+        {/* ✅ METAの内訳（期限付きロット一覧） */}
+        <section className="rounded-3xl bg-white/90 p-5 shadow-sm shadow-sky-100">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-900">利用可能なMETAの内訳</h2>
+              <p className="text-[11px] text-slate-500">
+                有効期限が近いMETAから自動で消費されます。
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => fetchActiveMetaLots()}
+              className="text-[11px] font-medium text-sky-700 underline underline-offset-2 hover:text-sky-800"
+            >
+              {metaLotsLoading ? "更新中…" : "更新"}
+            </button>
+          </div>
+
+          <MetaLotsTable lots={metaLots} loading={metaLotsLoading} />
         </section>
 
         {/* 上段：進捗サマリー */}
@@ -781,7 +858,7 @@ function AdvancedToolCard({ title, description, href, locked }: AdvancedToolCard
         </div>
         <p className="text-xs text-slate-600">{description}</p>
       </div>
- 
+
       <div className="mt-3">
         {locked ? (
           <button
@@ -798,6 +875,63 @@ function AdvancedToolCard({ title, description, href, locked }: AdvancedToolCard
             使ってみる →
           </Link>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ✅ META lots table
+function MetaLotsTable({ lots, loading }: { lots: MetaLot[]; loading: boolean }) {
+  const total = lots.reduce((sum, l) => sum + (Number(l.remaining) || 0), 0);
+
+  if (loading && lots.length === 0) {
+    return <div className="mt-3 text-xs text-slate-500">読み込み中…</div>;
+  }
+
+  if (!loading && lots.length === 0) {
+    return (
+      <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-6 text-center text-sm text-slate-500">
+        現在利用可能なMETAはありません。
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4">
+      {/* 合計 */}
+      <div className="mb-3 flex items-center justify-between">
+        <p className="text-[11px] text-slate-500">期限が近い順に表示しています</p>
+        <p className="text-sm font-semibold text-slate-900">
+          合計 <span className="tabular-nums">{total}</span> META
+        </p>
+      </div>
+
+      <div className="divide-y divide-slate-100 rounded-2xl border border-slate-100 bg-white/95">
+        {lots.map((lot) => {
+          const d = daysUntil(lot.expires_at);
+          return (
+            <div key={lot.id} className="flex items-center justify-between px-4 py-3">
+              <div className="flex items-center gap-3">
+                <div className="text-lg">{expiryBadge(d)}</div>
+                <div>
+                  <div className="text-sm font-medium text-slate-900">
+                    {formatDateJP(lot.expires_at)} まで
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    {sourceLabel(lot.source)} ・あと {d} 日
+                  </div>
+                </div>
+              </div>
+              <div className="text-sm font-semibold text-slate-900 tabular-nums">
+                {lot.remaining} META
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-2 text-[11px] text-slate-500">
+        🔴 7日以内 / 🟠 30日以内 / 🟢 それ以降
       </div>
     </div>
   );

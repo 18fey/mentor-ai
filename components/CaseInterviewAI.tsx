@@ -1,7 +1,7 @@
 // src/components/CaseInterviewAI.tsx
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createBrowserClient } from "@supabase/ssr";
 import { MetaConfirmModal } from "@/components/MetaConfirmModal";
@@ -10,12 +10,7 @@ import { MetaConfirmModal } from "@/components/MetaConfirmModal";
    型定義
 ============================ */
 type CaseDomain = "consulting" | "general" | "trading" | "ib";
-type CasePattern =
-  | "market_sizing"
-  | "profitability"
-  | "entry"
-  | "new_business"
-  | "operation";
+type CasePattern = "market_sizing" | "profitability" | "entry" | "new_business" | "operation";
 
 type CaseQuestion = {
   id: string;
@@ -43,64 +38,92 @@ type CaseFeedback = {
   nextTraining: string;
 };
 
+type Answers = {
+  goal: string;
+  kpi: string;
+  framework: string;
+  hypothesis: string;
+  deepDivePlan: string;
+  analysis: string;
+  solutions: string;
+  risks: string;
+  wrapUp: string;
+};
+
+// ✅ 旧planは表示上の互換だけ残す（将来削除OK）
 type Plan = "free" | "pro" | "elite";
 
-type GenerateRes = {
+// ✅ 新：case/generate の返却想定（meta対応版）
+type GenerateOk = {
   ok: true;
-  plan: Plan;
-  remaining?: number;
+  mode?: "unlimited" | "free" | "need_meta";
+  requiredMeta?: number;
   case: CaseQuestion;
 };
 
-type EvalRes = {
-  ok: true;
-  plan: Plan;
+type EvalNormalized = {
   score: CaseScore;
   feedback: CaseFeedback;
   totalScore?: number;
   logId?: number | string | null;
 };
 
-type SaveItem = {
-  id: string;
-  attempt_type: string;
-  attempt_id: string;
-  save_type: "mistake" | "learning" | "retry";
-  created_at: string;
-};
-
-type SavesListRes = {
-  ok: true;
-  plan: Plan;
-  items: SaveItem[];
-};
-
 type ApiErr = {
+  ok?: false;
   error?: string;
-  code?: string;
   message?: string;
-  reason?: string;
+  requiredMeta?: number;
   required?: number;
   balance?: number;
 };
 
-type MetaBalanceRes =
-  | { ok: true; balance: number }
-  | { ok: false; status: number; reason?: string; message?: string };
+type FeatureId = "case_interview";
 
-/* ============================
-   constants
-============================ */
+// generation_jobs/status の返却想定
+type JobStatus = "queued" | "running" | "succeeded" | "failed" | string;
+
+type GenerationJob = {
+  id: string;
+  status: JobStatus;
+  result: any | null;
+  error_code: string | null;
+  error_message: string | null;
+  updated_at: string | null;
+  created_at: string | null;
+};
+
 const FEATURE_LABEL = "ケース面接AI";
-const FEATURE_REQUIRED_META = 2; // ✅ featureGate.ts の case_interview のコストと合わせる
+const FEATURE_ID: FeatureId = "case_interview";
 
-function isUnlimited(plan: Plan) {
-  return plan === "pro" || plan === "elite";
+// localStorage keys
+const LS_KEY_EVAL = "genjob:case_eval:key";
+
+// ✅ Case session persistence（次のケース生成まで保持）
+const LS_KEY_CASE_SESSION_PREFIX = "case_session:v1";
+
+type CaseSession = {
+  v: 1;
+  domain: CaseDomain;
+  pattern: CasePattern;
+  currentCase: CaseQuestion | null;
+  answers: Answers;
+  eval: {
+    score: CaseScore;
+    feedback: CaseFeedback | null;
+    totalScore: number | null;
+    lastLogId: number | string | null;
+  };
+  updatedAt: string; // ISO
+};
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-/* ============================
-   メインコンポーネント
-============================ */
+function makeIdempotencyKey(prefix: string) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export const CaseInterviewAI: React.FC = () => {
   const router = useRouter();
 
@@ -114,7 +137,8 @@ export const CaseInterviewAI: React.FC = () => {
   );
 
   // auth
-  const [isAuthed, setIsAuthed] = useState<boolean>(false);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
   // ケース選択
@@ -134,6 +158,7 @@ export const CaseInterviewAI: React.FC = () => {
   const [wrapUp, setWrapUp] = useState("");
 
   // 状態
+  // ✅ plan/remaining は互換のためだけ残す（今は使わない想定）
   const [plan, setPlan] = useState<Plan>("free");
   const [remaining, setRemaining] = useState<number | null>(null);
   const [uiError, setUiError] = useState<string | null>(null);
@@ -153,20 +178,20 @@ export const CaseInterviewAI: React.FC = () => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isEvaluating, setIsEvaluating] = useState(false);
 
-  // 保存
-  const [isSaving, setIsSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  // ✅ 実行中ジョブkey（復帰用）
+  const [activeEvalKey, setActiveEvalKey] = useState<string | null>(null);
+
+  // ✅ ポーリング停止
+  const pollingAbortRef = useRef<{ eval: boolean }>({ eval: false });
 
   // ✅ MetaConfirmModal
   const [metaModalOpen, setMetaModalOpen] = useState(false);
   const [metaBalance, setMetaBalance] = useState<number | null>(null);
-  const [metaNeed, setMetaNeed] = useState<number>(FEATURE_REQUIRED_META);
+  const [metaNeed, setMetaNeed] = useState<number>(1);
   const [metaMode, setMetaMode] = useState<"confirm" | "purchase">("confirm");
   const [metaTitle, setMetaTitle] = useState<string | undefined>(undefined);
   const [metaMessage, setMetaMessage] = useState<string | undefined>(undefined);
-  const [pendingAction, setPendingAction] = useState<null | (() => Promise<void>)>(
-    null
-  );
+  const [pendingAction, setPendingAction] = useState<null | (() => Promise<void>)>(null);
 
   const closeMetaModal = () => {
     setMetaModalOpen(false);
@@ -175,37 +200,260 @@ export const CaseInterviewAI: React.FC = () => {
     setPendingAction(null);
   };
 
-  // ✅ 残高取得（APIがある前提：/api/meta/balance）
-  const fetchMyBalance = async (): Promise<number | null> => {
+  // ✅ Case session persistence helpers
+  const makeSessionKey = (uid: string) => `${LS_KEY_CASE_SESSION_PREFIX}:${uid}`;
+
+  const saveSession = (s: CaseSession) => {
     try {
-      const res = await fetch("/api/meta/balance", { method: "POST" });
-      const json = (await res.json().catch(() => null)) as MetaBalanceRes | null;
-      if (!res.ok || !json || (json as any).ok !== true) return null;
-      return Number((json as any).balance ?? 0);
+      if (!userId) return;
+      localStorage.setItem(makeSessionKey(userId), JSON.stringify(s));
+    } catch {}
+  };
+
+  const loadSession = (): CaseSession | null => {
+    try {
+      if (!userId) return null;
+      const raw = localStorage.getItem(makeSessionKey(userId));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed?.v !== 1) return null;
+      return parsed as CaseSession;
     } catch {
       return null;
     }
   };
 
-  // auth確認
+  const clearSession = () => {
+    try {
+      if (!userId) return;
+      localStorage.removeItem(makeSessionKey(userId));
+    } catch {}
+  };
+
+  // localStorage helpers（job復帰用）
+  const setLocalKey = (key: string) => {
+    try {
+      localStorage.setItem(LS_KEY_EVAL, key);
+    } catch {}
+  };
+  const getLocalKey = () => {
+    try {
+      return localStorage.getItem(LS_KEY_EVAL);
+    } catch {
+      return null;
+    }
+  };
+  const clearLocalKey = () => {
+    try {
+      localStorage.removeItem(LS_KEY_EVAL);
+    } catch {}
+  };
+
+  // ✅ 残高取得（GETに統一）
+  const fetchMyBalance = async (): Promise<number | null> => {
+    try {
+      const res = await fetch("/api/meta/balance", { method: "GET" });
+      const j: any = await res.json().catch(() => ({}));
+      if (!res.ok || j?.ok !== true) return null;
+      return Number(j.balance ?? 0);
+    } catch {
+      return null;
+    }
+  };
+
+  const openMetaModalFor = async (params: {
+    requiredMeta: number;
+    featureLabel: string;
+    onProceed: () => Promise<void>;
+  }) => {
+    const { requiredMeta, onProceed } = params;
+
+    const b = await fetchMyBalance();
+    setMetaNeed(requiredMeta);
+    setMetaBalance(typeof b === "number" ? b : metaBalance);
+
+    const mode: "confirm" | "purchase" =
+      typeof b === "number" && b < requiredMeta ? "purchase" : "confirm";
+
+    setMetaMode(mode);
+    setMetaTitle("METAが必要です");
+    setMetaMessage(`この実行には META が ${requiredMeta} 必要です。続行しますか？`);
+
+    setPendingAction(() => async () => {
+      await onProceed();
+      const bb = await fetchMyBalance();
+      if (typeof bb === "number") setMetaBalance(bb);
+    });
+
+    setMetaModalOpen(true);
+  };
+
+  /* -------------------------
+     認証
+  ------------------------- */
   useEffect(() => {
     (async () => {
-      setAuthError(null);
-      const { data, error } = await supabase.auth.getUser();
-      if (error || !data?.user?.id) {
-        setIsAuthed(false);
-        setAuthError(
-          "ログイン情報が取得できませんでした。いったんログインし直してください。"
-        );
-        return;
-      }
-      setIsAuthed(true);
+      try {
+        setAuthError(null);
+        const { data, error } = await supabase.auth.getUser();
+        if (error || !data?.user?.id) {
+          setUserId(null);
+          setAuthError("ログイン情報が取得できませんでした。いったんログインし直してください。");
+          return;
+        }
+        setUserId(data.user.id);
 
-      // ✅ ログインできたら残高も一回取っておく
-      const b = await fetchMyBalance();
-      if (typeof b === "number") setMetaBalance(b);
+        const b = await fetchMyBalance();
+        if (typeof b === "number") setMetaBalance(b);
+      } finally {
+        setAuthLoading(false);
+      }
     })();
   }, [supabase]);
+
+  /* -------------------------
+     ✅ セッション復元（ケース/回答/評価）
+     - 次のケース生成を押すまで保持
+  ------------------------- */
+  useEffect(() => {
+    if (authLoading) return;
+    if (!userId) return;
+
+    const s = loadSession();
+    if (!s) return;
+
+    setDomain(s.domain);
+    setPattern(s.pattern);
+    setCurrentCase(s.currentCase);
+
+    setGoal(s.answers.goal);
+    setKpi(s.answers.kpi);
+    setFramework(s.answers.framework);
+    setHypothesis(s.answers.hypothesis);
+    setDeepDivePlan(s.answers.deepDivePlan);
+    setAnalysis(s.answers.analysis);
+    setSolutions(s.answers.solutions);
+    setRisks(s.answers.risks);
+    setWrapUp(s.answers.wrapUp);
+
+    setScore(s.eval.score);
+    setFeedback(s.eval.feedback);
+    setTotalScore(s.eval.totalScore);
+    setLastLogId(s.eval.lastLogId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, userId]);
+
+  /* -------------------------
+     ✅ セッション自動保存（入力中/評価後も保持）
+  ------------------------- */
+  const saveTimerRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (!userId) return;
+    if (!currentCase) return; // 未開始は保存しない
+
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+
+    saveTimerRef.current = setTimeout(() => {
+      const session: CaseSession = {
+        v: 1,
+        domain,
+        pattern,
+        currentCase,
+        answers: {
+          goal,
+          kpi,
+          framework,
+          hypothesis,
+          deepDivePlan,
+          analysis,
+          solutions,
+          risks,
+          wrapUp,
+        },
+        eval: {
+          score,
+          feedback,
+          totalScore,
+          lastLogId,
+        },
+        updatedAt: new Date().toISOString(),
+      };
+
+      saveSession(session);
+    }, 400);
+
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+  }, [
+    userId,
+    domain,
+    pattern,
+    currentCase,
+    goal,
+    kpi,
+    framework,
+    hypothesis,
+    deepDivePlan,
+    analysis,
+    solutions,
+    risks,
+    wrapUp,
+    score,
+    feedback,
+    totalScore,
+    lastLogId,
+  ]);
+
+  /* -------------------------
+     共通：generation_jobs/status
+  ------------------------- */
+  const fetchJobStatus = async (feature: FeatureId, key: string): Promise<GenerationJob | null> => {
+    try {
+      const res = await fetch(
+        `/api/generation-jobs/status?feature=${encodeURIComponent(feature)}&key=${encodeURIComponent(
+          key
+        )}`,
+        { method: "GET" }
+      );
+      const j: any = await res.json().catch(() => ({}));
+      if (!res.ok || j?.ok !== true) return null;
+      return (j.job ?? null) as GenerationJob | null;
+    } catch {
+      return null;
+    }
+  };
+
+  const pollUntilDone = async (params: {
+    feature: FeatureId;
+    key: string;
+    onSucceeded: (result: any) => Promise<void> | void;
+    onFailed: (job: GenerationJob) => Promise<void> | void;
+    maxTries?: number;
+  }) => {
+    const { feature, key, onSucceeded, onFailed, maxTries = 120 } = params;
+
+    for (let i = 0; i < maxTries; i++) {
+      if (pollingAbortRef.current.eval) return;
+
+      const job = await fetchJobStatus(feature, key);
+      if (job) {
+        if (job.status === "succeeded") {
+          await onSucceeded(job.result);
+          return;
+        }
+        if (job.status === "failed") {
+          await onFailed(job);
+          return;
+        }
+      }
+
+      await sleep(900);
+    }
+
+    setUiError("処理がタイムアウトしました。もう一度お試しください。");
+  };
 
   /* -------------------------
      フォームリセット
@@ -230,40 +478,92 @@ export const CaseInterviewAI: React.FC = () => {
     setFeedback(null);
     setTotalScore(null);
     setLastLogId(null);
-    setSaved(false);
   };
 
   /* -------------------------
-     ケース生成（API）
+     ケース生成（API） ✅ meta confirm対応
+     - 1st: metaConfirm=false
+     - 402 need_meta → modal
+     - confirm後: metaConfirm=true
+     - 残高不足ならpricingへ
   ------------------------- */
+  const startGenerate = async (metaConfirm: boolean) => {
+    const res = await fetch("/api/case/generate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(metaConfirm ? { "X-Meta-Confirm": "1" } : {}),
+      },
+      body: JSON.stringify({ domain, pattern }),
+    });
+
+    const json = (await res.json().catch(() => ({}))) as GenerateOk | ApiErr;
+
+    // ✅ need_meta → モーダル
+    if (!res.ok && res.status === 402) {
+      const requiredMeta = Number((json as any)?.requiredMeta ?? (json as any)?.required ?? 1);
+
+      await openMetaModalFor({
+        requiredMeta,
+        featureLabel: FEATURE_LABEL,
+        onProceed: async () => {
+          // confirm押下時に残高が足りないなら purchaseへ
+          const b = await fetchMyBalance();
+          if (typeof b === "number" && b < requiredMeta) {
+            closeMetaModal();
+            router.push("/pricing");
+            return;
+          }
+
+          setIsGenerating(true);
+          try {
+            await startGenerate(true);
+          } finally {
+            setIsGenerating(false);
+          }
+        },
+      });
+
+      return;
+    }
+
+    if (!res.ok) {
+      setUiError((json as ApiErr)?.message ?? "ケース生成に失敗しました。");
+      return;
+    }
+
+    const data = json as GenerateOk;
+
+    // ✅ 次の問題を生成したタイミングで、前のセッションは破棄（要件通り）
+    clearSession();
+
+    // ✅ 互換表示（plan/remainingは今後消してOK）
+    // APIがmodeを返す場合、表示はfreeのままでOK（Meta課金が本体）
+    if (data?.mode === "unlimited") setPlan("pro");
+    else setPlan("free");
+    setRemaining(null);
+
+    setCurrentCase(data.case);
+    resetAnswers();
+
+    // ✅ 新しいケースを出したら、前の評価job復帰キーは消しておく（混乱防止）
+    clearLocalKey();
+    setActiveEvalKey(null);
+
+    const bb = await fetchMyBalance();
+    if (typeof bb === "number") setMetaBalance(bb);
+  };
+
   const handleGenerateCase = async () => {
     setUiError(null);
-    if (!isAuthed) {
+    if (!userId) {
       setUiError("ログインが必要です。");
       return;
     }
 
     try {
       setIsGenerating(true);
-
-      const res = await fetch("/api/case/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domain, pattern }),
-      });
-
-      const json = (await res.json().catch(() => null)) as GenerateRes | ApiErr | null;
-
-      if (!res.ok) {
-        setUiError((json as ApiErr | null)?.message ?? "ケース生成に失敗しました。");
-        return;
-      }
-
-      const data = json as GenerateRes;
-      setPlan(data.plan);
-      if (typeof data.remaining === "number") setRemaining(data.remaining);
-      setCurrentCase(data.case);
-      resetAnswers();
+      await startGenerate(false);
     } catch (e) {
       console.error(e);
       setUiError("通信エラーが発生しました。時間をおいて再度お試しください。");
@@ -273,97 +573,201 @@ export const CaseInterviewAI: React.FC = () => {
   };
 
   /* -------------------------
-     AI評価（内部：実行本体）
+     ✅ 結果反映（復帰にも使う）
   ------------------------- */
-  const doEvaluate = async () => {
-    if (!currentCase) return;
-
-    const res = await fetch("/api/eval/case", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        case: currentCase,
-        answers: {
-          goal,
-          kpi,
-          framework,
-          hypothesis,
-          deepDivePlan,
-          analysis,
-          solutions,
-          risks,
-          wrapUp,
-        },
-      }),
-    });
-
-    const json = (await res.json().catch(() => null)) as EvalRes | ApiErr | null;
-
-    if (!res.ok) {
-      // ✅ 新featureGate側：META不足（402）
-      if (res.status === 402) {
-        const required = Number((json as any)?.required ?? FEATURE_REQUIRED_META);
-        const b =
-          typeof (json as any)?.balance === "number"
-            ? Number((json as any).balance)
-            : await fetchMyBalance();
-
-        setMetaNeed(required);
-        setMetaBalance(typeof b === "number" ? b : null);
-        setMetaMode("purchase");
-        setMetaTitle("METAが不足しています");
-        setMetaMessage(
-          `この実行には META が ${required} 必要です。購入して続行してください。`
-        );
-        setMetaModalOpen(true);
-        return;
-      }
-
-      // ✅ 旧仕様：403 limit_exceeded（残してある場合）
-      if (res.status === 403 && (json as any)?.error === "limit_exceeded") {
-        setMetaMode("purchase");
-        setMetaTitle("無料枠終了");
-        setMetaMessage(
-          (json as any)?.message ?? "今月の無料利用回数が上限に達しました。"
-        );
-        setMetaNeed(FEATURE_REQUIRED_META);
-        setMetaModalOpen(true);
-        return;
-      }
-
-      if (res.status === 401) {
-        setUiError("ログインが必要です。いったんログインし直してください。");
-        return;
-      }
-
-      setUiError((json as ApiErr | null)?.message ?? "評価に失敗しました。");
+  const applyEvalResult = async (result: any) => {
+    if (!result) {
+      setUiError("結果の取得に失敗しました。");
       return;
     }
 
-    const data = json as EvalRes;
-    setPlan(data.plan);
-    setScore(data.score);
-    setFeedback(data.feedback);
-    setTotalScore(typeof data.totalScore === "number" ? data.totalScore : null);
-    setLastLogId(data.logId ?? null);
-    setSaved(false);
+    const normalized: EvalNormalized | null =
+      result?.normalized ?? result?.result?.normalized ?? result?.result ?? result ?? null;
 
-    // ✅ 評価が終わったら残高も更新（freeのときだけ）
-    if (!isUnlimited(data.plan)) {
-      const b = await fetchMyBalance();
-      if (typeof b === "number") setMetaBalance(b);
+    if (!normalized?.feedback) {
+      setUiError("AI評価の結果が取得できませんでした。");
+      return;
+    }
+
+    setScore(normalized.score);
+    setFeedback(normalized.feedback);
+    setTotalScore(typeof normalized.totalScore === "number" ? normalized.totalScore : null);
+    setLastLogId(normalized.logId ?? null);
+  };
+
+  /* -------------------------
+     ✅ Job方式：評価API実行（meta confirm対応）
+     - 1st: metaConfirm=false
+     - 402 need_meta → modal
+     - confirm後: metaConfirm=true + 同じkey
+  ------------------------- */
+  const startEvalWithKey = async (key: string, metaConfirm: boolean, payload: any) => {
+    pollingAbortRef.current.eval = false;
+
+    const res = await fetch("/api/eval/case", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": key,
+        ...(metaConfirm ? { "X-Meta-Confirm": "1" } : {}),
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data: any = await res.json().catch(() => ({}));
+
+    // ✅ need_meta（confirm モーダル）
+    if (!res.ok && res.status === 402) {
+      const requiredMeta = Number(data?.requiredMeta ?? data?.required ?? 1);
+
+      await openMetaModalFor({
+        requiredMeta,
+        featureLabel: FEATURE_LABEL,
+        onProceed: async () => {
+          // ✅ confirm押下時に残高が足りないなら purchaseへ
+          const b = await fetchMyBalance();
+          if (typeof b === "number" && b < requiredMeta) {
+            closeMetaModal();
+            router.push("/pricing");
+            return;
+          }
+
+          setIsEvaluating(true);
+          try {
+            await startEvalWithKey(key, true, payload);
+          } finally {
+            setIsEvaluating(false);
+          }
+        },
+      });
+
+      return;
+    }
+
+    // ✅ その他エラー
+    if (!res.ok) {
+      setUiError(data?.message ?? "評価に失敗しました。時間をおいて再度お試しください。");
+      clearLocalKey();
+      setActiveEvalKey(null);
+      return;
+    }
+
+    // ✅ 200 OK: status側で確定
+    await pollUntilDone({
+      feature: FEATURE_ID,
+      key,
+      onSucceeded: async (jobResult) => {
+        await applyEvalResult(jobResult);
+
+        clearLocalKey();
+        setActiveEvalKey(null);
+
+        const bb = await fetchMyBalance();
+        if (typeof bb === "number") setMetaBalance(bb);
+      },
+      onFailed: async (job) => {
+        setUiError(job.error_message ?? "処理に失敗しました。");
+        clearLocalKey();
+        setActiveEvalKey(null);
+      },
+    });
+  };
+
+  const runEvalJob = async (payload: any) => {
+    setUiError(null);
+
+    const existing = activeEvalKey ?? getLocalKey();
+    const key = existing || makeIdempotencyKey("case_eval");
+
+    setActiveEvalKey(key);
+    setLocalKey(key);
+
+    setIsEvaluating(true);
+    try {
+      await startEvalWithKey(key, false, payload);
+    } catch (e) {
+      console.error(e);
+      setUiError("ネットワークエラーが発生しました。");
+      clearLocalKey();
+      setActiveEvalKey(null);
+    } finally {
+      setIsEvaluating(false);
     }
   };
 
   /* -------------------------
-     AI評価（クリックハンドラ）
-     - free: 事前にモーダルで確認（confirm/purchase分岐）
-     - pro/elite: 直で実行
+     ✅ リロード復帰（localStorage → status → 反映 or ポーリング再開）
+  ------------------------- */
+  useEffect(() => {
+    if (authLoading) return;
+    if (!userId) return;
+
+    const resume = async () => {
+      const ek = getLocalKey();
+      if (!ek) return;
+
+      setActiveEvalKey(ek);
+      setIsEvaluating(true);
+
+      try {
+        const job = await fetchJobStatus(FEATURE_ID, ek);
+        if (!job) {
+          clearLocalKey();
+          setActiveEvalKey(null);
+          return;
+        }
+
+        if (job.status === "succeeded") {
+          await applyEvalResult(job.result);
+          clearLocalKey();
+          setActiveEvalKey(null);
+
+          const bb = await fetchMyBalance();
+          if (typeof bb === "number") setMetaBalance(bb);
+          return;
+        }
+
+        if (job.status === "failed") {
+          setUiError(job.error_message ?? "処理に失敗しました。");
+          clearLocalKey();
+          setActiveEvalKey(null);
+          return;
+        }
+
+        await pollUntilDone({
+          feature: FEATURE_ID,
+          key: ek,
+          onSucceeded: async (result) => {
+            await applyEvalResult(result);
+            clearLocalKey();
+            setActiveEvalKey(null);
+
+            const bb = await fetchMyBalance();
+            if (typeof bb === "number") setMetaBalance(bb);
+          },
+          onFailed: async (j) => {
+            setUiError(j.error_message ?? "処理に失敗しました。");
+            clearLocalKey();
+            setActiveEvalKey(null);
+          },
+        });
+      } finally {
+        setIsEvaluating(false);
+      }
+    };
+
+    resume();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, userId]);
+
+  /* -------------------------
+     AI評価（クリック）
   ------------------------- */
   const handleEvaluate = async () => {
     setUiError(null);
     if (!currentCase) return;
-    if (!isAuthed) return setUiError("ログインが必要です。");
+    if (!userId) return setUiError("ログインが必要です。");
+    if (isEvaluating) return;
 
     const totalLen =
       goal.length +
@@ -376,181 +780,65 @@ export const CaseInterviewAI: React.FC = () => {
       risks.length +
       wrapUp.length;
 
-    if (totalLen < 80) return setUiError("もう少し書いてから評価してみて！目安：合計80文字以上。");
-
-    // ✅ Pro/Eliteは素通り
-    if (isUnlimited(plan)) {
-      try {
-        setIsEvaluating(true);
-        await doEvaluate();
-      } catch (e) {
-        console.error(e);
-        setUiError("通信エラーが発生しました。時間をおいて再度お試しください。");
-      } finally {
-        setIsEvaluating(false);
-      }
-      return;
+    if (totalLen < 80) {
+      return setUiError("もう少し書いてから評価してみて！目安：合計80文字以上。");
     }
 
-    // ✅ Freeは「事前確認」：残高を取り、confirm/purchaseを自動判定
-    try {
-      setIsEvaluating(true);
+    setFeedback(null);
+    setTotalScore(null);
+    setLastLogId(null);
+    setScore({
+      structure: 0,
+      hypothesis: 0,
+      insight: 0,
+      practicality: 0,
+      communication: 0,
+    });
 
-      const b = await fetchMyBalance();
-      const balance = typeof b === "number" ? b : metaBalance;
-
-      setMetaNeed(FEATURE_REQUIRED_META);
-      setMetaBalance(typeof balance === "number" ? balance : null);
-
-      const m =
-        typeof balance === "number" && balance < FEATURE_REQUIRED_META
-          ? "purchase"
-          : "confirm";
-
-      setMetaMode(m);
-      setMetaTitle(undefined);
-      setMetaMessage(undefined);
-
-      // ✅ confirm押下後に実行する関数をセット
-      setPendingAction(async () => {
-        try {
-          await doEvaluate();
-        } finally {
-          // doEvaluate側で不足ならpurchaseモードで再表示される
-        }
-      });
-
-      setMetaModalOpen(true);
-    } catch (e) {
-      console.error(e);
-      setUiError("通信エラーが発生しました。時間をおいて再度お試しください。");
-    } finally {
-      setIsEvaluating(false);
-    }
+    await runEvalJob({
+      case: currentCase,
+      answers: {
+        goal,
+        kpi,
+        framework,
+        hypothesis,
+        deepDivePlan,
+        analysis,
+        solutions,
+        risks,
+        wrapUp,
+      },
+    });
   };
 
   /* -------------------------
-     保存状態チェック（評価が来たら）
+     unmount cleanup
   ------------------------- */
   useEffect(() => {
-    if (!lastLogId) return;
-    if (!isAuthed) return;
-
-    (async () => {
-      try {
-        const res = await fetch("/api/saves/list", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ attemptType: "case", saveType: "learning", limit: 100 }),
-        });
-
-        const json = (await res.json().catch(() => null)) as SavesListRes | ApiErr | null;
-        if (!res.ok) return;
-
-        const data = json as SavesListRes;
-        setPlan(data.plan);
-
-        const exists = (data.items ?? []).some(
-          (it) =>
-            it.attempt_type === "case" &&
-            it.attempt_id === String(lastLogId) &&
-            it.save_type === "learning"
-        );
-        setSaved(exists);
-      } catch {
-        // 無視
-      }
-    })();
-  }, [lastLogId, isAuthed]);
-
-  /* -------------------------
-     保存（API経由に統一）
-  ------------------------- */
-  const handleSave = async () => {
-    setUiError(null);
-    if (!isAuthed) return setUiError("ログインが必要です。");
-    if (!lastLogId) return setUiError("先に評価してから保存できます。");
-    if (!currentCase || !feedback) return setUiError("保存する内容がありません。");
-
-    try {
-      setIsSaving(true);
-
-      const title = `【ケース】${currentCase.client} / ${currentCase.title}`;
-      const summary = `合計 ${typeof totalScore === "number" ? totalScore : "-"}点｜${domain}/${pattern}`;
-
-      const payload = {
-        input: {
-          case: currentCase,
-          answers: {
-            goal,
-            kpi,
-            framework,
-            hypothesis,
-            deepDivePlan,
-            analysis,
-            solutions,
-            risks,
-            wrapUp,
-          },
-        },
-        output: { score, feedback, totalScore },
-        eval: { score, feedback, totalScore },
-        meta: {
-          attemptType: "case",
-          domain,
-          pattern,
-          caseId: currentCase.id,
-          savedAt: new Date().toISOString(),
-          version: 1,
-        },
-      };
-
-      const res = await fetch("/api/saves/toggle", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          attemptId: String(lastLogId),
-          attemptType: "case",
-          saveType: "learning",
-          enabled: true,
-          title,
-          summary,
-          scoreTotal: typeof totalScore === "number" ? totalScore : null,
-          payload,
-          sourceId: String(lastLogId),
-        }),
-      });
-
-      const json = (await res.json().catch(() => null)) as any;
-
-      if (!res.ok) {
-        // ✅ 保存は「PROが必要」系が多いので purchase モーダルに寄せる
-        if (res.status === 403 && (json?.error === "upgrade_required" || json?.error === "limit_exceeded")) {
-          setMetaMode("purchase");
-          setMetaTitle("PROが必要です");
-          setMetaMessage(json?.message ?? "保存機能の利用にはPROが必要です。");
-          setMetaNeed(0);
-          setMetaModalOpen(true);
-          return;
-        }
-
-        setUiError(json?.message ?? "保存に失敗しました。");
-        return;
-      }
-
-      setPlan(json.plan);
-      setSaved(Boolean(json.enabled));
-    } catch (e) {
-      console.error(e);
-      setUiError("保存に失敗しました。");
-    } finally {
-      setIsSaving(false);
-    }
-  };
+    return () => {
+      pollingAbortRef.current.eval = true;
+    };
+  }, []);
 
   /* -------------------------
      レイアウト
   ------------------------- */
+  if (authLoading) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-slate-600">
+        ログイン情報を読み込み中です…
+      </div>
+    );
+  }
+
+  if (!userId) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-slate-600">
+        ログイン状態を確認できませんでした。
+      </div>
+    );
+  }
+
   return (
     <>
       <div className="flex h-full gap-6">
@@ -566,22 +854,22 @@ export const CaseInterviewAI: React.FC = () => {
           <section className="rounded-2xl border border-sky-100 bg-sky-50/70 p-4 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
               <div>
-                <h1 className="text-sm font-semibold text-sky-900">
-                  Case Interview Trainer
-                </h1>
+                <h1 className="text-sm font-semibold text-sky-900">Case Interview Trainer</h1>
                 <p className="mt-1 text-[11px] text-sky-700">
                   業界とケース種別を選んで「新しいケースを出す」を押すと、ケース問題が生成されます。
                 </p>
+
+                {/* 互換表示（不要なら消してOK） */}
                 <p className="mt-1 text-[11px] text-sky-700">
                   Plan: <span className="font-semibold">{plan}</span>
                   {typeof remaining === "number" && (
                     <>
                       {" "}
-                      / 今月残り:{" "}
-                      <span className="font-semibold">{remaining}</span>
+                      / 今月残り: <span className="font-semibold">{remaining}</span>
                     </>
                   )}
                 </p>
+
                 <p className="mt-1 text-[11px] text-sky-700">
                   META:{" "}
                   <span className="font-semibold">
@@ -595,9 +883,7 @@ export const CaseInterviewAI: React.FC = () => {
                 onClick={handleGenerateCase}
                 disabled={isGenerating}
                 className={`rounded-full px-3 py-1.5 text-xs font-semibold text-white shadow-sm ${
-                  isGenerating
-                    ? "cursor-not-allowed bg-slate-300"
-                    : "bg-sky-500 hover:bg-sky-600"
+                  isGenerating ? "cursor-not-allowed bg-slate-300" : "bg-sky-500 hover:bg-sky-600"
                 }`}
               >
                 {isGenerating ? "生成中…" : "🎲 新しいケースを出す"}
@@ -638,8 +924,7 @@ export const CaseInterviewAI: React.FC = () => {
                 <p className="w-full text-[11px] text-slate-500">
                   {currentCase ? (
                     <>
-                      現在のケースID:{" "}
-                      <span className="font-mono">{currentCase.id}</span>
+                      現在のケースID: <span className="font-mono">{currentCase.id}</span>
                     </>
                   ) : (
                     "まずは「新しいケースを出す」でスタート。"
@@ -779,7 +1064,7 @@ export const CaseInterviewAI: React.FC = () => {
             </div>
           </section>
 
-          {/* 評価 + 保存 */}
+          {/* 評価 */}
           <section className="mb-6 flex items-center justify-end gap-2">
             <button
               type="button"
@@ -791,20 +1076,7 @@ export const CaseInterviewAI: React.FC = () => {
                   : "bg-violet-500 hover:bg-violet-600"
               }`}
             >
-              {isEvaluating ? "準備中…" : "AIに評価してもらう"}
-            </button>
-
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={!feedback || isSaving || saved}
-              className={`rounded-full px-4 py-2 text-xs font-semibold ${
-                !feedback || isSaving || saved
-                  ? "cursor-not-allowed bg-slate-100 text-slate-400"
-                  : "bg-white text-slate-700 border border-slate-200 hover:bg-slate-50"
-              }`}
-            >
-              {saved ? "保存済み" : isSaving ? "保存中…" : "保存（あとで見返す）"}
+              {isEvaluating ? "評価中…" : "AIに評価してもらう"}
             </button>
           </section>
         </div>
@@ -887,18 +1159,21 @@ export const CaseInterviewAI: React.FC = () => {
         title={metaTitle}
         message={metaMessage}
         onConfirm={async () => {
+          // ✅ confirm押下時に必ず「最新残高」を見て、不足なら purchaseへ飛ばす
+          const required = metaNeed;
+          const latest = await fetchMyBalance();
+          if (typeof latest === "number") setMetaBalance(latest);
+
+          if (typeof latest === "number" && latest < required) {
+            closeMetaModal();
+            router.push("/pricing");
+            return;
+          }
+
           const fn = pendingAction;
           closeMetaModal();
           if (!fn) return;
-          try {
-            setIsEvaluating(true);
-            await fn();
-          } catch (e) {
-            console.error(e);
-            setUiError("通信エラーが発生しました。時間をおいて再度お試しください。");
-          } finally {
-            setIsEvaluating(false);
-          }
+          await fn();
         }}
         onPurchase={() => router.push("/pricing")}
       />

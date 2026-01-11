@@ -1,5 +1,4 @@
 // /featureGate.ts
-import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
@@ -13,9 +12,9 @@ export type FeatureId =
   | "enterprise_qgen"
   | "career_gap_deep"
   | "ai_training"
-  |  "es_draft";
+  | "es_draft";
 
-type PlanName = "free" | "pro" | "elite" ;
+type PlanName = "free" | "pro" | "elite";
 
 export const FEATURE_META_COST: Record<FeatureId, number> = {
   es_correction: 1,
@@ -89,7 +88,9 @@ function isUnlimitedPlan(plan: PlanName) {
   return plan === "pro" || plan === "elite";
 }
 
-async function getBalanceViaRpc(supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>) {
+async function getBalanceViaRpc(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>
+) {
   const { data, error } = await supabase.rpc("get_my_meta_balance");
   if (error) {
     console.error("get_my_meta_balance rpc error:", error);
@@ -98,22 +99,50 @@ async function getBalanceViaRpc(supabase: Awaited<ReturnType<typeof createSupaba
   return Number(data ?? 0);
 }
 
-async function getPlanByAuthUserId(authUserId: string) {
+/**
+ * ✅ plan は profiles.id (= auth.users.id) で取る（統一）
+ * - profilesが無ければ最小行を作る（止血）
+ */
+async function getOrCreatePlanByProfileId(profileId: string) {
+  // 1) まずは id で引く
   const { data, error } = await supabaseAdmin
     .from("profiles")
-    .select("plan")
-    .eq("auth_user_id", authUserId)
-    .maybeSingle<{ plan: PlanName | null }>();
+    .select("id, plan")
+    .eq("id", profileId)
+    .maybeSingle<{ id: string; plan: PlanName | null }>();
 
-  if (error || !data) return { ok: false as const };
-  return { ok: true as const, plan: (data.plan ?? "free") as PlanName };
+  if (error) {
+    console.error("profiles select(plan) error:", error);
+    return { ok: false as const };
+  }
+
+  if (data) {
+    return { ok: true as const, plan: (data.plan ?? "free") as PlanName };
+  }
+
+  // 2) 無ければ作る（最小）
+  const { error: insErr } = await supabaseAdmin.from("profiles").insert({
+    id: profileId,
+    auth_user_id: profileId, // 列があるなら埋めておく（null事故を止める）
+    plan: "free",
+    onboarding_completed: false,
+  });
+
+  if (insErr) {
+    console.error("profiles insert(minimal) error:", insErr);
+    return { ok: false as const };
+  }
+
+  return { ok: true as const, plan: "free" as PlanName };
 }
 
 /**
  * ✅ feature に応じて「Proは素通り / Freeはmeta消費」を統一実行
  * - balanceは常にRPC(get_my_meta_balance)で返す（=meta_lots集計）
  */
-export async function requireFeatureOrConsumeMeta(feature: FeatureId): Promise<FeatureGateResult> {
+export async function requireFeatureOrConsumeMeta(
+  feature: FeatureId
+): Promise<FeatureGateResult> {
   const supabase = await createSupabaseServerClient();
 
   // 1) auth
@@ -132,8 +161,8 @@ export async function requireFeatureOrConsumeMeta(feature: FeatureId): Promise<F
   const authUserId = user.id;
   const cost = FEATURE_META_COST[feature];
 
-  // 3) plan
-  const planRes = await getPlanByAuthUserId(authUserId);
+  // 3) plan（✅ id で取る）
+  const planRes = await getOrCreatePlanByProfileId(authUserId);
   if (!planRes.ok) {
     return { ok: false, status: 500, reason: "profile_not_found" };
   }
@@ -157,15 +186,23 @@ export async function requireFeatureOrConsumeMeta(feature: FeatureId): Promise<F
   }
 
   // 4) Free: consume_meta_fifo
-  const { data: consumeData, error: consumeError } = await supabaseAdmin.rpc("consume_meta_fifo", {
-    p_auth_user_id: authUserId,
-    p_cost: cost,
-  });
+  const { data: consumeData, error: consumeError } = await supabaseAdmin.rpc(
+    "consume_meta_fifo",
+    {
+      p_auth_user_id: authUserId,
+      p_cost: cost,
+    }
+  );
 
   if (consumeError) {
     const msg = String(consumeError.message ?? "");
     if (msg.includes("INSUFFICIENT_META")) {
-      return { ok: false, status: 402, reason: "insufficient_meta", required: cost };
+      return {
+        ok: false,
+        status: 402,
+        reason: "insufficient_meta",
+        required: cost,
+      };
     }
     console.error("consume_meta_fifo error:", consumeError);
     return { ok: false, status: 500, reason: "consume_failed" };
@@ -196,7 +233,8 @@ export async function requireFeatureOrConsumeMeta(feature: FeatureId): Promise<F
 /**
  * ✅ 「残高だけ欲しい」UI用
  */
-export async function getMyMetaBalance(): Promise<{ ok: true; balance: number } | FeatureGateFail> {
+export async function getMyMetaBalance():
+  Promise<FeatureGateFail | { ok: true; balance: number; }> {
   const supabase = await createSupabaseServerClient();
   const { data: auth, error: authError } = await supabase.auth.getUser();
   if (authError || !auth?.user?.id) {

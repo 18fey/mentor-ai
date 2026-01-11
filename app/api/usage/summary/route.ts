@@ -13,7 +13,7 @@ type FeatureKey =
   | "interview_10"
   | "ai_training"
   | "es_correction"
-  | "industry_insight"
+  | "industry_insight";
 
 const FREE_LIMITS: Record<FeatureKey, number> = {
   case_interview: 3,
@@ -33,10 +33,22 @@ const FEATURE_UI: Record<FeatureKey, { label: string; emoji?: string }> = {
   industry_insight: { label: "業界インサイト", emoji: "📚" },
 };
 
-function monthStartISO(now = new Date()) {
-  const d = new Date(now.getFullYear(), now.getMonth(), 1);
-  return d.toISOString();
+// ✅ JST月初にしたいならこれ（推奨）
+function monthStartISO_JST(now = new Date()) {
+  // now を JST の “年月” として扱って月初 00:00 JST を作る
+  const y = now.getFullYear();
+  const m = now.getMonth(); // 0-index
+  // 00:00 JST = 前日15:00 UTC
+  const utc = new Date(Date.UTC(y, m, 1, 0, 0, 0));
+  utc.setUTCHours(utc.getUTCHours() - 9);
+  return utc.toISOString();
 }
+
+// もし UTC月初で良いなら元の monthStartISO でOK
+// function monthStartISO(now = new Date()) {
+//   const d = new Date(now.getFullYear(), now.getMonth(), 1);
+//   return d.toISOString();
+// }
 
 async function createSupabaseFromCookies() {
   const cookieStore = await cookies();
@@ -75,13 +87,14 @@ export async function GET() {
 
     const authUserId = user.id;
 
+    // ✅ profiles は id = auth.users.id が不変ルール
     const { data: profile, error: pErr } = await supabase
       .from("profiles")
       .select("plan")
-      .eq("auth_user_id", authUserId)
-      .maybeSingle<{ plan: Plan | null }>();
+      .eq("id", authUserId)
+      .single<{ plan: Plan | null }>();
 
-    if (pErr || !profile) {
+    if (pErr) {
       return NextResponse.json(
         { ok: false, error: "profile_error", message: "profiles の取得に失敗しました。" },
         { status: 500 }
@@ -89,7 +102,9 @@ export async function GET() {
     }
 
     const plan: Plan = (profile.plan ?? "free") as Plan;
-    const startISO = monthStartISO(new Date());
+
+    // ✅ JST月初（推奨）
+    const startISO = monthStartISO_JST(new Date());
 
     if (plan === "pro") {
       const items = (Object.keys(FREE_LIMITS) as FeatureKey[]).map((feature) => ({
@@ -109,7 +124,7 @@ export async function GET() {
       });
     }
 
-    // ✅ FREE: 今月の usage_logs をまとめて取ってJSで集計（手軽・確実）
+    // ✅ FREE: usage_logs を集計
     const { data: rows, error: uErr } = await supabase
       .from("usage_logs")
       .select("feature, used_at")
@@ -123,10 +138,11 @@ export async function GET() {
       );
     }
 
-    const counts: Record<string, number> = {};
+    const counts: Partial<Record<FeatureKey, number>> = {};
     for (const r of rows ?? []) {
-      const f = (r as any).feature as string | undefined;
+      const f = (r as any).feature as FeatureKey | undefined;
       if (!f) continue;
+      if (!(f in FREE_LIMITS)) continue; // ✅ 想定外featureは無視（安全）
       counts[f] = (counts[f] ?? 0) + 1;
     }
 

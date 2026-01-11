@@ -1,21 +1,25 @@
 // app/api/eval/case/route.ts
 import { NextResponse } from "next/server";
-import { getUserPlan } from "@/lib/plan";
-import { createServerSupabase } from "@/utils/supabase/server";
-import { supabaseAdmin } from "@/lib/supabase-admin";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
+import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL_EVAL = process.env.OPENAI_MODEL_EVAL_CASE || "gpt-4o-mini";
+const OPENAI_MODEL_EVAL = process.env.OPENAI_MODEL_EVAL_CASE || "gpt-4.1-mini";
+
+// service role（Route内だけ）
+const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
+
+type Database = any;
 
 type CaseDomain = "consulting" | "general" | "trading" | "ib";
-type CasePattern =
-  | "market_sizing"
-  | "profitability"
-  | "entry"
-  | "new_business"
-  | "operation";
+type CasePattern = "market_sizing" | "profitability" | "entry" | "new_business" | "operation";
 
 type CaseQuestion = {
   id: string;
@@ -40,44 +44,125 @@ type Answers = {
   wrapUp: string;
 };
 
+type CaseScore = {
+  structure: number;
+  hypothesis: number;
+  insight: number;
+  practicality: number;
+  communication: number;
+};
+
+type CaseFeedback = {
+  summary: string;
+  goodPoints: string;
+  improvePoints: string;
+  nextTraining: string;
+};
+
+type CaseEvalResult = {
+  score: CaseScore;
+  feedback: CaseFeedback;
+  totalScore: number;
+  logId: string | number | null; // case_logs の id
+};
+
+type FeatureId = "case_interview";
+
+function safeStr(v: unknown, maxLen: number) {
+  if (typeof v !== "string") return "";
+  return v.slice(0, maxLen);
+}
+
 function clamp0to10(n: any) {
   const x = Number(n);
   if (!Number.isFinite(x)) return 0;
   return Math.max(0, Math.min(10, Math.round(x)));
 }
 
-function safeJsonParse(s: string) {
-  try {
-    return JSON.parse(s);
-  } catch {
-    const m = s.match(/\{[\s\S]*\}/);
-    if (!m) throw new Error("Invalid JSON from model");
-    return JSON.parse(m[0]);
+function rid() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+async function createSupabaseFromCookies() {
+  const cookieStore = await cookies();
+  return createServerClient<Database>(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value;
+        },
+        set(name: string, value: string, options: any) {
+          cookieStore.set({ name, value, ...options });
+        },
+        remove(name: string, options: any) {
+          cookieStore.set({ name, value: "", ...options });
+        },
+      },
+    }
+  );
+}
+
+// ✅ adminで残高を正として取る（meta_lotsのremaining合計）
+async function getBalanceAdmin(authUserId: string): Promise<number> {
+  const { data, error } = await supabaseAdmin
+    .from("meta_lots")
+    .select("remaining")
+    .eq("auth_user_id", authUserId)
+    .gt("remaining", 0);
+
+  if (error) {
+    console.error("getBalanceAdmin error:", error);
+    return 0;
   }
+
+  let sum = 0;
+  for (const row of data ?? []) sum += Number((row as any).remaining ?? 0);
+  return Number.isFinite(sum) ? sum : 0;
 }
 
 export async function POST(req: Request) {
+  const requestId = rid();
+
   try {
     if (!OPENAI_API_KEY) {
       return NextResponse.json(
-        { error: "server_config", message: "OPENAI_API_KEY is not set" },
+        { ok: false, error: "server_config", message: "OPENAI_API_KEY is not set" },
         { status: 500 }
       );
     }
 
-    // ✅ cookieセッションから本人確定（最重要）
-    const supabase = await createServerSupabase(); // ←★await 必須
-    const {
-      data: { user },
-      error: userErr,
-    } = await supabase.auth.getUser();
+    const supabase = await createSupabaseFromCookies();
 
-    if (userErr || !user) {
-      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    // ✅ auth
+    const { data: auth, error: authErr } = await supabase.auth.getUser();
+    const user = auth?.user ?? null;
+    if (authErr || !user?.id) {
+      return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
     }
-    const userId = user.id;
+    const authUserId = user.id;
 
-    const body = (await req.json()) as {
+    // ✅ idempotency key（必須）
+    const idempotencyKey =
+      req.headers.get("x-idempotency-key") ||
+      req.headers.get("X-Idempotency-Key") ||
+      "";
+
+    if (!idempotencyKey) {
+      return NextResponse.json(
+        { ok: false, error: "bad_request", message: "idempotency key is required" },
+        { status: 400 }
+      );
+    }
+
+    // ✅ meta confirm（confirm 後だけ true）
+    const metaConfirm =
+      req.headers.get("x-meta-confirm") === "1" ||
+      req.headers.get("X-Meta-Confirm") === "1";
+
+    // ✅ 入力
+    const body = (await req.json().catch(() => ({}))) as {
       case: CaseQuestion;
       answers: Answers;
     };
@@ -87,51 +172,185 @@ export async function POST(req: Request) {
 
     if (!caseQ || !answers) {
       return NextResponse.json(
-        { error: "bad_request", message: "case/answers is required" },
+        { ok: false, error: "bad_request", message: "case/answers is required" },
         { status: 400 }
       );
     }
 
-    // ✅ usage/consume：Route Handler → 内部fetchは cookie が勝手に付かない
-    // → 元リクエストの Cookie を転送する
+    const feature: FeatureId = "case_interview";
+
+    // =========================
+    // ✅ 0) generation_jobs lookup (idempotent)
+    // =========================
+    const { data: existing, error: exErr } = await supabase
+      .from("generation_jobs")
+      .select("id, status, result")
+      .eq("auth_user_id", authUserId)
+      .eq("feature_id", feature)
+      .eq("idempotency_key", idempotencyKey)
+      .maybeSingle();
+
+    if (exErr) {
+      console.error(`[case:${requestId}] job lookup error`, exErr);
+      return NextResponse.json({ ok: false, error: "db_error" }, { status: 500 });
+    }
+
+    if (existing?.status === "succeeded" && existing?.result) {
+      return NextResponse.json({ ok: true, ...existing.result, reused: true });
+    }
+
+    // =========================
+    // ✅ 0.5) generation_jobs upsert running
+    // =========================
+    const jobRequest = {
+      case: {
+        id: safeStr(caseQ.id, 80),
+        domain: safeStr(caseQ.domain, 30),
+        pattern: safeStr(caseQ.pattern, 30),
+        title: safeStr(caseQ.title, 160),
+        client: safeStr(caseQ.client, 120),
+        prompt: safeStr(caseQ.prompt, 4000),
+        hint: safeStr(caseQ.hint, 1200),
+        kpiExamples: safeStr(caseQ.kpiExamples, 1200),
+      },
+      answers: {
+        goal: safeStr(answers.goal, 2000),
+        kpi: safeStr(answers.kpi, 2000),
+        framework: safeStr(answers.framework, 4000),
+        hypothesis: safeStr(answers.hypothesis, 2000),
+        deepDivePlan: safeStr(answers.deepDivePlan, 4000),
+        analysis: safeStr(answers.analysis, 6000),
+        solutions: safeStr(answers.solutions, 4000),
+        risks: safeStr(answers.risks, 2000),
+        wrapUp: safeStr(answers.wrapUp, 2000),
+      },
+    };
+
+    const { data: upserted, error: upErr } = await supabase
+      .from("generation_jobs")
+      .upsert(
+        {
+          auth_user_id: authUserId,
+          feature_id: feature,
+          idempotency_key: idempotencyKey,
+          status: "running",
+          request: jobRequest,
+          error_code: null,
+          error_message: null,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "auth_user_id,feature_id,idempotency_key" }
+      )
+      .select("id")
+      .single();
+
+    if (upErr || !upserted?.id) {
+      console.error(`[case:${requestId}] job upsert error`, upErr);
+      return NextResponse.json({ ok: false, error: "db_error" }, { status: 500 });
+    }
+    const jobId = upserted.id as string;
+
+    // =========================
+    // ✅ 1) usage/check（消費しない）
+    // =========================
     const baseUrl = new URL(req.url).origin;
     const cookieHeader = req.headers.get("cookie") ?? "";
 
-    const usageRes = await fetch(`${baseUrl}/api/usage/consume`, {
+    const checkRes = await fetch(`${baseUrl}/api/usage/check`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Cookie: cookieHeader, // ←★これがないと usage側が unauthorized になる
-      },
-      body:JSON.stringify({ feature: "case_interview" }),
+      headers: { "Content-Type": "application/json", Cookie: cookieHeader },
+      body: JSON.stringify({ feature }),
     });
 
-    const usageJson = await usageRes.json().catch(() => null);
+    const checkBody: any = await checkRes.json().catch(() => ({}));
 
-    if (!usageRes.ok) {
-      if (usageRes.status === 403 && usageJson?.error === "limit_exceeded") {
+    // ✅ checkResが402 need_metaの場合の requiredMeta
+    const requiredMetaFromCheck = Number(checkBody?.requiredMeta ?? checkBody?.required ?? 1);
+
+    // ✅ proceedMode / requiredMeta の確定
+    let proceedMode: "unlimited" | "free" | "need_meta" =
+      checkBody?.mode ?? (metaConfirm ? "need_meta" : "free");
+    let requiredMeta = Number(checkBody?.requiredMeta ?? 1);
+
+    // ✅ usage/checkがエラーのとき
+    if (!checkRes.ok) {
+      if (checkRes.status === 402 && checkBody?.error === "need_meta") {
+        requiredMeta = requiredMetaFromCheck;
+        proceedMode = "need_meta";
+
+        // ❌ confirm前はここで止める
+        if (!metaConfirm) {
+          await supabase
+            .from("generation_jobs")
+            .update({
+              status: "failed",
+              error_code: "need_meta",
+              error_message: `INSUFFICIENT_META required=${requiredMeta}`,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", jobId);
+
+          return NextResponse.json(
+            { ok: false, error: "need_meta", requiredMeta },
+            { status: 402 }
+          );
+        }
+
+        // ✅ confirm後でも「本当に残高あるか」を必ずチェック（ここが今回の本丸）
+        const bal = await getBalanceAdmin(authUserId);
+        if (bal < requiredMeta) {
+          await supabase
+            .from("generation_jobs")
+            .update({
+              status: "failed",
+              error_code: "need_meta",
+              error_message: `INSUFFICIENT_META_AFTER_CONFIRM required=${requiredMeta} balance=${bal}`,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", jobId);
+
+          return NextResponse.json(
+            { ok: false, error: "need_meta", requiredMeta, balance: bal },
+            { status: 402 }
+          );
+        }
+        // ✅ 残高OKなら続行（成功後に課金する）
+      } else if (checkRes.status === 401) {
+        return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
+      } else {
+        console.error(`[case:${requestId}] usage/check unexpected`, checkRes.status, checkBody);
+        return NextResponse.json({ ok: false, error: "usage_error" }, { status: 500 });
+      }
+    } else {
+      // ✅ checkRes OKでも、mode が need_meta のときは confirmが無ければ止める
+      proceedMode = checkBody?.mode ?? "free";
+      requiredMeta = Number(checkBody?.requiredMeta ?? 1);
+
+      if (proceedMode === "need_meta" && !metaConfirm) {
         return NextResponse.json(
-          {
-            error: "limit_exceeded",
-            message:
-              usageJson?.message ??
-              "ケースAIの今月の無料利用回数が上限に達しました。",
-          },
-          { status: 403 }
+          { ok: false, error: "need_meta", requiredMeta },
+          { status: 402 }
         );
       }
-      console.error("usage/consume error:", usageRes.status, usageJson);
-      return NextResponse.json(
-        { error: "usage_error", message: "Failed to check usage" },
-        { status: 500 }
-      );
+
+      // ✅ confirmありでneed_metaなら、念のため残高チェック（レースに強くする）
+      if (proceedMode === "need_meta" && metaConfirm) {
+        const bal = await getBalanceAdmin(authUserId);
+        if (bal < requiredMeta) {
+          return NextResponse.json(
+            { ok: false, error: "need_meta", requiredMeta, balance: bal },
+            { status: 402 }
+          );
+        }
+      }
     }
 
-    const plan = await getUserPlan(userId);
-
-    const system = `
+    // =========================
+    // ✅ 2) OpenAI（必ずJSON）
+    // =========================
+    const systemPrompt = `
 あなたはケース面接官。日本語で、辛口だが建設的。
-必ず「JSONのみ」で返す（前後に文章を付けない）。
+出力は必ず JSON 形式のみ。前後に説明文は書かない。
 スコアは0〜10の整数。
 フィードバックは具体例・理由つきで短く鋭く。
 `.trim();
@@ -178,123 +397,209 @@ export async function POST(req: Request) {
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
         model: OPENAI_MODEL_EVAL,
-        temperature: 0.2,
+        response_format: { type: "json_object" },
+        temperature: 0.3,
         messages: [
-          { role: "system", content: system },
+          { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
         ],
       }),
     });
 
     if (!r.ok) {
-      const t = await r.text();
-      console.error("OpenAI error:", t);
-      return NextResponse.json(
-        { error: "openai_error", message: "OpenAI API error" },
-        { status: 500 }
-      );
+      const errText = await r.text().catch(() => "");
+      console.error(`[case:${requestId}] openai error`, errText);
+
+      await supabase
+        .from("generation_jobs")
+        .update({
+          status: "failed",
+          error_code: "openai_error",
+          error_message: errText.slice(0, 4000),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
+
+      return NextResponse.json({ ok: false, error: "openai_error" }, { status: 500 });
     }
 
     const j = await r.json();
-    const content = j?.choices?.[0]?.message?.content ?? "";
-    const parsed = safeJsonParse(content);
+    const content: string | null = j.choices?.[0]?.message?.content ?? null;
 
-    const score = parsed?.score ?? {};
-    const feedback = parsed?.feedback ?? {};
+    if (!content) {
+      await supabase
+        .from("generation_jobs")
+        .update({
+          status: "failed",
+          error_code: "empty_content",
+          error_message: "OpenAI returned empty content",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
 
-    const normalized = {
-      score: {
-        structure: clamp0to10(score.structure),
-        hypothesis: clamp0to10(score.hypothesis),
-        insight: clamp0to10(score.insight),
-        practicality: clamp0to10(score.practicality),
-        communication: clamp0to10(score.communication),
-      },
-      feedback: {
-        summary: String(feedback.summary ?? ""),
-        goodPoints: String(feedback.goodPoints ?? ""),
-        improvePoints: String(feedback.improvePoints ?? ""),
-        nextTraining: String(feedback.nextTraining ?? ""),
-      },
+      return NextResponse.json({ ok: false, error: "empty_content" }, { status: 500 });
+    }
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(content);
+    } catch (e) {
+      await supabase
+        .from("generation_jobs")
+        .update({
+          status: "failed",
+          error_code: "json_parse_error",
+          error_message: String(e).slice(0, 1000),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
+
+      return NextResponse.json({ ok: false, error: "json_parse_error" }, { status: 500 });
+    }
+
+    const sc = parsed?.score ?? {};
+    const fb = parsed?.feedback ?? {};
+
+    const normalizedScore: CaseScore = {
+      structure: clamp0to10(sc.structure),
+      hypothesis: clamp0to10(sc.hypothesis),
+      insight: clamp0to10(sc.insight),
+      practicality: clamp0to10(sc.practicality),
+      communication: clamp0to10(sc.communication),
+    };
+
+    const normalizedFeedback: CaseFeedback = {
+      summary: String(fb.summary ?? ""),
+      goodPoints: String(fb.goodPoints ?? ""),
+      improvePoints: String(fb.improvePoints ?? ""),
+      nextTraining: String(fb.nextTraining ?? ""),
     };
 
     const totalScore =
-      normalized.score.structure +
-      normalized.score.hypothesis +
-      normalized.score.insight +
-      normalized.score.practicality +
-      normalized.score.communication;
+      normalizedScore.structure +
+      normalizedScore.hypothesis +
+      normalizedScore.insight +
+      normalizedScore.practicality +
+      normalizedScore.communication;
 
-    const insertPayload: any = {
-      user_id: userId,
-      problem_id: caseQ.id ?? null,
-      domain: caseQ.domain ?? null,
-      pattern: caseQ.pattern ?? null,
+    // =========================
+    // ✅ 3) case_logs insert（任意）
+    // =========================
+    let logId: string | number | null = null;
 
-      problem: JSON.stringify(caseQ),
-      answer: JSON.stringify(answers),
-      feedback: normalized.feedback,
-      score: totalScore,
+    try {
+      const insertPayload: any = {
+        user_id: authUserId,
+        problem_id: caseQ.id ?? null,
+        domain: caseQ.domain ?? null,
+        pattern: caseQ.pattern ?? null,
 
-      goal: answers.goal ?? null,
-      kpi: answers.kpi ?? null,
-      framework: answers.framework ?? null,
-      hypothesis: answers.hypothesis ?? null,
-      deep_dive_plan: answers.deepDivePlan ?? null,
-      analysis: answers.analysis ?? null,
-      solutions: answers.solutions ?? null,
-      risks: answers.risks ?? null,
-      wrap_up: answers.wrapUp ?? null,
+        problem: caseQ,
+        answer: answers,
+        ai_feedback: normalizedFeedback,
+        score: totalScore,
 
-      structure_score: normalized.score.structure,
-      hypothesis_score: normalized.score.hypothesis,
-      insight_score: normalized.score.insight,
-      practicality_score: normalized.score.practicality,
-      communication_score: normalized.score.communication,
+        goal: answers.goal ?? null,
+        kpi: answers.kpi ?? null,
+        framework: answers.framework ?? null,
+        hypothesis: answers.hypothesis ?? null,
+        deep_dive_plan: answers.deepDivePlan ?? null,
+        analysis: answers.analysis ?? null,
+        solutions: answers.solutions ?? null,
+        risks: answers.risks ?? null,
+        wrap_up: answers.wrapUp ?? null,
 
-      ai_feedback: normalized.feedback,
+        structure_score: normalizedScore.structure,
+        hypothesis_score: normalizedScore.hypothesis,
+        insight_score: normalizedScore.insight,
+        practicality_score: normalizedScore.practicality,
+        communication_score: normalizedScore.communication,
+
+        job_id: jobId,
+        idempotency_key: idempotencyKey,
+      };
+
+      const ins = await supabase.from("case_logs").insert(insertPayload).select("id").single();
+      if (ins.data?.id) logId = ins.data.id;
+
+      if (ins.error) {
+        const ins2 = await supabaseAdmin
+          .from("case_logs")
+          .insert(insertPayload)
+          .select("id")
+          .single();
+        if (ins2.data?.id) logId = ins2.data.id;
+      }
+    } catch (e) {
+      console.error(`[case:${requestId}] case_logs insert failed`, e);
+    }
+
+    // =========================
+    // ✅ 4) generation_jobs result保存
+    // =========================
+    const result: CaseEvalResult = {
+      score: normalizedScore,
+      feedback: normalizedFeedback,
+      totalScore,
+      logId,
     };
 
-    // ✅ A: RLSでinsert（ポリシー必要）
-    let insertRes = await supabase
-      .from("case_logs")
-      .insert(insertPayload)
-      .select("id")
-      .single();
+    const { error: saveErr } = await supabase
+      .from("generation_jobs")
+      .update({
+        status: "succeeded",
+        result,
+        updated_at: new Date().toISOString(),
+        log_id: logId ? String(logId) : null,
+      })
+      .eq("id", jobId);
 
-    // ✅ B: 保険（RLSがまだ/壊れてる時だけ）
-    if (insertRes.error) {
-      console.error("case_logs insert error (authed):", insertRes.error);
-      insertRes = await supabaseAdmin
-        .from("case_logs")
-        .insert(insertPayload)
-        .select("id")
-        .single();
+    if (saveErr) {
+      console.error(`[case:${requestId}] result save failed`, saveErr);
+      return NextResponse.json({ ok: false, error: "result_save_failed" }, { status: 500 });
+    }
 
-      if (insertRes.error) {
-        console.error("case_logs insert error (admin):", insertRes.error);
+    // =========================
+    // ✅ 5) 成功後だけ課金
+    // =========================
+    if (proceedMode === "free") {
+      await fetch(`${baseUrl}/api/usage/log`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookieHeader },
+        body: JSON.stringify({ feature, jobId }),
+      }).catch(() => {});
+    } else if (proceedMode === "need_meta" && metaConfirm) {
+      const { error: consumeErr } = await supabaseAdmin.rpc("consume_meta_fifo", {
+        p_auth_user_id: authUserId,
+        p_cost: requiredMeta,
+      });
+
+      if (consumeErr) {
+        await supabase
+          .from("generation_jobs")
+          .update({
+            log_id: `meta_charge_failed:${String(consumeErr.message ?? "").slice(0, 200)}`,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", jobId);
       }
     }
 
     return NextResponse.json({
       ok: true,
-      plan,
-      remaining: typeof usageJson?.remaining === "number" ? usageJson.remaining : null,
-      usedCount: typeof usageJson?.usedCount === "number" ? usageJson.usedCount : null,
-      limit: typeof usageJson?.limit === "number" ? usageJson.limit : null,
-      ...normalized,
-      totalScore,
-      logId: insertRes.data?.id ?? null,
+      ...result,
+      jobId,
+      idempotencyKey,
     });
-  } catch (e) {
-    console.error(e);
+  } catch (e: any) {
+    console.error("Case Eval API error:", e);
     return NextResponse.json(
-      { error: "server_error", message: "server error" },
+      { ok: false, error: "server_error", message: "ケース評価に失敗しました" },
       { status: 500 }
     );
   }

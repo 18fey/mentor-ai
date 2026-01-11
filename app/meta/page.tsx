@@ -22,7 +22,7 @@ type ProfileMetaBalanceRow = {
 };
 
 // -----------------------------
-// 1. 機能ID（/api/meta/use と揃える）
+// 1. 機能ID（lib/payment/featureGate）
 // -----------------------------
 type FeatureId =
   | "es_correction"
@@ -35,7 +35,7 @@ type FeatureId =
   | "deep_16type"
   | "enterprise_qgen";
 
-// 機能ごとの Meta 消費（/api/meta/use と同じ）
+// 機能ごとの Meta 消費（lib/payment/featureGate）
 const FEATURE_META_COST: Record<FeatureId, number> = {
   es_correction: 1,
   fermi: 1,
