@@ -24,7 +24,7 @@ const FREE_LIMITS: Record<FeatureKey, number> = {
   case_interview: 3,
   case_generate: 3,
   fermi: 3,
-  fermi_generate: 3,
+  fermi_generate: 5,
   interview_10: 1,
   ai_training: 3,
   es_correction: 3,
