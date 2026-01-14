@@ -50,15 +50,31 @@ type Answers = {
   wrapUp: string;
 };
 
+// ✅ 新：模範解答（考え方つき）
+// /api/eval/case の返却に modelAnswer を含める想定
+type CaseModelAnswer = {
+  goal: string;
+  kpi: string;
+  framework: string;
+  hypothesis: string;
+  deepDivePlan: string;
+  analysis: string;
+  solutions: string;
+  risks: string;
+  wrapUp: string;
+};
+
 // ✅ 旧planは表示上の互換だけ残す（将来削除OK）
 type Plan = "free" | "pro" | "elite";
 
-// ✅ 新：case/generate の返却想定（meta対応版）
+// ✅ 新：case/generate の返却想定（10問プール対応）
 type GenerateOk = {
   ok: true;
   mode?: "unlimited" | "free" | "need_meta";
   requiredMeta?: number;
-  case: CaseQuestion;
+  case?: CaseQuestion; // 互換
+  cases?: CaseQuestion[]; // ✅ 本命
+  count?: number;
 };
 
 type EvalNormalized = {
@@ -66,6 +82,9 @@ type EvalNormalized = {
   feedback: CaseFeedback;
   totalScore?: number;
   logId?: number | string | null;
+
+  // ✅ 追加
+  modelAnswer?: CaseModelAnswer | null;
 };
 
 type ApiErr = {
@@ -99,12 +118,17 @@ const FEATURE_ID: FeatureId = "case_interview";
 const LS_KEY_EVAL = "genjob:case_eval:key";
 
 // ✅ Case session persistence（次のケース生成まで保持）
-const LS_KEY_CASE_SESSION_PREFIX = "case_session:v1";
+const LS_KEY_CASE_SESSION_PREFIX = "case_session:v2"; // ✅ v2（プール対応で上げる）
 
 type CaseSession = {
-  v: 1;
+  v: 2;
   domain: CaseDomain;
   pattern: CasePattern;
+
+  // ✅ 追加：プール
+  casePool: CaseQuestion[];
+  poolIndex: number;
+
   currentCase: CaseQuestion | null;
   answers: Answers;
   eval: {
@@ -112,6 +136,9 @@ type CaseSession = {
     feedback: CaseFeedback | null;
     totalScore: number | null;
     lastLogId: number | string | null;
+
+    // ✅ 追加：模範解答
+    modelAnswer: CaseModelAnswer | null;
   };
   updatedAt: string; // ISO
 };
@@ -122,6 +149,66 @@ function sleep(ms: number) {
 
 function makeIdempotencyKey(prefix: string) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function uniqById<T extends { id: string }>(arr: T[]) {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const x of arr) {
+    if (!x?.id) continue;
+    if (seen.has(x.id)) continue;
+    seen.add(x.id);
+    out.push(x);
+  }
+  return out;
+}
+
+const DEFAULT_GEN_COUNT = 10;
+
+function safeText(v: unknown, fallback = "—") {
+  const s = typeof v === "string" ? v.trim() : "";
+  return s ? s : fallback;
+}
+
+const ModelAnswerCard: React.FC<{ modelAnswer: CaseModelAnswer }> = ({ modelAnswer }) => {
+  const items: { key: keyof CaseModelAnswer; label: string; hint?: string }[] = [
+    { key: "goal", label: "ゴール定義", hint: "結論を先に固定" },
+    { key: "kpi", label: "KPI候補", hint: "まず測る指標" },
+    { key: "framework", label: "分解（フレーム）", hint: "式/ツリー/観点で構造化" },
+    { key: "hypothesis", label: "初手仮説", hint: "何が効きそう？" },
+    { key: "deepDivePlan", label: "深掘り手順", hint: "どの順で検証する？" },
+    { key: "analysis", label: "分析・計算例", hint: "置く数字/感度" },
+    { key: "solutions", label: "打ち手（優先順位）", hint: "最大3つで鋭く" },
+    { key: "risks", label: "前提・リスク", hint: "落とし穴潰し" },
+    { key: "wrapUp", label: "30秒クロージング", hint: "結論→理由→次アクション" },
+  ];
+
+  return (
+    <div className="mt-4 rounded-2xl border border-violet-200 bg-violet-50/50 p-4">
+      <div className="mb-3">
+        <p className="text-xs font-semibold text-violet-900">模範解答（考え方つき）</p>
+        <p className="mt-1 text-[11px] text-violet-700">
+          そのまま真似できる「型」。慣れてきたら自分の言葉に置き換える。
+        </p>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        {items.map((it) => (
+          <div key={it.key} className="rounded-2xl border border-violet-100 bg-white/90 p-3">
+            <div className="mb-2 flex items-start justify-between gap-3">
+              <div>
+                <p className="text-[11px] font-semibold text-slate-800">{it.label}</p>
+                {it.hint ? <p className="text-[10px] text-slate-500">{it.hint}</p> : null}
+              </div>
+            </div>
+            <pre className="whitespace-pre-wrap break-words rounded-xl border border-slate-100 bg-slate-50 p-2 text-[11px] leading-relaxed text-slate-700">
+              {safeText(modelAnswer[it.key])}
+            </pre>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export const CaseInterviewAI: React.FC = () => {
@@ -144,6 +231,12 @@ export const CaseInterviewAI: React.FC = () => {
   // ケース選択
   const [domain, setDomain] = useState<CaseDomain>("consulting");
   const [pattern, setPattern] = useState<CasePattern>("market_sizing");
+
+  // ✅ 10問プール
+  const [casePool, setCasePool] = useState<CaseQuestion[]>([]);
+  const [poolIndex, setPoolIndex] = useState(0);
+
+  // 現在のケース
   const [currentCase, setCurrentCase] = useState<CaseQuestion | null>(null);
 
   // 回答（ステップ別）
@@ -174,6 +267,9 @@ export const CaseInterviewAI: React.FC = () => {
   const [feedback, setFeedback] = useState<CaseFeedback | null>(null);
   const [totalScore, setTotalScore] = useState<number | null>(null);
   const [lastLogId, setLastLogId] = useState<number | string | null>(null);
+
+  // ✅ 追加：模範解答
+  const [modelAnswer, setModelAnswer] = useState<CaseModelAnswer | null>(null);
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [isEvaluating, setIsEvaluating] = useState(false);
@@ -216,7 +312,7 @@ export const CaseInterviewAI: React.FC = () => {
       const raw = localStorage.getItem(makeSessionKey(userId));
       if (!raw) return null;
       const parsed = JSON.parse(raw);
-      if (parsed?.v !== 1) return null;
+      if (parsed?.v !== 2) return null;
       return parsed as CaseSession;
     } catch {
       return null;
@@ -312,8 +408,51 @@ export const CaseInterviewAI: React.FC = () => {
   }, [supabase]);
 
   /* -------------------------
-     ✅ セッション復元（ケース/回答/評価）
-     - 次のケース生成を押すまで保持
+     フォームリセット（ケース切替時に使う）
+  ------------------------- */
+  const resetAnswers = () => {
+    setGoal("");
+    setKpi("");
+    setFramework("");
+    setHypothesis("");
+    setDeepDivePlan("");
+    setAnalysis("");
+    setSolutions("");
+    setRisks("");
+    setWrapUp("");
+    setScore({
+      structure: 0,
+      hypothesis: 0,
+      insight: 0,
+      practicality: 0,
+      communication: 0,
+    });
+    setFeedback(null);
+    setTotalScore(null);
+    setLastLogId(null);
+
+    // ✅ 追加：模範解答もリセット
+    setModelAnswer(null);
+  };
+
+  const materializeCase = (c: CaseQuestion) => {
+    setCurrentCase(c);
+    resetAnswers();
+    // ✅ 評価job復帰キーは混線防止で消す
+    clearLocalKey();
+    setActiveEvalKey(null);
+  };
+
+  const showPoolIndex = (idx: number) => {
+    const c = casePool[idx];
+    if (!c) return;
+    setPoolIndex(idx);
+    materializeCase(c);
+  };
+
+  /* -------------------------
+     ✅ セッション復元（プール/ケース/回答/評価）
+     - 次の「10問生成」を押すまで保持
   ------------------------- */
   useEffect(() => {
     if (authLoading) return;
@@ -324,6 +463,10 @@ export const CaseInterviewAI: React.FC = () => {
 
     setDomain(s.domain);
     setPattern(s.pattern);
+
+    setCasePool(s.casePool ?? []);
+    setPoolIndex(typeof s.poolIndex === "number" ? s.poolIndex : 0);
+
     setCurrentCase(s.currentCase);
 
     setGoal(s.answers.goal);
@@ -340,6 +483,10 @@ export const CaseInterviewAI: React.FC = () => {
     setFeedback(s.eval.feedback);
     setTotalScore(s.eval.totalScore);
     setLastLogId(s.eval.lastLogId);
+
+    // ✅ 追加
+    setModelAnswer(s.eval.modelAnswer ?? null);
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authLoading, userId]);
 
@@ -356,9 +503,11 @@ export const CaseInterviewAI: React.FC = () => {
 
     saveTimerRef.current = setTimeout(() => {
       const session: CaseSession = {
-        v: 1,
+        v: 2,
         domain,
         pattern,
+        casePool,
+        poolIndex,
         currentCase,
         answers: {
           goal,
@@ -376,6 +525,9 @@ export const CaseInterviewAI: React.FC = () => {
           feedback,
           totalScore,
           lastLogId,
+
+          // ✅ 追加
+          modelAnswer,
         },
         updatedAt: new Date().toISOString(),
       };
@@ -390,6 +542,8 @@ export const CaseInterviewAI: React.FC = () => {
     userId,
     domain,
     pattern,
+    casePool,
+    poolIndex,
     currentCase,
     goal,
     kpi,
@@ -404,10 +558,11 @@ export const CaseInterviewAI: React.FC = () => {
     feedback,
     totalScore,
     lastLogId,
+    modelAnswer,
   ]);
 
   /* -------------------------
-     共通：generation_jobs/status
+     共通：generation_jobs/status（評価側）
   ------------------------- */
   const fetchJobStatus = async (feature: FeatureId, key: string): Promise<GenerationJob | null> => {
     try {
@@ -456,32 +611,7 @@ export const CaseInterviewAI: React.FC = () => {
   };
 
   /* -------------------------
-     フォームリセット
-  ------------------------- */
-  const resetAnswers = () => {
-    setGoal("");
-    setKpi("");
-    setFramework("");
-    setHypothesis("");
-    setDeepDivePlan("");
-    setAnalysis("");
-    setSolutions("");
-    setRisks("");
-    setWrapUp("");
-    setScore({
-      structure: 0,
-      hypothesis: 0,
-      insight: 0,
-      practicality: 0,
-      communication: 0,
-    });
-    setFeedback(null);
-    setTotalScore(null);
-    setLastLogId(null);
-  };
-
-  /* -------------------------
-     ケース生成（API） ✅ meta confirm対応
+     ケース生成（API） ✅ 10問まとめて
      - 1st: metaConfirm=false
      - 402 need_meta → modal
      - confirm後: metaConfirm=true
@@ -494,7 +624,7 @@ export const CaseInterviewAI: React.FC = () => {
         "Content-Type": "application/json",
         ...(metaConfirm ? { "X-Meta-Confirm": "1" } : {}),
       },
-      body: JSON.stringify({ domain, pattern }),
+      body: JSON.stringify({ domain, pattern, count: DEFAULT_GEN_COUNT }),
     });
 
     const json = (await res.json().catch(() => ({}))) as GenerateOk | ApiErr;
@@ -507,7 +637,6 @@ export const CaseInterviewAI: React.FC = () => {
         requiredMeta,
         featureLabel: FEATURE_LABEL,
         onProceed: async () => {
-          // confirm押下時に残高が足りないなら purchaseへ
           const b = await fetchMyBalance();
           if (typeof b === "number" && b < requiredMeta) {
             closeMetaModal();
@@ -534,21 +663,28 @@ export const CaseInterviewAI: React.FC = () => {
 
     const data = json as GenerateOk;
 
-    // ✅ 次の問題を生成したタイミングで、前のセッションは破棄（要件通り）
+    // ✅ 次の問題セット生成時に前セッション破棄（要件通り）
     clearSession();
 
     // ✅ 互換表示（plan/remainingは今後消してOK）
-    // APIがmodeを返す場合、表示はfreeのままでOK（Meta課金が本体）
     if (data?.mode === "unlimited") setPlan("pro");
     else setPlan("free");
     setRemaining(null);
 
-    setCurrentCase(data.case);
-    resetAnswers();
+    const list = uniqById(
+      (Array.isArray(data?.cases) && data.cases.length ? data.cases : data?.case ? [data.case] : [])
+        .filter(Boolean) as CaseQuestion[]
+    );
 
-    // ✅ 新しいケースを出したら、前の評価job復帰キーは消しておく（混乱防止）
-    clearLocalKey();
-    setActiveEvalKey(null);
+    if (!list.length) {
+      setUiError("生成結果が不正です（casesがありません）");
+      return;
+    }
+
+    // ✅ 10問プールに保存して 1問目を表示
+    setCasePool(list);
+    setPoolIndex(0);
+    materializeCase(list[0]);
 
     const bb = await fetchMyBalance();
     if (typeof bb === "number") setMetaBalance(bb);
@@ -581,8 +717,13 @@ export const CaseInterviewAI: React.FC = () => {
       return;
     }
 
+    // generation_jobs から返す形が色々でも拾えるようにしておく
     const normalized: EvalNormalized | null =
-      result?.normalized ?? result?.result?.normalized ?? result?.result ?? result ?? null;
+      result?.normalized ??
+      result?.result?.normalized ??
+      result?.result ??
+      result ??
+      null;
 
     if (!normalized?.feedback) {
       setUiError("AI評価の結果が取得できませんでした。");
@@ -593,13 +734,13 @@ export const CaseInterviewAI: React.FC = () => {
     setFeedback(normalized.feedback);
     setTotalScore(typeof normalized.totalScore === "number" ? normalized.totalScore : null);
     setLastLogId(normalized.logId ?? null);
+
+    // ✅ 追加：模範解答
+    setModelAnswer((normalized.modelAnswer ?? null) as CaseModelAnswer | null);
   };
 
   /* -------------------------
      ✅ Job方式：評価API実行（meta confirm対応）
-     - 1st: metaConfirm=false
-     - 402 need_meta → modal
-     - confirm後: metaConfirm=true + 同じkey
   ------------------------- */
   const startEvalWithKey = async (key: string, metaConfirm: boolean, payload: any) => {
     pollingAbortRef.current.eval = false;
@@ -624,7 +765,6 @@ export const CaseInterviewAI: React.FC = () => {
         requiredMeta,
         featureLabel: FEATURE_LABEL,
         onProceed: async () => {
-          // ✅ confirm押下時に残高が足りないなら purchaseへ
           const b = await fetchMyBalance();
           if (typeof b === "number" && b < requiredMeta) {
             closeMetaModal();
@@ -696,7 +836,7 @@ export const CaseInterviewAI: React.FC = () => {
   };
 
   /* -------------------------
-     ✅ リロード復帰（localStorage → status → 反映 or ポーリング再開）
+     ✅ リロード復帰（評価ジョブのみ）
   ------------------------- */
   useEffect(() => {
     if (authLoading) return;
@@ -795,6 +935,9 @@ export const CaseInterviewAI: React.FC = () => {
       communication: 0,
     });
 
+    // ✅ 追加：評価前に模範解答を一旦消す
+    setModelAnswer(null);
+
     await runEvalJob({
       case: currentCase,
       answers: {
@@ -821,6 +964,21 @@ export const CaseInterviewAI: React.FC = () => {
   }, []);
 
   /* -------------------------
+     プール操作
+  ------------------------- */
+  const canPrev = casePool.length > 0 && poolIndex > 0;
+  const canNext = casePool.length > 0 && poolIndex < casePool.length - 1;
+
+  const goPrev = () => {
+    if (!canPrev) return;
+    showPoolIndex(poolIndex - 1);
+  };
+  const goNext = () => {
+    if (!canNext) return;
+    showPoolIndex(poolIndex + 1);
+  };
+
+  /* -------------------------
      レイアウト
   ------------------------- */
   if (authLoading) {
@@ -841,231 +999,358 @@ export const CaseInterviewAI: React.FC = () => {
 
   return (
     <>
-      <div className="flex h-full gap-6">
-        {/* 左：ケース生成 + 回答入力 */}
-        <div className="flex-1 space-y-6 overflow-y-auto pr-2">
-          {(authError || uiError) && (
-            <div className="rounded-2xl border border-rose-100 bg-rose-50 p-3 text-xs text-rose-700">
-              {authError ?? uiError}
-            </div>
-          )}
-
-          {/* ケースガチャ */}
-          <section className="rounded-2xl border border-sky-100 bg-sky-50/70 p-4 shadow-sm">
-            <div className="mb-3 flex items-center justify-between">
-              <div>
-                <h1 className="text-sm font-semibold text-sky-900">Case Interview Trainer</h1>
-                <p className="mt-1 text-[11px] text-sky-700">
-                  業界とケース種別を選んで「新しいケースを出す」を押すと、ケース問題が生成されます。
-                </p>
-
-                {/* 互換表示（不要なら消してOK） */}
-                <p className="mt-1 text-[11px] text-sky-700">
-                  Plan: <span className="font-semibold">{plan}</span>
-                  {typeof remaining === "number" && (
-                    <>
-                      {" "}
-                      / 今月残り: <span className="font-semibold">{remaining}</span>
-                    </>
-                  )}
-                </p>
-
-                <p className="mt-1 text-[11px] text-sky-700">
-                  META:{" "}
-                  <span className="font-semibold">
-                    {typeof metaBalance === "number" ? metaBalance : "-"}
-                  </span>
-                </p>
+      {/* ✅ 全体スクロール（下段に評価結果を出すため） */}
+      <div className="flex h-full flex-col gap-6 overflow-y-auto">
+        {/* ✅ 上段：2カラム */}
+        <div className="flex gap-6">
+          {/* 左：ケース生成 + 回答入力 */}
+          <div className="flex-1 space-y-6">
+            {(authError || uiError) && (
+              <div className="rounded-2xl border border-rose-100 bg-rose-50 p-3 text-xs text-rose-700">
+                {authError ?? uiError}
               </div>
-
-              <button
-                type="button"
-                onClick={handleGenerateCase}
-                disabled={isGenerating}
-                className={`rounded-full px-3 py-1.5 text-xs font-semibold text-white shadow-sm ${
-                  isGenerating ? "cursor-not-allowed bg-slate-300" : "bg-sky-500 hover:bg-sky-600"
-                }`}
-              >
-                {isGenerating ? "生成中…" : "🎲 新しいケースを出す"}
-              </button>
-            </div>
-
-            <div className="mb-2 grid grid-cols-3 gap-3">
-              <div>
-                <label className="text-[11px] text-slate-600">業界モード</label>
-                <select
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 px-2 py-1.5 text-xs outline-none"
-                  value={domain}
-                  onChange={(e) => setDomain(e.target.value as CaseDomain)}
-                >
-                  <option value="consulting">コンサル</option>
-                  <option value="general">日系総合（商社・メーカー等）</option>
-                  <option value="trading">総合商社ケース</option>
-                  <option value="ib">外銀IB / M&amp;A</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="text-[11px] text-slate-600">ケースの種類</label>
-                <select
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 px-2 py-1.5 text-xs outline-none"
-                  value={pattern}
-                  onChange={(e) => setPattern(e.target.value as CasePattern)}
-                >
-                  <option value="market_sizing">市場規模</option>
-                  <option value="profitability">利益改善</option>
-                  <option value="entry">市場参入</option>
-                  <option value="new_business">新規事業 / M&amp;A</option>
-                  <option value="operation">オペレーション改善</option>
-                </select>
-              </div>
-
-              <div className="flex items-end">
-                <p className="w-full text-[11px] text-slate-500">
-                  {currentCase ? (
-                    <>
-                      現在のケースID: <span className="font-mono">{currentCase.id}</span>
-                    </>
-                  ) : (
-                    "まずは「新しいケースを出す」でスタート。"
-                  )}
-                </p>
-              </div>
-            </div>
-          </section>
-
-          {/* ケース本文 */}
-          <section className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-800">① ケース本文</h2>
-            {currentCase ? (
-              <div className="space-y-2 text-xs text-slate-700">
-                <div className="mb-1 inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-[11px] text-slate-600">
-                  <span className="font-semibold">{currentCase.client}</span>
-                  <span className="text-slate-400">/</span>
-                  <span>{currentCase.title}</span>
-                </div>
-                <p>{currentCase.prompt}</p>
-                <p className="text-[11px] text-slate-500">ヒント：{currentCase.hint}</p>
-                <p className="text-[11px] text-slate-500">KPI例：{currentCase.kpiExamples}</p>
-              </div>
-            ) : (
-              <p className="text-xs text-slate-400">
-                ケースはまだ選ばれていません。「新しいケースを出す」を押してください。
-              </p>
             )}
-          </section>
 
-          {/* ② */}
-          <section className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-800">② ゴールとKPIの再定義</h2>
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="text-[11px] text-slate-500">ゴール（何を最大化 / 最適化する？）</label>
-                <textarea
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
-                  rows={2}
-                  value={goal}
-                  onChange={(e) => setGoal(e.target.value)}
-                />
+            {/* ケースガチャ */}
+            <section className="rounded-2xl border border-sky-100 bg-sky-50/70 p-4 shadow-sm">
+              <div className="mb-3 flex items-center justify-between">
+                <div>
+                  <h1 className="text-sm font-semibold text-sky-900">Case Interview Trainer</h1>
+                  <p className="mt-1 text-[11px] text-sky-700">
+                    業界とケース種別を選んで「新しいケースセット(10)」を押すと、ケースが10問生成されます。
+                  </p>
+
+                  {/* 互換表示（不要なら消してOK） */}
+                  <p className="mt-1 text-[11px] text-sky-700">
+                    Plan: <span className="font-semibold">{plan}</span>
+                    {typeof remaining === "number" && (
+                      <>
+                        {" "}
+                        / 今月残り: <span className="font-semibold">{remaining}</span>
+                      </>
+                    )}
+                  </p>
+
+                  <p className="mt-1 text-[11px] text-sky-700">
+                    META:{" "}
+                    <span className="font-semibold">
+                      {typeof metaBalance === "number" ? metaBalance : "-"}
+                    </span>
+                  </p>
+
+                  <p className="mt-1 text-[11px] text-sky-700">
+                    問題プール: <span className="font-semibold">{casePool.length || 0}</span>
+                    {casePool.length > 0 && (
+                      <>
+                        {" "}
+                        / 表示中:{" "}
+                        <span className="font-semibold">
+                          {poolIndex + 1}/{casePool.length}
+                        </span>
+                      </>
+                    )}
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={goPrev}
+                    disabled={!canPrev}
+                    className={`rounded-full px-3 py-1.5 text-xs font-semibold ${
+                      canPrev
+                        ? "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                        : "cursor-not-allowed bg-slate-100 text-slate-300"
+                    }`}
+                  >
+                    ◀︎ 前
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={goNext}
+                    disabled={!canNext}
+                    className={`rounded-full px-3 py-1.5 text-xs font-semibold ${
+                      canNext
+                        ? "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                        : "cursor-not-allowed bg-slate-100 text-slate-300"
+                    }`}
+                  >
+                    次 ▶︎
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleGenerateCase}
+                    disabled={isGenerating}
+                    className={`rounded-full px-3 py-1.5 text-xs font-semibold text-white shadow-sm ${
+                      isGenerating ? "cursor-not-allowed bg-slate-300" : "bg-sky-500 hover:bg-sky-600"
+                    }`}
+                  >
+                    {isGenerating ? "生成中…" : `🎲 新しいケースセット(${DEFAULT_GEN_COUNT})`}
+                  </button>
+                </div>
               </div>
-              <div>
-                <label className="text-[11px] text-slate-500">KPI（追うべき指標）</label>
-                <textarea
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
-                  rows={2}
-                  value={kpi}
-                  onChange={(e) => setKpi(e.target.value)}
-                />
+
+              <div className="mb-2 grid grid-cols-3 gap-3">
+                <div>
+                  <label className="text-[11px] text-slate-600">業界モード</label>
+                  <select
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 px-2 py-1.5 text-xs outline-none"
+                    value={domain}
+                    onChange={(e) => setDomain(e.target.value as CaseDomain)}
+                  >
+                    <option value="consulting">コンサル</option>
+                    <option value="general">日系総合（商社・メーカー等）</option>
+                    <option value="trading">総合商社ケース</option>
+                    <option value="ib">外銀IB / M&amp;A</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-[11px] text-slate-600">ケースの種類</label>
+                  <select
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 px-2 py-1.5 text-xs outline-none"
+                    value={pattern}
+                    onChange={(e) => setPattern(e.target.value as CasePattern)}
+                  >
+                    <option value="market_sizing">市場規模</option>
+                    <option value="profitability">利益改善</option>
+                    <option value="entry">市場参入</option>
+                    <option value="new_business">新規事業 / M&amp;A</option>
+                    <option value="operation">オペレーション改善</option>
+                  </select>
+                </div>
+
+                <div className="flex items-end">
+                  <p className="w-full text-[11px] text-slate-500">
+                    {currentCase ? (
+                      <>
+                        現在のケースID: <span className="font-mono">{currentCase.id}</span>
+                      </>
+                    ) : (
+                      "まずは「新しいケースセット(10)」でスタート。"
+                    )}
+                  </p>
+                </div>
               </div>
+
+              {/* ✅ プール内ジャンプ */}
+              {casePool.length > 0 && (
+                <div className="mt-2 flex items-center gap-2">
+                  <span className="text-[11px] text-slate-600">ジャンプ：</span>
+                  <select
+                    className="w-72 rounded-xl border border-slate-200 bg-white/80 px-2 py-1.5 text-xs"
+                    value={poolIndex}
+                    onChange={(e) => showPoolIndex(Number(e.target.value))}
+                  >
+                    {casePool.map((c, i) => (
+                      <option key={c.id} value={i}>
+                        {String(i + 1).padStart(2, "0")}. {c.title.slice(0, 28)}
+                        {c.title.length > 28 ? "…" : ""}
+                      </option>
+                    ))}
+                  </select>
+
+                  <button
+                    type="button"
+                    className="ml-auto rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] text-slate-600 hover:bg-slate-50"
+                    onClick={() => {
+                      if (casePool[poolIndex]) materializeCase(casePool[poolIndex]);
+                    }}
+                  >
+                    今のケースを初期状態に戻す
+                  </button>
+                </div>
+              )}
+            </section>
+
+            {/* ケース本文 */}
+            <section className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
+              <h2 className="mb-2 text-sm font-semibold text-slate-800">① ケース本文</h2>
+              {currentCase ? (
+                <div className="space-y-2 text-xs text-slate-700">
+                  <div className="mb-1 inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-[11px] text-slate-600">
+                    <span className="font-semibold">{currentCase.client}</span>
+                    <span className="text-slate-400">/</span>
+                    <span>{currentCase.title}</span>
+                  </div>
+                  <p className="whitespace-pre-wrap">{currentCase.prompt}</p>
+                  <p className="text-[11px] text-slate-500">ヒント：{currentCase.hint}</p>
+                  <p className="text-[11px] text-slate-500">KPI例：{currentCase.kpiExamples}</p>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-400">
+                  ケースはまだ選ばれていません。「新しいケースセット(10)」を押してください。
+                </p>
+              )}
+            </section>
+
+            {/* ② */}
+            <section className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
+              <h2 className="mb-2 text-sm font-semibold text-slate-800">② ゴールとKPIの再定義</h2>
+              <div className="space-y-3 text-xs">
+                <div>
+                  <label className="text-[11px] text-slate-500">
+                    ゴール（何を最大化 / 最適化する？）
+                  </label>
+                  <textarea
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
+                    rows={2}
+                    value={goal}
+                    onChange={(e) => setGoal(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slate-500">KPI（追うべき指標）</label>
+                  <textarea
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
+                    rows={2}
+                    value={kpi}
+                    onChange={(e) => setKpi(e.target.value)}
+                  />
+                </div>
+              </div>
+            </section>
+
+            {/* ③ */}
+            <section className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
+              <h2 className="mb-2 text-sm font-semibold text-slate-800">③ フレームワーク & 仮説</h2>
+              <div className="grid grid-cols-1 gap-4 text-xs md:grid-cols-2">
+                <div>
+                  <label className="text-[11px] text-slate-500">フレーム / 分解の仕方</label>
+                  <textarea
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
+                    rows={4}
+                    value={framework}
+                    onChange={(e) => setFramework(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slate-500">初期仮説（1〜2行でOK）</label>
+                  <textarea
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
+                    rows={4}
+                    value={hypothesis}
+                    onChange={(e) => setHypothesis(e.target.value)}
+                  />
+                </div>
+              </div>
+            </section>
+
+            {/* ④ */}
+            <section className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
+              <h2 className="mb-2 text-sm font-semibold text-slate-800">④ 深掘りの進め方 & 分析</h2>
+              <div className="grid grid-cols-1 gap-4 text-xs md:grid-cols-2">
+                <div>
+                  <label className="text-[11px] text-slate-500">
+                    何から確認する？（深掘り順序）
+                  </label>
+                  <textarea
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
+                    rows={4}
+                    value={deepDivePlan}
+                    onChange={(e) => setDeepDivePlan(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slate-500">分析メモ（数字・示唆）</label>
+                  <textarea
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
+                    rows={4}
+                    value={analysis}
+                    onChange={(e) => setAnalysis(e.target.value)}
+                  />
+                </div>
+              </div>
+            </section>
+
+            {/* ⑤ */}
+            <section className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
+              <h2 className="mb-2 text-sm font-semibold text-slate-800">⑤ 打ち手・リスク・まとめ</h2>
+              <div className="space-y-3 text-xs">
+                <div>
+                  <label className="text-[11px] text-slate-500">打ち手（3つ以内に絞る）</label>
+                  <textarea
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
+                    rows={3}
+                    value={solutions}
+                    onChange={(e) => setSolutions(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slate-500">リスク & 前提（1〜3行）</label>
+                  <textarea
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
+                    rows={3}
+                    value={risks}
+                    onChange={(e) => setRisks(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slate-500">
+                    クロージング（結論→理由→次アクション）
+                  </label>
+                  <textarea
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
+                    rows={3}
+                    value={wrapUp}
+                    onChange={(e) => setWrapUp(e.target.value)}
+                  />
+                </div>
+              </div>
+            </section>
+          </div>
+
+          {/* 右：スコアのみ（フィードバックは下段へ移動） */}
+          <aside className="w-72 shrink-0 space-y-4">
+            <div className="rounded-2xl border border-sky-100 bg-sky-50/80 p-4 shadow-sm">
+              <h3 className="mb-2 text-xs font-semibold tracking-wide text-sky-700">
+                ケース構造スコア
+              </h3>
+              <p className="mb-2 text-[11px] text-sky-800">OpenAI評価の結果を反映しています。</p>
+
+              <ul className="space-y-1.5 text-xs text-slate-700">
+                <li className="flex justify-between">
+                  <span>構造化（MECE）</span>
+                  <span className="font-semibold">{score.structure}/10</span>
+                </li>
+                <li className="flex justify-between">
+                  <span>仮説の切れ味</span>
+                  <span className="font-semibold">{score.hypothesis}/10</span>
+                </li>
+                <li className="flex justify-between">
+                  <span>示唆・インサイト</span>
+                  <span className="font-semibold">{score.insight}/10</span>
+                </li>
+                <li className="flex justify-between">
+                  <span>実現可能性</span>
+                  <span className="font-semibold">{score.practicality}/10</span>
+                </li>
+                <li className="flex justify-between">
+                  <span>伝え方・一貫性</span>
+                  <span className="font-semibold">{score.communication}/10</span>
+                </li>
+              </ul>
+
+              {typeof totalScore === "number" && (
+                <div className="mt-3 rounded-xl border border-slate-100 bg-white/80 p-3">
+                  <p className="text-[11px] text-slate-500">合計（暫定）</p>
+                  <p className="text-2xl font-semibold text-slate-900">{totalScore}</p>
+                  <p className="mt-1 text-[11px] text-slate-500">※ 50点満点想定</p>
+                </div>
+              )}
             </div>
-          </section>
+          </aside>
+        </div>
 
-          {/* ③ */}
-          <section className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-800">③ フレームワーク & 仮説</h2>
-            <div className="grid grid-cols-1 gap-4 text-xs md:grid-cols-2">
-              <div>
-                <label className="text-[11px] text-slate-500">フレーム / 分解の仕方</label>
-                <textarea
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
-                  rows={4}
-                  value={framework}
-                  onChange={(e) => setFramework(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="text-[11px] text-slate-500">初期仮説（1〜2行でOK）</label>
-                <textarea
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
-                  rows={4}
-                  value={hypothesis}
-                  onChange={(e) => setHypothesis(e.target.value)}
-                />
-              </div>
-            </div>
-          </section>
+        {/* ✅ 下段：余白（枠外）に評価ボタン + フィードバック + 模範解答 */}
+        <section className="rounded-3xl border border-violet-100 bg-violet-50/50 p-5 shadow-sm">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-violet-900">
+              フィードバック &amp; 模範回答イメージ
+            </h3>
 
-          {/* ④ */}
-          <section className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-800">④ 深掘りの進め方 & 分析</h2>
-            <div className="grid grid-cols-1 gap-4 text-xs md:grid-cols-2">
-              <div>
-                <label className="text-[11px] text-slate-500">何から確認する？（深掘り順序）</label>
-                <textarea
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
-                  rows={4}
-                  value={deepDivePlan}
-                  onChange={(e) => setDeepDivePlan(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="text-[11px] text-slate-500">分析メモ（数字・示唆）</label>
-                <textarea
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
-                  rows={4}
-                  value={analysis}
-                  onChange={(e) => setAnalysis(e.target.value)}
-                />
-              </div>
-            </div>
-          </section>
-
-          {/* ⑤ */}
-          <section className="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-800">⑤ 打ち手・リスク・まとめ</h2>
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="text-[11px] text-slate-500">打ち手（3つ以内に絞る）</label>
-                <textarea
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
-                  rows={3}
-                  value={solutions}
-                  onChange={(e) => setSolutions(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="text-[11px] text-slate-500">リスク & 前提（1〜3行）</label>
-                <textarea
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
-                  rows={3}
-                  value={risks}
-                  onChange={(e) => setRisks(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="text-[11px] text-slate-500">クロージング（結論→理由→次アクション）</label>
-                <textarea
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm outline-none"
-                  rows={3}
-                  value={wrapUp}
-                  onChange={(e) => setWrapUp(e.target.value)}
-                />
-              </div>
-            </div>
-          </section>
-
-          {/* 評価 */}
-          <section className="mb-6 flex items-center justify-end gap-2">
             <button
               type="button"
               onClick={handleEvaluate}
@@ -1078,74 +1363,46 @@ export const CaseInterviewAI: React.FC = () => {
             >
               {isEvaluating ? "評価中…" : "AIに評価してもらう"}
             </button>
-          </section>
-        </div>
-
-        {/* 右：スコア & フィードバック */}
-        <aside className="w-72 shrink-0 space-y-4">
-          <div className="rounded-2xl border border-sky-100 bg-sky-50/80 p-4 shadow-sm">
-            <h3 className="mb-2 text-xs font-semibold tracking-wide text-sky-700">
-              ケース構造スコア
-            </h3>
-            <p className="mb-2 text-[11px] text-sky-800">OpenAI評価の結果を反映しています。</p>
-
-            <ul className="space-y-1.5 text-xs text-slate-700">
-              <li className="flex justify-between">
-                <span>構造化（MECE）</span>
-                <span className="font-semibold">{score.structure}/10</span>
-              </li>
-              <li className="flex justify-between">
-                <span>仮説の切れ味</span>
-                <span className="font-semibold">{score.hypothesis}/10</span>
-              </li>
-              <li className="flex justify-between">
-                <span>示唆・インサイト</span>
-                <span className="font-semibold">{score.insight}/10</span>
-              </li>
-              <li className="flex justify-between">
-                <span>実現可能性</span>
-                <span className="font-semibold">{score.practicality}/10</span>
-              </li>
-              <li className="flex justify-between">
-                <span>伝え方・一貫性</span>
-                <span className="font-semibold">{score.communication}/10</span>
-              </li>
-            </ul>
-
-            {typeof totalScore === "number" && (
-              <div className="mt-3 rounded-xl border border-slate-100 bg-white/80 p-3">
-                <p className="text-[11px] text-slate-500">合計（暫定）</p>
-                <p className="text-2xl font-semibold text-slate-900">{totalScore}</p>
-                <p className="mt-1 text-[11px] text-slate-500">※ 50点満点想定</p>
-              </div>
-            )}
           </div>
 
-          <div className="rounded-2xl border border-slate-100 bg-white/90 p-4 shadow-sm">
-            <h3 className="mb-2 text-xs font-semibold text-slate-800">フィードバック（文章）</h3>
+          <div className="mt-4 rounded-2xl border border-slate-100 bg-white/90 p-4">
             {feedback ? (
-              <div className="space-y-2 text-[11px] text-slate-700">
-                <p>{feedback.summary}</p>
+              <div className="space-y-3 text-[11px] text-slate-700">
+                <p className="leading-relaxed">{feedback.summary}</p>
+
                 <div>
                   <p className="mb-1 font-semibold text-slate-800">◎ 良い点</p>
-                  <pre className="whitespace-pre-wrap">{feedback.goodPoints}</pre>
+                  <pre className="whitespace-pre-wrap leading-relaxed">{feedback.goodPoints}</pre>
                 </div>
+
                 <div>
                   <p className="mb-1 font-semibold text-slate-800">▲ 改善ポイント</p>
-                  <pre className="whitespace-pre-wrap">{feedback.improvePoints}</pre>
+                  <pre className="whitespace-pre-wrap leading-relaxed">{feedback.improvePoints}</pre>
                 </div>
+
                 <div>
                   <p className="mb-1 font-semibold text-slate-800">▶ 次にやると良いこと</p>
-                  <pre className="whitespace-pre-wrap">{feedback.nextTraining}</pre>
+                  <pre className="whitespace-pre-wrap leading-relaxed">{feedback.nextTraining}</pre>
                 </div>
+
+                {/* ✅ 追加：模範解答 */}
+                {modelAnswer ? (
+                  <ModelAnswerCard modelAnswer={modelAnswer} />
+                ) : (
+                  <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-[11px] text-slate-600">
+                      ※ このケースの「模範解答」はまだ表示されていません（APIが modelAnswer を返すとここに出ます）
+                    </p>
+                  </div>
+                )}
               </div>
             ) : (
-              <p className="text-[11px] text-slate-400">
+              <p className="text-[11px] text-slate-500">
                 ここにAIからの良い点・改善点・次にやる練習が表示されます。
               </p>
             )}
           </div>
-        </aside>
+        </section>
       </div>
 
       {/* ✅ 共通METAモーダル */}
@@ -1159,7 +1416,6 @@ export const CaseInterviewAI: React.FC = () => {
         title={metaTitle}
         message={metaMessage}
         onConfirm={async () => {
-          // ✅ confirm押下時に必ず「最新残高」を見て、不足なら purchaseへ飛ばす
           const required = metaNeed;
           const latest = await fetchMyBalance();
           if (typeof latest === "number") setMetaBalance(latest);

@@ -18,7 +18,18 @@ const supabaseAdmin = createClient(
 type CaseDomain = "consulting" | "general" | "trading" | "ib";
 type CasePattern = "market_sizing" | "profitability" | "entry" | "new_business" | "operation";
 
-type FeatureId = "case_interview";
+type FeatureId = "case_generate"; // ✅ 生成はこっち（usage/check の key と揃える）
+
+type CaseQuestion = {
+  id: string;
+  domain: CaseDomain;
+  pattern: CasePattern;
+  title: string;
+  client: string;
+  prompt: string;
+  hint: string;
+  kpiExamples: string;
+};
 
 function safeJsonParse(s: string) {
   try {
@@ -39,6 +50,62 @@ const isValidPattern = (v: any): v is CasePattern =>
   v === "entry" ||
   v === "new_business" ||
   v === "operation";
+
+function clampInt(n: any, min: number, max: number, fallback: number) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return fallback;
+  return Math.max(min, Math.min(max, Math.trunc(x)));
+}
+
+function normalizeOne(
+  raw: any,
+  domain: CaseDomain,
+  pattern: CasePattern,
+  idx: number
+): CaseQuestion | null {
+  if (!raw || typeof raw !== "object") return null;
+
+  const id = String(raw.id ?? "").trim();
+  const title = String(raw.title ?? "").trim();
+  const client = String(raw.client ?? "").trim();
+  const prompt = String(raw.prompt ?? "").trim();
+  const hint = String(raw.hint ?? "").trim();
+  const kpiExamples = String(raw.kpiExamples ?? "").trim();
+
+  if (!title || !client || !prompt) return null;
+
+  // id が無い/短い場合は補完
+  const safeId =
+    id && id.length >= 6
+      ? id
+      : `case_${domain}_${pattern}_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 8)}`;
+
+  return {
+    id: safeId,
+    domain,
+    pattern,
+    title,
+    client,
+    prompt,
+    hint: hint || "（ヒントなし）",
+    kpiExamples: kpiExamples || "（KPI例なし）",
+  };
+}
+
+function uniqById(arr: CaseQuestion[]) {
+  const seen = new Set<string>();
+  const out: CaseQuestion[] = [];
+  for (const x of arr) {
+    if (!x?.id) continue;
+    let id = x.id;
+    if (seen.has(id)) {
+      id = `${id}_${Math.random().toString(36).slice(2, 6)}`;
+    }
+    seen.add(id);
+    out.push({ ...x, id });
+  }
+  return out;
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -69,13 +136,14 @@ export async function POST(req: NextRequest) {
       req.headers.get("x-meta-confirm") === "1" ||
       req.headers.get("X-Meta-Confirm") === "1";
 
-    // ✅ 入力（domain/patternのみ）
+    // ✅ 入力（domain/pattern/count）
     const body = (await req.json().catch(() => null)) as
-      | { domain?: CaseDomain; pattern?: CasePattern }
+      | { domain?: CaseDomain; pattern?: CasePattern; count?: number }
       | null;
 
     const domain = body?.domain;
     const pattern = body?.pattern;
+    const count = clampInt(body?.count, 1, 20, 10); // ✅ デフォ10（上限20にしておく）
 
     if (!isValidDomain(domain) || !isValidPattern(pattern)) {
       return NextResponse.json(
@@ -84,7 +152,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const feature: FeatureId = "case_interview";
+    const feature: FeatureId = "case_generate";
 
     // =========================
     // ✅ 1) usage/check（消費しない）
@@ -112,20 +180,14 @@ export async function POST(req: NextRequest) {
           );
         }
 
-        // ✅ confirm後でも残高不足なら、ここで止めるのが安全
-        // （UI側は /api/meta/balance で purchase モードにして /pricing へ）
-        return NextResponse.json(
-          { ok: false, error: "need_meta", requiredMeta },
-          { status: 402 }
-        );
-      }
-
-      if (checkRes.status === 401) {
+        // ✅ confirm後は “実行は許可” する（課金は成功後）
+        // ここで止めない。後段の consume_meta_fifo が失敗したら 402 を返す。
+      } else if (checkRes.status === 401) {
         return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+      } else {
+        console.error("usage/check unexpected", checkRes.status, checkBody);
+        return NextResponse.json({ ok: false, error: "usage_error" }, { status: 500 });
       }
-
-      console.error("usage/check unexpected", checkRes.status, checkBody);
-      return NextResponse.json({ ok: false, error: "usage_error" }, { status: 500 });
     }
 
     const proceedMode: "unlimited" | "free" | "need_meta" =
@@ -133,27 +195,37 @@ export async function POST(req: NextRequest) {
     const requiredMeta = Number(checkBody?.requiredMeta ?? 1);
 
     // =========================
-    // ✅ 2) OpenAI（ケース生成）
+    // ✅ 2) OpenAI（ケース生成：まとめて count 件）
     // =========================
     const system = `
 あなたはケース面接の出題者。日本語。現実のビジネス文脈。
 必ず「JSONのみ」で返す（前後に文章を付けない）。
+次の形で返す：
+{
+  "cases": [ ... ]
+}
+cases は必ず指定件数ぶん生成する。id は英数字と_。prompt は4〜10行。
 `.trim();
 
     const userPrompt = `
 domain: ${domain}
 pattern: ${pattern}
+count: ${count}
 
-次のJSONでケース問題を1つ生成して：
+次のJSONを返して：
 {
-  "id": "一意っぽいid（英数字と_）",
-  "domain": "${domain}",
-  "pattern": "${pattern}",
-  "title": "短いタイトル",
-  "client": "クライアント名（具体的に）",
-  "prompt": "受験者への指示（4〜8行、曖昧すぎない）",
-  "hint": "分解のヒント（1〜3行）",
-  "kpiExamples": "見るべきKPI例（改行OK）"
+  "cases": [
+    {
+      "id": "一意っぽいid（英数字と_）",
+      "domain": "${domain}",
+      "pattern": "${pattern}",
+      "title": "短いタイトル",
+      "client": "クライアント名（具体的に）",
+      "prompt": "受験者への指示（4〜10行、曖昧すぎない）",
+      "hint": "分解のヒント（1〜3行）",
+      "kpiExamples": "見るべきKPI例（改行OK）"
+    }
+  ]
 }
 `.trim();
 
@@ -165,7 +237,7 @@ pattern: ${pattern}
       },
       body: JSON.stringify({
         model: OPENAI_MODEL_GEN,
-        temperature: 0.7,
+        temperature: 0.8,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: system },
@@ -185,37 +257,65 @@ pattern: ${pattern}
 
     const j = await r.json();
     const content = j?.choices?.[0]?.message?.content ?? "";
-    const caseObj = safeJsonParse(content);
+    const obj = safeJsonParse(content);
+
+    const rawCases: any[] = Array.isArray(obj?.cases) ? obj.cases : [];
+    const normalized = rawCases
+      .map((c, i) => normalizeOne(c, domain, pattern, i))
+      .filter(Boolean) as CaseQuestion[];
+
+    const cases = uniqById(normalized).slice(0, count);
+
+    if (!cases.length) {
+      return NextResponse.json(
+        { ok: false, error: "invalid_response", message: "生成結果が不正です（casesがありません）" },
+        { status: 500 }
+      );
+    }
 
     // =========================
     // ✅ 3) 成功後だけ課金
     // =========================
     if (proceedMode === "free") {
-      // free枠があるなら usage/log に寄せる（あなたの既存ロジックに合わせる）
+      // free枠があるなら usage/log
       await fetch(`${baseUrl}/api/usage/log`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: cookieHeader },
         body: JSON.stringify({ feature }),
       }).catch(() => {});
-    } else if (proceedMode === "need_meta" && metaConfirm) {
-      // Meta課金
+    } else if (proceedMode === "need_meta") {
+      // ✅ metaConfirm していないなら、本当はここまで来ない想定だけど念のため
+      if (!metaConfirm) {
+        return NextResponse.json(
+          { ok: false, error: "need_meta", requiredMeta },
+          { status: 402 }
+        );
+      }
+
+      // ✅ 成功後にだけ課金
       const { error: consumeErr } = await supabaseAdmin.rpc("consume_meta_fifo", {
         p_auth_user_id: authUserId,
         p_cost: requiredMeta,
       });
 
       if (consumeErr) {
-        // ここで失敗したら、ケースは返しちゃってるので「返す前に課金」をしたいなら順序を入れ替える
-        // ただしその場合、OpenAI失敗で課金される事故が起きる
+        // 残高不足など → 402 にしてUI側で購入導線へ
         console.error("consume_meta_fifo failed:", consumeErr);
+        return NextResponse.json(
+          { ok: false, error: "need_meta", requiredMeta, message: "METAが不足しています。" },
+          { status: 402 }
+        );
       }
     }
 
+    // ✅ 互換：単体caseも返す（UI側がまだ単体前提でも死なない）
     return NextResponse.json({
       ok: true,
       mode: proceedMode,
       requiredMeta,
-      case: caseObj,
+      case: cases[0],
+      cases,
+      count: cases.length,
     });
   } catch (e) {
     console.error(e);

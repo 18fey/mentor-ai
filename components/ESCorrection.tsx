@@ -1,7 +1,7 @@
 // src/components/ESCorrection.tsx
 "use client";
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createBrowserClient } from "@supabase/ssr";
 import { MetaConfirmModal } from "@/components/MetaConfirmModal";
@@ -27,18 +27,35 @@ type EsFeedback = {
   sampleStructure: string;
 };
 
-const QUESTION_LABEL: Record<QuestionType, string> = {
-  self_pr: "自己PR",
-  gakuchika: "学生時代に力を入れたこと",
-  why_company: "志望動機（企業）",
-  why_industry: "志望動機（業界）",
-  other: "その他",
+type DraftResponse = {
+  ok: true;
+  usedThisMonth?: number | null;
+  freeLimit?: number | null;
+  score: EsScore;
+  strategy: string;
+  keyEdits: string[];
+  altOpening: string;
+  altClosing: string;
+  draft: string;
 };
 
-// usage/consume 側
-const USAGE_FEATURE_EVAL = "es_correction";
-// draft も同じ枠でカウントするなら同一でOK
-const USAGE_FEATURE_DRAFT = "es_draft";
+type EvalResponse = {
+  ok: true;
+  plan?: any;
+  usedThisMonth?: number | null;
+  freeLimit?: number | null;
+  score: EsScore;
+  feedback: EsFeedback;
+};
+
+type ApiErr = {
+  ok?: false;
+  error?: string;
+  message?: string;
+  requiredMeta?: number;
+  required?: number;
+  balance?: number | null;
+};
 
 type StoryCard = {
   id: string;
@@ -57,6 +74,32 @@ type StoryCard = {
   isSensitive: boolean;
   createdAt: string;
 };
+
+const QUESTION_LABEL: Record<QuestionType, string> = {
+  self_pr: "自己PR",
+  gakuchika: "学生時代に力を入れたこと",
+  why_company: "志望動機（企業）",
+  why_industry: "志望動機（業界）",
+  other: "その他",
+};
+
+/** ===== Job 방식（IndustryInsights と同じ） =====
+ * feature は generation_jobs.feature_id と一致させる
+ */
+const FEATURE_EVAL = "es_correction";
+const FEATURE_DRAFT = "es_draft";
+const LS_KEY_EVAL = `last_job:${FEATURE_EVAL}`;
+const LS_KEY_DRAFT = `last_job:${FEATURE_DRAFT}`;
+
+function newIdempotencyKey() {
+  // @ts-ignore
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 export const ESCorrection: React.FC = () => {
   const router = useRouter();
@@ -80,29 +123,25 @@ export const ESCorrection: React.FC = () => {
 
   const [score, setScore] = useState<EsScore | null>(null);
   const [feedback, setFeedback] = useState<EsFeedback | null>(null);
+  const [aiDraft, setAiDraft] = useState<string | null>(null);
+
   const [isEvaluating, setIsEvaluating] = useState(false);
+  const [draftLoading, setDraftLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // 🔒 ロック（サーバが locked を返す設計がある場合に備えて残す）
+  // 🔒（将来サーバが返す設計があるなら拾えるように残す）
   const [locked, setLocked] = useState(false);
   const [lockMessage, setLockMessage] = useState<string | null>(null);
-
-  const charCount = text.trim().length;
 
   // ストーリーカード
   const [storyCards, setStoryCards] = useState<StoryCard[]>([]);
   const [cardsLoading, setCardsLoading] = useState(false);
   const [cardsError, setCardsError] = useState<string | null>(null);
-
-  // AIドラフト
-  const [aiDraft, setAiDraft] = useState<string | null>(null);
-  const [draftLoading, setDraftLoading] = useState(false);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
 
-  // ✅ UIゲート用：処理中
-  const [isCheckingGate, setIsCheckingGate] = useState(false);
+  const charCount = text.trim().length;
 
-  // ✅ 共通METAモーダル
+  // ✅ 共通METAモーダル（IndustryInsights と同じ挙動）
   const [metaModalOpen, setMetaModalOpen] = useState(false);
   const [metaBalance, setMetaBalance] = useState<number | null>(null);
   const [metaNeed, setMetaNeed] = useState<number>(1);
@@ -110,9 +149,11 @@ export const ESCorrection: React.FC = () => {
   const [metaTitle, setMetaTitle] = useState<string | undefined>(undefined);
   const [metaMessage, setMetaMessage] = useState<string | undefined>(undefined);
   const [pendingAction, setPendingAction] = useState<null | (() => Promise<void>)>(null);
-
-  // ✅ ① 追加：モーダル表示用ラベル（スコアリング/ドラフトで切替）
   const [metaFeatureLabel, setMetaFeatureLabel] = useState<string>("スコアリング");
+
+  // ✅ 復帰用：最後の key（デバッグ表示したければ使える）
+  const [lastEvalKey, setLastEvalKey] = useState<string | null>(null);
+  const [lastDraftKey, setLastDraftKey] = useState<string | null>(null);
 
   const closeMetaModal = () => {
     setMetaModalOpen(false);
@@ -121,7 +162,7 @@ export const ESCorrection: React.FC = () => {
     setPendingAction(null);
   };
 
-  // ✅ 残高取得（meta_lots合計RPCの結果を返す /api/meta/balance を信じる）
+  // ✅ 残高取得（UI用）
   const fetchMyBalance = async (): Promise<number | null> => {
     try {
       const res = await fetch("/api/meta/balance", { method: "POST" });
@@ -133,34 +174,43 @@ export const ESCorrection: React.FC = () => {
     }
   };
 
-  const openMetaModalFor = async (params: {
-    requiredMeta: number;
-    featureLabel: string;
-    onProceed: () => Promise<void>;
-  }) => {
-    const { requiredMeta, onProceed, featureLabel } = params;
+  /** ✅ status API で復帰（feature ごとに） */
+  const fetchJobStatus = async (feature: string, key: string) => {
+    const url = `/api/generation-jobs/status?feature=${encodeURIComponent(
+      feature
+    )}&key=${encodeURIComponent(key)}`;
+    const res = await fetch(url, { method: "GET" });
+    const data: any = await res.json().catch(() => ({}));
+    if (!res.ok) return { ok: false as const, status: res.status, data };
+    return { ok: true as const, data };
+  };
 
-    // ✅ ② 修正：呼び出し側のラベルをモーダルへ反映
-    setMetaFeatureLabel(featureLabel);
-
-    const b = await fetchMyBalance();
-    setMetaNeed(requiredMeta);
-    setMetaBalance(typeof b === "number" ? b : metaBalance);
-
-    const mode: "confirm" | "purchase" =
-      typeof b === "number" && b < requiredMeta ? "purchase" : "confirm";
-
-    setMetaMode(mode);
-    setMetaTitle(undefined);
-    setMetaMessage(undefined);
-
-    setPendingAction(() => async () => {
-      await onProceed();
-      const bb = await fetchMyBalance();
-      if (typeof bb === "number") setMetaBalance(bb);
-    });
-
-    setMetaModalOpen(true);
+  /** ✅ ポーリング */
+  const pollJobUntilDone = async (
+    feature: string,
+    key: string,
+    onSucceeded: (result: any) => void,
+    onFailed?: (message?: string) => void,
+    maxTries = 12,
+    intervalMs = 900
+  ) => {
+    for (let i = 0; i < maxTries; i++) {
+      const st = await fetchJobStatus(feature, key);
+      if (st.ok && st.data?.ok && st.data?.job) {
+        const job = st.data.job;
+        const status = String(job.status ?? "");
+        if (status === "succeeded" && job.result) {
+          onSucceeded(job.result);
+          return { done: true as const, status: "succeeded" as const };
+        }
+        if (status === "failed") {
+          onFailed?.(job.error_message);
+          return { done: true as const, status: "failed" as const };
+        }
+      }
+      await sleep(intervalMs);
+    }
+    return { done: false as const };
   };
 
   /* ------------------------------
@@ -182,8 +232,99 @@ export const ESCorrection: React.FC = () => {
   }, [supabase]);
 
   /* ------------------------------
-   ストーリーカード取得
-   ※ここは既存API仕様に合わせて userId を付けてる（可能ならサーバでセッション確定に寄せたい）
+   起動時：last_job があれば復帰（eval / draft 両方）
+  ------------------------------*/
+  useEffect(() => {
+    // eval
+    try {
+      const raw = localStorage.getItem(LS_KEY_EVAL);
+      if (raw) {
+        const j = JSON.parse(raw);
+        if (j?.key) {
+          const key: string = j.key;
+          setLastEvalKey(key);
+
+          (async () => {
+            const st = await fetchJobStatus(FEATURE_EVAL, key);
+            if (st.ok && st.data?.ok && st.data?.job) {
+              const job = st.data.job;
+              const status = String(job.status ?? "");
+              if (status === "succeeded" && job.result) {
+                const r = job.result as EvalResponse;
+                if (r?.score && r?.feedback) {
+                  setScore(r.score);
+                  setFeedback(r.feedback);
+                }
+                return;
+              }
+              if (status === "running" || status === "queued") {
+                await pollJobUntilDone(
+                  FEATURE_EVAL,
+                  key,
+                  (res) => {
+                    const r = res as EvalResponse;
+                    if (r?.score && r?.feedback) {
+                      setScore(r.score);
+                      setFeedback(r.feedback);
+                    }
+                  },
+                  undefined,
+                  8,
+                  800
+                );
+              }
+            }
+          })();
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // draft
+    try {
+      const raw = localStorage.getItem(LS_KEY_DRAFT);
+      if (raw) {
+        const j = JSON.parse(raw);
+        if (j?.key) {
+          const key: string = j.key;
+          setLastDraftKey(key);
+
+          (async () => {
+            const st = await fetchJobStatus(FEATURE_DRAFT, key);
+            if (st.ok && st.data?.ok && st.data?.job) {
+              const job = st.data.job;
+              const status = String(job.status ?? "");
+              if (status === "succeeded" && job.result) {
+                const r = job.result as DraftResponse;
+                if (typeof r?.draft === "string") setAiDraft(r.draft);
+                return;
+              }
+              if (status === "running" || status === "queued") {
+                await pollJobUntilDone(
+                  FEATURE_DRAFT,
+                  key,
+                  (res) => {
+                    const r = res as DraftResponse;
+                    if (typeof r?.draft === "string") setAiDraft(r.draft);
+                  },
+                  undefined,
+                  8,
+                  800
+                );
+              }
+            }
+          })();
+        }
+      }
+    } catch {
+      // ignore
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* ------------------------------
+   ストーリーカード取得（既存仕様のまま）
   ------------------------------*/
   useEffect(() => {
     if (!userId) return;
@@ -282,13 +423,19 @@ export const ESCorrection: React.FC = () => {
     setQType(mapTopicToQuestionType(card.topicType));
     setSelectedCardId(card.id);
     setAiDraft(null);
+
+    // カード差し替え時は復帰キーを消しておく（混ざると事故りやすい）
+    try {
+      localStorage.removeItem(LS_KEY_DRAFT);
+    } catch {}
+    setLastDraftKey(null);
   };
 
   /* ------------------------------
-   ES 評価（サーバが最終真実）
+   ES 評価（IndustryInsights と同じ：idempotency + 402 confirm）
   ------------------------------*/
-  const evaluateCore = async () => {
-    if (!text.trim()) return;
+  const evaluateCore = async (opts?: { key?: string; metaConfirm?: boolean }) => {
+    if (isEvaluating) return;
 
     setIsEvaluating(true);
     setErrorMessage(null);
@@ -297,36 +444,76 @@ export const ESCorrection: React.FC = () => {
     setLocked(false);
     setLockMessage(null);
 
+    const key = opts?.key ?? newIdempotencyKey();
+    setLastEvalKey(key);
+
+    try {
+      localStorage.setItem(LS_KEY_EVAL, JSON.stringify({ key, createdAt: Date.now() }));
+    } catch {
+      // ignore
+    }
+
     try {
       const res = await fetch("/api/es/eval", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // ✅ userId は送らない（cookieセッションで確定）
+        headers: {
+          "Content-Type": "application/json",
+          "X-Idempotency-Key": key,
+          ...(opts?.metaConfirm ? { "X-Meta-Confirm": "1" } : {}),
+        },
         body: JSON.stringify({ text, company, qType, limit }),
       });
 
       const data: any = await res.json().catch(() => ({}));
 
-      // ✅ サーバで meta 不足 (402) が来たら purchase
       if (!res.ok) {
-        if (res.status === 402) {
-          // ✅ ③ 修正：直purchaseルートでもラベルを切替
+        if (res.status === 402 && (data?.error === "need_meta" || data?.requiredMeta || data?.required)) {
           setMetaFeatureLabel("スコアリング（構成・ロジックチェック）");
 
-          const requiredMeta = Number(data?.required ?? data?.requiredMeta ?? 1);
+          const requiredMeta = Number(data?.requiredMeta ?? data?.required ?? 1);
           const b =
             typeof data?.balance === "number" ? Number(data.balance) : await fetchMyBalance();
 
           setMetaNeed(requiredMeta);
-          setMetaBalance(typeof b === "number" ? b : metaBalance);
-          setMetaMode("purchase");
-          setMetaTitle("METAが不足しています");
-          setMetaMessage(`この実行には META が ${requiredMeta} 必要です。購入して続行してください。`);
+          setMetaBalance(typeof b === "number" ? b : null);
+
+          const mode: "confirm" | "purchase" =
+            typeof b === "number" && b < requiredMeta ? "purchase" : "confirm";
+
+          setMetaMode(mode);
+          setMetaTitle("METAが必要です");
+          setMetaMessage(`この実行には META が ${requiredMeta} 必要です。続行しますか？`);
+
+          if (mode === "confirm") {
+            setPendingAction(() => async () => {
+              await evaluateCore({ key, metaConfirm: true });
+              const bb = await fetchMyBalance();
+              if (typeof bb === "number") setMetaBalance(bb);
+            });
+          } else {
+            setPendingAction(null);
+          }
+
           setMetaModalOpen(true);
           return;
         }
 
         setErrorMessage(data?.message ?? "AI添削に失敗しました。時間をおいて再度お試しください。");
+
+        // ✅ 途中で成功してる可能性があるので救済
+        await pollJobUntilDone(
+          FEATURE_EVAL,
+          key,
+          (res2) => {
+            const r = res2 as EvalResponse;
+            if (r?.score && r?.feedback) {
+              setScore(r.score);
+              setFeedback(r.feedback);
+            }
+          },
+          (msg) => setErrorMessage(msg ?? "ジョブが失敗しました。")
+        );
+
         return;
       }
 
@@ -335,74 +522,55 @@ export const ESCorrection: React.FC = () => {
         return;
       }
 
-      setScore(data.score ?? null);
-      setFeedback(data.feedback ?? null);
+      const okData = data as EvalResponse;
+      setScore(okData.score ?? null);
+      setFeedback(okData.feedback ?? null);
 
-      // locked を返す設計があるなら拾う（無ければ常に false のままでOK）
-      setLocked(Boolean(data.locked));
-      setLockMessage(typeof data.message === "string" ? data.message : null);
+      // locked（将来）
+      setLocked(Boolean((data as any).locked));
+      setLockMessage(typeof (data as any).message === "string" ? (data as any).message : null);
 
-      // 実行後、残高を更新しておく（UX）
       const bb = await fetchMyBalance();
       if (typeof bb === "number") setMetaBalance(bb);
     } catch {
       setErrorMessage("ネットワークエラーが発生しました。");
+
+      // ✅ ネットワークで落ちた場合も救済
+      await pollJobUntilDone(
+        FEATURE_EVAL,
+        key,
+        (res2) => {
+          const r = res2 as EvalResponse;
+          if (r?.score && r?.feedback) {
+            setScore(r.score);
+            setFeedback(r.feedback);
+          }
+        },
+        undefined,
+        8,
+        900
+      );
     } finally {
       setIsEvaluating(false);
     }
   };
 
   const handleEvaluate = async () => {
-    if (!text.trim()) return;
     if (!userId) {
       setErrorMessage("ログイン情報を確認できませんでした。");
       return;
     }
-    if (isCheckingGate || isEvaluating) return;
+    if (!text.trim()) return;
 
-    setIsCheckingGate(true);
-    setErrorMessage(null);
-
-    try {
-      // ✅ ① 無料枠チェック（usage）
-      const usageRes = await fetch("/api/usage/consume", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ feature: USAGE_FEATURE_EVAL }),
-      });
-      const usageBody: any = await usageRes.json().catch(() => ({}));
-
-      if (usageRes.ok) {
-        await evaluateCore();
-        return;
-      }
-
-      if (usageRes.status === 402 && usageBody?.error === "need_meta") {
-        const requiredMeta = Number(usageBody.requiredMeta ?? 1);
-
-        await openMetaModalFor({
-          requiredMeta,
-          featureLabel: "スコアリング（構成・ロジックチェック）",
-          onProceed: async () => {
-            await evaluateCore();
-          },
-        });
-        return;
-      }
-
-      console.error("usage/consume unexpected", usageRes.status, usageBody);
-      setErrorMessage("実行条件の確認に失敗しました。時間をおいて再度お試しください。");
-    } catch {
-      setErrorMessage("ネットワークエラーが発生しました。");
-    } finally {
-      setIsCheckingGate(false);
-    }
+    await evaluateCore();
   };
 
   /* ------------------------------
-   AIドラフト生成（/api/es/draft が featureGate で 402 を返す想定）
+   AIドラフト生成（IndustryInsights と同じ）
   ------------------------------*/
-  const generateDraftCore = async () => {
+  const generateDraftCore = async (opts?: { key?: string; metaConfirm?: boolean }) => {
+    if (draftLoading) return;
+
     if (!selectedCardId && text.trim().length < 30) {
       setErrorMessage("カードを選ぶか、本文を30文字以上入力してください。");
       return;
@@ -410,11 +578,25 @@ export const ESCorrection: React.FC = () => {
 
     setDraftLoading(true);
     setErrorMessage(null);
+    setAiDraft(null);
+
+    const key = opts?.key ?? newIdempotencyKey();
+    setLastDraftKey(key);
+
+    try {
+      localStorage.setItem(LS_KEY_DRAFT, JSON.stringify({ key, createdAt: Date.now() }));
+    } catch {
+      // ignore
+    }
 
     try {
       const res = await fetch("/api/es/draft", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Idempotency-Key": key,
+          ...(opts?.metaConfirm ? { "X-Meta-Confirm": "1" } : {}),
+        },
         body: JSON.stringify({
           storyCardId: selectedCardId ?? undefined,
           text: selectedCardId ? undefined : text,
@@ -427,24 +609,50 @@ export const ESCorrection: React.FC = () => {
       const data: any = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        if (res.status === 402) {
-          // ✅ ④ 修正：直purchaseルートでもラベルを切替
+        if (res.status === 402 && (data?.error === "need_meta" || data?.requiredMeta || data?.required)) {
           setMetaFeatureLabel("AIドラフト生成（ES）");
 
-          const requiredMeta = Number(data?.required ?? data?.requiredMeta ?? 1);
+          const requiredMeta = Number(data?.requiredMeta ?? data?.required ?? 1);
           const b =
             typeof data?.balance === "number" ? Number(data.balance) : await fetchMyBalance();
 
           setMetaNeed(requiredMeta);
-          setMetaBalance(typeof b === "number" ? b : metaBalance);
-          setMetaMode("purchase");
-          setMetaTitle("METAが不足しています");
-          setMetaMessage(`この実行には META が ${requiredMeta} 必要です。購入して続行してください。`);
+          setMetaBalance(typeof b === "number" ? b : null);
+
+          const mode: "confirm" | "purchase" =
+            typeof b === "number" && b < requiredMeta ? "purchase" : "confirm";
+
+          setMetaMode(mode);
+          setMetaTitle("METAが必要です");
+          setMetaMessage(`この実行には META が ${requiredMeta} 必要です。続行しますか？`);
+
+          if (mode === "confirm") {
+            setPendingAction(() => async () => {
+              await generateDraftCore({ key, metaConfirm: true });
+              const bb = await fetchMyBalance();
+              if (typeof bb === "number") setMetaBalance(bb);
+            });
+          } else {
+            setPendingAction(null);
+          }
+
           setMetaModalOpen(true);
           return;
         }
 
         setErrorMessage(data?.message ?? "ドラフト生成に失敗しました。");
+
+        // ✅ 救済
+        await pollJobUntilDone(
+          FEATURE_DRAFT,
+          key,
+          (res2) => {
+            const r = res2 as DraftResponse;
+            if (typeof r?.draft === "string") setAiDraft(r.draft);
+          },
+          (msg) => setErrorMessage(msg ?? "ジョブが失敗しました。")
+        );
+
         return;
       }
 
@@ -453,62 +661,37 @@ export const ESCorrection: React.FC = () => {
         return;
       }
 
-      setAiDraft(String(data.draft));
+      const okData = data as DraftResponse;
+      setAiDraft(String(okData.draft));
 
-      // 実行後残高更新（UX）
       const bb = await fetchMyBalance();
       if (typeof bb === "number") setMetaBalance(bb);
     } catch {
-      setErrorMessage("AIドラフト生成中にエラーが発生しました。");
+      setErrorMessage("AIドラフト生成中にネットワークエラーが発生しました。");
+
+      // ✅ 救済
+      await pollJobUntilDone(
+        FEATURE_DRAFT,
+        key,
+        (res2) => {
+          const r = res2 as DraftResponse;
+          if (typeof r?.draft === "string") setAiDraft(r.draft);
+        },
+        undefined,
+        8,
+        900
+      );
     } finally {
       setDraftLoading(false);
     }
   };
 
   const handleGenerateDraft = async () => {
-    if (!selectedCardId && text.trim().length < 30) {
-      setErrorMessage("カードを選ぶか、本文を30文字以上入力してください。");
+    if (!userId) {
+      setErrorMessage("ログイン情報を確認できませんでした。");
       return;
     }
-    if (isCheckingGate || draftLoading) return;
-
-    setIsCheckingGate(true);
-    setErrorMessage(null);
-
-    try {
-      // ✅ ① 無料枠チェック（usage）
-      const usageRes = await fetch("/api/usage/consume", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ feature: USAGE_FEATURE_DRAFT }),
-      });
-      const usageBody: any = await usageRes.json().catch(() => ({}));
-
-      if (usageRes.ok) {
-        await generateDraftCore();
-        return;
-      }
-
-      if (usageRes.status === 402 && usageBody?.error === "need_meta") {
-        const requiredMeta = Number(usageBody.requiredMeta ?? 1);
-
-        await openMetaModalFor({
-          requiredMeta,
-          featureLabel: "AIドラフト生成（ES）",
-          onProceed: async () => {
-            await generateDraftCore();
-          },
-        });
-        return;
-      }
-
-      console.error("usage/consume unexpected", usageRes.status, usageBody);
-      setErrorMessage("実行条件の確認に失敗しました。時間をおいて再度お試しください。");
-    } catch {
-      setErrorMessage("ネットワークエラーが発生しました。");
-    } finally {
-      setIsCheckingGate(false);
-    }
+    await generateDraftCore();
   };
 
   /* ------------------------------
@@ -530,7 +713,7 @@ export const ESCorrection: React.FC = () => {
     );
   }
 
-  // ✅ ⑤ 追加：ドラフトボタンの「押せる条件」を1箇所に集約（見た目/disabled一致）
+  // ✅ ドラフトボタンの押せる条件（1箇所）
   const canGenerateDraft = selectedCardId !== null || text.trim().length >= 30;
 
   return (
@@ -542,7 +725,7 @@ export const ESCorrection: React.FC = () => {
           <section className="rounded-2xl border bg-white/80 p-4 shadow-sm">
             <h1 className="mb-1 text-sm font-semibold">ES添削AI（構成・ロジックチェック）</h1>
             <p className="text-[11px] text-slate-600">
-              ペーストしたESに対してAIが採点・改善ポイントを返します。
+              ペーストしたESに対してAIが採点・改善ポイントを返します。ドラフト生成もできます。
             </p>
           </section>
 
@@ -614,35 +797,42 @@ export const ESCorrection: React.FC = () => {
             />
 
             <div className="flex justify-end gap-2">
-              {/* ✅ AIドラフト生成（左） */}
+              {/* AIドラフト生成 */}
               <button
                 onClick={handleGenerateDraft}
-                disabled={!canGenerateDraft || draftLoading || isCheckingGate}
+                disabled={!canGenerateDraft || draftLoading}
                 className={`rounded-full px-5 py-2 text-xs font-semibold ${
-                  // ✅ ⑥ 修正：見た目の判定も disabled と同じ条件にする
-                  !canGenerateDraft || draftLoading || isCheckingGate
+                  !canGenerateDraft || draftLoading
                     ? "cursor-not-allowed bg-slate-200"
                     : "bg-indigo-500 text-white hover:bg-indigo-600"
                 }`}
               >
-                {draftLoading ? "生成中…" : isCheckingGate ? "確認中…" : "ESドラフト生成"}
+                {draftLoading ? "生成中…" : "ESドラフト生成"}
               </button>
 
-              {/* ✅ ES評価（右） */}
+              {/* ES評価 */}
               <button
                 onClick={handleEvaluate}
-                disabled={!text.trim() || isEvaluating || isCheckingGate}
+                disabled={!text.trim() || isEvaluating}
                 className={`rounded-full px-5 py-2 text-xs font-semibold ${
-                  !text.trim() || isEvaluating || isCheckingGate
+                  !text.trim() || isEvaluating
                     ? "cursor-not-allowed bg-slate-200"
                     : "bg-violet-500 text-white hover:bg-violet-600"
                 }`}
               >
-                {isEvaluating ? "評価中…" : isCheckingGate ? "確認中…" : "スコアリング"}
+                {isEvaluating ? "評価中…" : "スコアリング"}
               </button>
             </div>
 
             {errorMessage && <p className="mt-2 text-[11px] text-rose-600">{errorMessage}</p>}
+
+            {/* デバッグ表示（本番は消してOK） */}
+            {(lastEvalKey || lastDraftKey) && (
+              <div className="mt-2 text-[10px] text-slate-300">
+                {lastDraftKey && <div>draft key: {lastDraftKey.slice(0, 8)}…</div>}
+                {lastEvalKey && <div>eval key: {lastEvalKey.slice(0, 8)}…</div>}
+              </div>
+            )}
           </section>
 
           {/* フィードバック */}
@@ -673,7 +863,7 @@ export const ESCorrection: React.FC = () => {
                 </ul>
               </div>
 
-              {/* 🔒 ロック部分（サーバが locked を返す設計がある場合） */}
+              {/* 🔒 ロック（将来サーバが locked を返す設計がある場合） */}
               <div className="relative">
                 <div
                   className={
@@ -780,23 +970,31 @@ export const ESCorrection: React.FC = () => {
         </aside>
       </div>
 
-      {/* ✅ 共通METAモーダル */}
+      {/* ✅ 共通METAモーダル（confirm → 同じ key で X-Meta-Confirm:1 再実行） */}
       <MetaConfirmModal
         open={metaModalOpen}
         onClose={closeMetaModal}
-        // ✅ ⑦ 修正：固定 "スコアリング" をやめて state を渡す
         featureLabel={metaFeatureLabel}
         requiredMeta={metaNeed}
         balance={metaBalance}
         mode={metaMode}
         title={metaTitle}
         message={metaMessage}
-        onConfirm={async () => {
-          const fn = pendingAction;
-          closeMetaModal();
-          if (!fn) return;
-          await fn();
-        }}
+        onConfirm={
+          metaMode === "confirm"
+            ? async () => {
+                const fn = pendingAction;
+                closeMetaModal();
+                if (!fn) return;
+                try {
+                  await fn();
+                } catch (e) {
+                  console.error(e);
+                  setErrorMessage("実行に失敗しました。時間をおいて再度お試しください。");
+                }
+              }
+            : undefined
+        }
         onPurchase={() => router.push("/pricing")}
       />
     </>

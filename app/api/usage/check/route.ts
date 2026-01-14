@@ -22,9 +22,9 @@ type FeatureKey =
 // ✅ “無料枠”だけ（pro/elite は無制限）
 const FREE_LIMITS: Record<FeatureKey, number> = {
   case_interview: 3,
-  case_generate: 3,
+  case_generate: 4,
   fermi: 3,
-  fermi_generate: 5,
+  fermi_generate: 4,
   interview_10: 1,
   ai_training: 3,
   es_correction: 3,

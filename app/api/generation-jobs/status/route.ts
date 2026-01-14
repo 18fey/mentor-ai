@@ -8,6 +8,8 @@ export const dynamic = "force-dynamic";
 
 type FeatureId = "industry_insight" |"es_correction"
   | "fermi"
+  | "case_generate"
+  | "fermi_generate"
   | "interview_10"
   | "industry_insight"
   | "case_interview"

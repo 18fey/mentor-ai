@@ -2,8 +2,8 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { createBrowserClient } from "@supabase/ssr";
-import { UpgradeModal } from "@/components/UpgradeModal";
 import { MetaConfirmModal } from "@/components/MetaConfirmModal";
 
 /* ============================
@@ -50,162 +50,48 @@ type FermiFeedback = {
   totalScore: number;
 };
 
-type GenerateRes = {
-  ok: true;
-  plan: Plan;
-  remaining?: number;
-  usedCount?: number;
-  limit?: number;
-  // 互換：単体
-  fermi: FermiProblem;
-  // 追加：複数
-  fermis?: FermiProblem[];
-};
+type ProceedMode = "unlimited" | "free" | "need_meta";
 
-type EvalRes = {
-  ok: true;
-  plan: Plan;
-  remaining?: number;
-  usedCount?: number;
-  limit?: number;
-  score: FermiScore;
-  feedback: FermiFeedback;
-  totalScore?: number;
-  logId?: number | string | null;
-};
+// generation_jobs/status の返却想定
+type JobStatus = "queued" | "running" | "blocked" | "succeeded" | "failed" | string;
 
-type SaveItem = {
+type GenerationJob = {
   id: string;
-  attempt_type: string;
-  attempt_id: string;
-  save_type: "mistake" | "learning" | "retry";
-  created_at: string;
-};
-
-type SavesListRes = {
-  ok: true;
-  plan: Plan;
-  items: SaveItem[];
-};
-
-type ToggleSaveRes = {
-  ok: true;
-  plan: Plan;
-  enabled: boolean;
+  status: JobStatus;
+  result: any | null;
+  error_code: string | null;
+  error_message: string | null;
+  updated_at: string | null;
+  created_at: string | null;
 };
 
 type ApiErr = {
+  ok?: false;
   error?: string;
-  code?: string;
   message?: string;
+  requiredMeta?: number;
+  required?: number;
+  balance?: number;
 };
-
-type JobStatus = "queued" | "running" | "succeeded" | "failed";
-
-type JobStatusRes = {
-  ok: true;
-  job: {
-    id: string;
-    auth_user_id: string;
-    feature_id: string;
-    idempotency_key: string;
-    status: JobStatus;
-    request: any;
-    result: any;
-    error_code: string | null;
-    error_message: string | null;
-    log_id: string | null;
-    created_at: string;
-    updated_at: string;
-  } | null;
-};
-
-type NeedMetaErr = { ok: false; error: "need_meta"; requiredMeta: number };
-type GenericErr = { ok: false; error: string; message?: string };
-
-type LastJobInfo = { key: string; createdAt: string };
 
 /* ============================
-   定数（固定）
+   定数
 ============================ */
-const FEATURE_ID_EVAL = "fermi"; // /api/usage/check の feature と揃える
-const FEATURE_ID_GEN = "fermi_generate";
-
+const FEATURE_LABEL = "フェルミ推定AI";
+const FEATURE_ID_EVAL = "fermi"; // ✅ eval/fermi の feature_id と一致
+const FEATURE_ID_GEN = "fermi_generate"; // ✅ fermi/new の feature_id と一致想定（API側と合わせてね）
 const DEFAULT_GEN_COUNT = 10;
 
+// localStorage keys
+const LS_KEY_EVAL = "genjob:fermi_eval:key";
+const LS_KEY_GEN = "genjob:fermi_gen:key";
+const LS_KEY_SESSION_PREFIX = "fermi_session:v2";
+
 /* ============================
-   小さなヘルパー（ファイル内完結）
+   ユーティリティ
 ============================ */
-function lsKey(featureId: string) {
-  return `last_job:${featureId}`;
-}
-function safeParseLastJob(s: string | null): LastJobInfo | null {
-  if (!s) return null;
-  try {
-    const j = JSON.parse(s);
-    if (j && typeof j.key === "string") return j as LastJobInfo;
-    return null;
-  } catch {
-    return null;
-  }
-}
-function setLastJob(featureId: string, key: string) {
-  try {
-    localStorage.setItem(
-      lsKey(featureId),
-      JSON.stringify({ key, createdAt: new Date().toISOString() } satisfies LastJobInfo)
-    );
-  } catch {
-    // ignore
-  }
-}
-function clearLastJob(featureId: string) {
-  try {
-    localStorage.removeItem(lsKey(featureId));
-  } catch {
-    // ignore
-  }
-}
-
-// 文字列ハッシュ（同期・軽量）: idempotency用（評価は deterministic でOK）
-function hashStringDjb2(input: string) {
-  let h = 5381;
-  for (let i = 0; i < input.length; i++) {
-    h = (h * 33) ^ input.charCodeAt(i);
-  }
-  return (h >>> 0).toString(16);
-}
-function makeIdempotencyKey(payload: any) {
-  const s = JSON.stringify(payload ?? {});
-  return `k_${hashStringDjb2(s)}_${s.length}`;
-}
-
-// 生成は「無限生成」したいので UUID（ブラウザ標準優先、なければフォールバック）
-function genUuid() {
-  try {
-    // @ts-ignore
-    if (typeof crypto !== "undefined" && crypto?.randomUUID) return crypto.randomUUID();
-  } catch {
-    // ignore
-  }
-  // fallback
-  return `${Date.now()}_${Math.random().toString(16).slice(2)}_${Math.random()
-    .toString(16)
-    .slice(2)}`;
-}
-function makeGenIdempotencyKey(category: FermiCategory, difficulty: FermiDifficulty) {
-  // category/difficulty を混ぜておくとデバッグしやすい
-  return `g_${category}_${difficulty}_${genUuid()}`;
-}
-
-async function fetchJobStatus(featureId: string, key: string): Promise<JobStatusRes | null> {
-  const url = `/api/generation-jobs/status?feature=${encodeURIComponent(
-    featureId
-  )}&key=${encodeURIComponent(key)}`;
-  const r = await fetch(url, { cache: "no-store" });
-  const j = (await r.json().catch(() => null)) as any;
-  if (!r.ok) return null;
-  return j as JobStatusRes;
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function uniqById<T extends { id: string }>(arr: T[]) {
@@ -220,10 +106,71 @@ function uniqById<T extends { id: string }>(arr: T[]) {
   return out;
 }
 
+function hashStringDjb2(input: string) {
+  let h = 5381;
+  for (let i = 0; i < input.length; i++) h = (h * 33) ^ input.charCodeAt(i);
+  return (h >>> 0).toString(16);
+}
+
+function makeEvalIdempotencyKey(payload: any) {
+  const s = JSON.stringify(payload ?? {});
+  return `fermi_eval_${hashStringDjb2(s)}_${s.length}`;
+}
+
+function genUuid() {
+  try {
+    // @ts-ignore
+    if (typeof crypto !== "undefined" && crypto?.randomUUID) return crypto.randomUUID();
+  } catch {}
+  return `${Date.now()}_${Math.random().toString(16).slice(2)}_${Math.random()
+    .toString(16)
+    .slice(2)}`;
+}
+
+function makeGenIdempotencyKey(category: FermiCategory, difficulty: FermiDifficulty) {
+  return `fermi_gen_${category}_${difficulty}_${genUuid()}`;
+}
+
 /* ============================
-   メインコンポーネント
+   Session 型（Caseと同じ思想）
 ============================ */
-export const FermiEstimateAI: React.FC = () => {
+type FermiSession = {
+  v: 2;
+  category: FermiCategory;
+  difficulty: FermiDifficulty;
+
+  problemPool: FermiProblem[];
+  poolIndex: number;
+
+  currentProblem: FermiProblem | null;
+
+  inputs: {
+    question: string;
+    formula: string;
+    unit: string;
+    factors: FermiFactor[];
+    result: string;
+    sanityComment: string;
+  };
+
+  eval: {
+    score: FermiScore;
+    feedback: FermiFeedback | null;
+    lastLogId: number | string | null;
+  };
+
+  updatedAt: string; // ISO
+};
+
+/* ============================
+   メイン
+============================ */
+type Props = {
+  onEvaluated?: () => void;
+  };
+  export const FermiEstimateAI: React.FC<Props> = ({ onEvaluated }) => {
+  const router = useRouter();
+
   const supabase = useMemo(
     () =>
       createBrowserClient(
@@ -234,25 +181,24 @@ export const FermiEstimateAI: React.FC = () => {
   );
 
   // auth
-  const [isAuthed, setIsAuthed] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  // Plan / remaining
+  // 互換（表示用）
   const [plan, setPlan] = useState<Plan>("free");
   const [remaining, setRemaining] = useState<number | null>(null);
 
-  // 問題設定
+  // selector
   const [category, setCategory] = useState<FermiCategory>("business");
   const [difficulty, setDifficulty] = useState<FermiDifficulty>("medium");
 
-  // ✅ 50問プール（タブごと）
+  // pool
   const [problemPool, setProblemPool] = useState<FermiProblem[]>([]);
-  const [poolIndex, setPoolIndex] = useState<number>(0);
+  const [poolIndex, setPoolIndex] = useState(0);
+  const [currentProblem, setCurrentProblem] = useState<FermiProblem | null>(null);
 
-  // 現在の問題
-  const [currentProblemId, setCurrentProblemId] = useState<string | null>(null);
-
-  // 入力
+  // inputs
   const [question, setQuestion] = useState("");
   const [formula, setFormula] = useState("");
   const [unit, setUnit] = useState("件 / 年");
@@ -260,7 +206,7 @@ export const FermiEstimateAI: React.FC = () => {
   const [result, setResult] = useState<string>("");
   const [sanityComment, setSanityComment] = useState("");
 
-  // スコア & フィードバック
+  // eval
   const [score, setScore] = useState<FermiScore>({
     reframing: 0,
     decomposition: 0,
@@ -269,63 +215,158 @@ export const FermiEstimateAI: React.FC = () => {
     sanityCheck: 0,
   });
   const [feedback, setFeedback] = useState<FermiFeedback | null>(null);
+  const [lastLogId, setLastLogId] = useState<number | string | null>(null);
 
-  // 状態
+  // ui
   const [uiError, setUiError] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isEvaluating, setIsEvaluating] = useState(false);
 
-  // 🔒 サブスク誘導モーダル（既存）
-  const [upgradeOpen, setUpgradeOpen] = useState(false);
-  const [upgradeMessage, setUpgradeMessage] = useState<string | undefined>();
+  // ✅ 実行中ジョブkey（復帰用）
+  const [activeGenKey, setActiveGenKey] = useState<string | null>(null);
+  const [activeEvalKey, setActiveEvalKey] = useState<string | null>(null);
 
-  // ✅ 保存
-  const [isSaving, setIsSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [lastLogId, setLastLogId] = useState<number | string | null>(null);
+  // ✅ ポーリング停止
+  const pollingAbortRef = useRef<{ gen: boolean; eval: boolean }>({ gen: false, eval: false });
 
-  // ✅ META確認モーダル（固定仕様）
-  const [metaConfirmOpen, setMetaConfirmOpen] = useState(false);
-  const [metaCost, setMetaCost] = useState<number>(1);
-  const [metaBalance, setMetaBalance] = useState<number>(0);
+  // ✅ MetaConfirmModal（Caseと同型）
+  const [metaModalOpen, setMetaModalOpen] = useState(false);
+  const [metaBalance, setMetaBalance] = useState<number | null>(null);
+  const [metaNeed, setMetaNeed] = useState<number>(1);
+  const [metaMode, setMetaMode] = useState<"confirm" | "purchase">("confirm");
+  const [metaTitle, setMetaTitle] = useState<string | undefined>(undefined);
+  const [metaMessage, setMetaMessage] = useState<string | undefined>(undefined);
+  const [pendingAction, setPendingAction] = useState<null | (() => Promise<void>)>(null);
 
-  // ✅ meta confirm 再実行用（固定仕様）
-  const pendingEvalKeyRef = useRef<string | null>(null);
-  const pendingGenKeyRef = useRef<string | null>(null);
-
-  // ✅ meta balance 取得
-  const fetchMetaBalance = async (): Promise<number> => {
-    const r = await fetch("/api/meta/balance", { cache: "no-store" });
-    const j = await r.json().catch(() => null);
-    if (!r.ok) return 0;
-    return Number(j?.balance ?? 0);
+  const closeMetaModal = () => {
+    setMetaModalOpen(false);
+    setMetaTitle(undefined);
+    setMetaMessage(undefined);
+    setPendingAction(null);
   };
 
-  // auth確認
+  /* -------------------------
+     localStorage helpers
+  ------------------------- */
+  const makeSessionKey = (uid: string) => `${LS_KEY_SESSION_PREFIX}:${uid}`;
+
+  const saveSession = (s: FermiSession) => {
+    try {
+      if (!userId) return;
+      localStorage.setItem(makeSessionKey(userId), JSON.stringify(s));
+    } catch {}
+  };
+
+  const loadSession = (): FermiSession | null => {
+    try {
+      if (!userId) return null;
+      const raw = localStorage.getItem(makeSessionKey(userId));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed?.v !== 2) return null;
+      return parsed as FermiSession;
+    } catch {
+      return null;
+    }
+  };
+
+  const clearSession = () => {
+    try {
+      if (!userId) return;
+      localStorage.removeItem(makeSessionKey(userId));
+    } catch {}
+  };
+
+  const setLocalKey = (kind: "gen" | "eval", key: string) => {
+    try {
+      localStorage.setItem(kind === "gen" ? LS_KEY_GEN : LS_KEY_EVAL, key);
+    } catch {}
+  };
+  const getLocalKey = (kind: "gen" | "eval") => {
+    try {
+      return localStorage.getItem(kind === "gen" ? LS_KEY_GEN : LS_KEY_EVAL);
+    } catch {
+      return null;
+    }
+  };
+  const clearLocalKey = (kind: "gen" | "eval") => {
+    try {
+      localStorage.removeItem(kind === "gen" ? LS_KEY_GEN : LS_KEY_EVAL);
+    } catch {}
+  };
+
+  /* -------------------------
+     META残高（GET統一）
+  ------------------------- */
+  const fetchMyBalance = async (): Promise<number | null> => {
+    try {
+      const res = await fetch("/api/meta/balance", { method: "GET" });
+      const j: any = await res.json().catch(() => ({}));
+      if (!res.ok || j?.ok !== true) return null;
+      return Number(j.balance ?? 0);
+    } catch {
+      return null;
+    }
+  };
+
+  const openMetaModalFor = async (params: {
+    requiredMeta: number;
+    featureLabel: string;
+    onProceed: () => Promise<void>;
+  }) => {
+    const { requiredMeta, onProceed } = params;
+
+    const b = await fetchMyBalance();
+    setMetaNeed(requiredMeta);
+    setMetaBalance(typeof b === "number" ? b : metaBalance);
+
+    const mode: "confirm" | "purchase" =
+      typeof b === "number" && b < requiredMeta ? "purchase" : "confirm";
+
+    setMetaMode(mode);
+    setMetaTitle("METAが必要です");
+    setMetaMessage(`この実行には META が ${requiredMeta} 必要です。続行しますか？`);
+
+    setPendingAction(() => async () => {
+      await onProceed();
+      const bb = await fetchMyBalance();
+      if (typeof bb === "number") setMetaBalance(bb);
+    });
+
+    setMetaModalOpen(true);
+  };
+
+  /* -------------------------
+     認証
+  ------------------------- */
   useEffect(() => {
     (async () => {
-      setAuthError(null);
-      const { data, error } = await supabase.auth.getUser();
-      if (error || !data?.user?.id) {
-        setIsAuthed(false);
-        setAuthError(
-          "ログイン情報が取得できませんでした。いったんログインし直してください。"
-        );
-        return;
+      try {
+        setAuthError(null);
+        const { data, error } = await supabase.auth.getUser();
+        if (error || !data?.user?.id) {
+          setUserId(null);
+          setAuthError("ログイン情報が取得できませんでした。いったんログインし直してください。");
+          return;
+        }
+        setUserId(data.user.id);
+
+        const b = await fetchMyBalance();
+        if (typeof b === "number") setMetaBalance(b);
+      } finally {
+        setAuthLoading(false);
       }
-      setIsAuthed(true);
     })();
   }, [supabase]);
 
-  /* -------------------------------
-     UI初期化
-  -------------------------------- */
+  /* -------------------------
+     表示用：問題の初期化
+  ------------------------- */
   const resetForNewProblem = () => {
     setResult("");
     setSanityComment("");
     setUiError(null);
     setFeedback(null);
-    setSaved(false);
     setLastLogId(null);
     setScore({
       reframing: 0,
@@ -336,11 +377,8 @@ export const FermiEstimateAI: React.FC = () => {
     });
   };
 
-  /* -------------------------------
-     問題をUIに反映
-  -------------------------------- */
   const materializeProblem = (problem: FermiProblem) => {
-    setCurrentProblemId(problem.id);
+    setCurrentProblem(problem);
     setQuestion(problem.title);
     setFormula(problem.formulaHint);
     setUnit(problem.unit);
@@ -357,11 +395,12 @@ export const FermiEstimateAI: React.FC = () => {
         value: "",
       }))
     );
+
+    // ✅ 問題切り替え時、eval復帰キーは混線防止で消す（Caseと同じ）
+    clearLocalKey("eval");
+    setActiveEvalKey(null);
   };
 
-  /* -------------------------------
-     プールの指定indexを表示
-  -------------------------------- */
   const showPoolIndex = (idx: number) => {
     const p = problemPool[idx];
     if (!p) return;
@@ -369,164 +408,277 @@ export const FermiEstimateAI: React.FC = () => {
     materializeProblem(p);
   };
 
-  /* -------------------------------
-     入力条件が変わる操作 → last_job を削除（混線防止：固定仕様）
-  -------------------------------- */
+  /* -------------------------
+     ✅ セッション復元（プール/入力/評価）
+     - 次の「10問生成」を押すまで保持
+  ------------------------- */
   useEffect(() => {
-    clearLastJob(FEATURE_ID_GEN);
-    clearLastJob(FEATURE_ID_EVAL);
+    if (authLoading) return;
+    if (!userId) return;
 
-    // ✅ 切り替え時はプールも一旦クリア（古い50問を誤って使わない）
-    setProblemPool([]);
-    setPoolIndex(0);
-    setCurrentProblemId(null);
-    setQuestion("");
-    setFormula("");
-    setFactors([]);
-    setResult("");
-    setSanityComment("");
-    setFeedback(null);
+    const s = loadSession();
+    if (!s) return;
+
+    setCategory(s.category);
+    setDifficulty(s.difficulty);
+
+    setProblemPool(s.problemPool ?? []);
+    setPoolIndex(typeof s.poolIndex === "number" ? s.poolIndex : 0);
+
+    setCurrentProblem(s.currentProblem);
+
+    setQuestion(s.inputs.question);
+    setFormula(s.inputs.formula);
+    setUnit(s.inputs.unit);
+    setFactors(Array.isArray(s.inputs.factors) ? s.inputs.factors : []);
+    setResult(s.inputs.result);
+    setSanityComment(s.inputs.sanityComment);
+
+    setScore(s.eval.score);
+    setFeedback(s.eval.feedback);
+    setLastLogId(s.eval.lastLogId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [category, difficulty]);
+  }, [authLoading, userId]);
 
-  /* -------------------------------
-     起動時の復帰（固定仕様）
-     - last_job があれば status で復帰
-  -------------------------------- */
+  /* -------------------------
+     ✅ セッション自動保存（入力中/評価後も保持）
+  ------------------------- */
+  const saveTimerRef = useRef<any>(null);
+
   useEffect(() => {
-    if (!isAuthed) return;
+    if (!userId) return;
+    if (!currentProblem) return; // 未開始は保存しない
 
-    let cancelled = false;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
 
-    const restoreFeature = async (featureId: string, onSucceeded: (job: any) => void) => {
-      const last = safeParseLastJob(localStorage.getItem(lsKey(featureId)));
-      if (!last?.key) return;
-
-      const first = await fetchJobStatus(featureId, last.key);
-      if (cancelled) return;
-      if (!first?.ok || !first.job) return;
-
-      const apply = (job: any) => {
-        if (!job) return;
-        if (job.status === "succeeded" && job.result) onSucceeded(job);
-        if (job.status === "failed" && job.error_message) {
-          setUiError(job.error_message);
-        }
+    saveTimerRef.current = setTimeout(() => {
+      const session: FermiSession = {
+        v: 2,
+        category,
+        difficulty,
+        problemPool,
+        poolIndex,
+        currentProblem,
+        inputs: {
+          question,
+          formula,
+          unit,
+          factors,
+          result,
+          sanityComment,
+        },
+        eval: {
+          score,
+          feedback,
+          lastLogId,
+        },
+        updatedAt: new Date().toISOString(),
       };
-
-      apply(first.job);
-
-      // running/queued なら短時間だけポーリング
-      if (first.job.status === "running" || first.job.status === "queued") {
-        const started = Date.now();
-        while (!cancelled && Date.now() - started < 12_000) {
-          await new Promise((r) => setTimeout(r, 1200));
-          const next = await fetchJobStatus(featureId, last.key);
-          if (!next?.ok) continue;
-          const job = next.job;
-          if (!job) continue;
-          if (job.status === "succeeded" || job.status === "failed") {
-            apply(job);
-            break;
-          }
-        }
-      }
-    };
-
-    (async () => {
-      // 1) 生成復帰（問題）
-      await restoreFeature(FEATURE_ID_GEN, (job) => {
-        const fermis = (job?.result?.fermis ?? []) as FermiProblem[];
-        const one = job?.result?.fermi as FermiProblem | undefined;
-
-        const list = uniqById(
-          (Array.isArray(fermis) && fermis.length ? fermis : one ? [one] : []).filter(Boolean)
-        );
-
-        if (list.length) {
-          setProblemPool(list);
-          setPoolIndex(0);
-          materializeProblem(list[0]);
-        }
-      });
-
-      // 2) 採点復帰（結果）
-      await restoreFeature(FEATURE_ID_EVAL, (job) => {
-        const sc = job?.result?.score;
-        const fb = job?.result?.feedback;
-        const lg = job?.result?.logId ?? null;
-
-        if (sc) setScore(sc as FermiScore);
-        if (fb) setFeedback(fb as FermiFeedback);
-        setLastLogId(lg);
-        setSaved(false);
-      });
-    })();
+      saveSession(session);
+    }, 400);
 
     return () => {
-      cancelled = true;
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAuthed]);
+  }, [
+    userId,
+    category,
+    difficulty,
+    problemPool,
+    poolIndex,
+    currentProblem,
+    question,
+    formula,
+    unit,
+    factors,
+    result,
+    sanityComment,
+    score,
+    feedback,
+    lastLogId,
+  ]);
 
-  /* -------------------------------
-     生成（MetaConfirm込み）実行
-  -------------------------------- */
-  const runGenerate = async (idempotencyKey: string, metaConfirm: boolean) => {
-    const requestPayload = { category, difficulty, count: DEFAULT_GEN_COUNT, idempotencyKey };
+  /* -------------------------
+     共通：generation_jobs/status
+  ------------------------- */
+  const fetchJobStatus = async (feature: string, key: string): Promise<GenerationJob | null> => {
+    try {
+      const res = await fetch(
+        `/api/generation-jobs/status?feature=${encodeURIComponent(feature)}&key=${encodeURIComponent(
+          key
+        )}`,
+        { method: "GET" }
+      );
+      const j: any = await res.json().catch(() => ({}));
+      if (!res.ok || j?.ok !== true) return null;
+      return (j.job ?? null) as GenerationJob | null;
+    } catch {
+      return null;
+    }
+  };
 
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (metaConfirm) headers["X-Meta-Confirm"] = "1";
+  const pollUntilDone = async (params: {
+    feature: string;
+    key: string;
+    kind: "gen" | "eval";
+    onSucceeded: (result: any) => Promise<void> | void;
+    onFailed: (job: GenerationJob) => Promise<void> | void;
+    maxTries?: number;
+  }) => {
+    const { feature, key, kind, onSucceeded, onFailed, maxTries = 120 } = params;
+
+    for (let i = 0; i < maxTries; i++) {
+      if (kind === "gen" && pollingAbortRef.current.gen) return;
+      if (kind === "eval" && pollingAbortRef.current.eval) return;
+
+      const job = await fetchJobStatus(feature, key);
+      if (job) {
+        if (job.status === "succeeded") {
+          await onSucceeded(job.result);
+          return;
+        }
+        if (job.status === "failed") {
+          await onFailed(job);
+          return;
+        }
+        // blocked は API が「課金待ち結果保持」をする設計ならここで止めて metaConfirm を出すのも可
+      }
+
+      await sleep(900);
+    }
+
+    setUiError("処理がタイムアウトしました。もう一度お試しください。");
+  };
+
+  /* -------------------------
+     計算
+  ------------------------- */
+  const handleCompute = () => {
+    try {
+      if (!factors.length) return setResult("");
+      const nums = factors.map((f) => Number(f.value || "0") || 0);
+      let acc = nums[0] ?? 0;
+      for (let i = 1; i < nums.length; i++) {
+        const op = factors[i]?.operator ?? "×";
+        acc = op === "+" ? acc + nums[i] : acc * nums[i];
+      }
+      setResult(`${acc.toExponential(2)} ${unit}（概算）`);
+    } catch {
+      setResult("計算エラー（入力値を確認してください）");
+    }
+  };
+
+  const addFactor = () => {
+    setFactors((prev) => [
+      ...prev,
+      { id: Date.now(), name: "", operator: "×", assumption: "", rationale: "", value: "" },
+    ]);
+  };
+
+  const updateFactor = (id: number, field: keyof FermiFactor, value: string) => {
+    setFactors((prev) => prev.map((f) => (f.id === id ? { ...f, [field]: value } : f)));
+  };
+
+  /* -------------------------
+     ✅ 生成（job方式 + metaConfirm対応）
+  ------------------------- */
+  const startGenerateWithKey = async (key: string, metaConfirm: boolean) => {
+    pollingAbortRef.current.gen = false;
 
     const res = await fetch("/api/fermi/new", {
       method: "POST",
-      headers,
-      body: JSON.stringify(requestPayload),
+      headers: {
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": key,
+        ...(metaConfirm ? { "X-Meta-Confirm": "1" } : {}),
+      },
+      body: JSON.stringify({ category, difficulty, count: DEFAULT_GEN_COUNT }),
     });
 
-    const json = (await res.json().catch(() => null)) as
-      | (GenerateRes & { jobId?: string; idempotencyKey?: string; reused?: boolean; status?: JobStatus })
-      | NeedMetaErr
-      | ApiErr
-      | GenericErr
-      | null;
+    const data: any = await res.json().catch(() => ({}));
+
+    if (!res.ok && res.status === 402 && data?.error === "need_meta") {
+      const requiredMeta = Number(data?.requiredMeta ?? data?.required ?? 1);
+
+      await openMetaModalFor({
+        requiredMeta,
+        featureLabel: `${FEATURE_LABEL}（問題生成）`,
+        onProceed: async () => {
+          const b = await fetchMyBalance();
+          if (typeof b === "number" && b < requiredMeta) {
+            closeMetaModal();
+            router.push("/pricing");
+            return;
+          }
+
+          setIsGenerating(true);
+          try {
+            await startGenerateWithKey(key, true);
+          } finally {
+            setIsGenerating(false);
+          }
+        },
+      });
+
+      return;
+    }
 
     if (!res.ok) {
-      if (res.status === 402 && (json as any)?.error === "need_meta") {
-        const cost = Number((json as any)?.requiredMeta ?? 1);
-        const balance = await fetchMetaBalance();
-
-        setMetaCost(cost);
-        setMetaBalance(balance);
-
-        if (balance < cost) {
-          setUpgradeMessage("METAが不足しています。購入してください。");
-          setUpgradeOpen(true);
-          return;
-        }
-
-        pendingGenKeyRef.current = idempotencyKey;
-        setMetaConfirmOpen(true);
-        return;
-      }
-
-      if (res.status === 401) {
-        setUiError("ログインが必要です。いったんログインし直してください。");
-        return;
-      }
-
-      setUiError((json as any)?.message ?? "問題生成に失敗しました。");
+      setUiError(data?.message ?? "問題生成に失敗しました。");
+      clearLocalKey("gen");
+      setActiveGenKey(null);
       return;
     }
 
-    const data = json as any;
-    setPlan((data?.plan ?? "free") as Plan);
-    if (typeof data.remaining === "number") setRemaining(data.remaining);
+    // 互換表示
+    if (data?.plan) setPlan(data.plan as Plan);
+    if (typeof data?.remaining === "number") setRemaining(data.remaining);
 
+    // jobが返る設計（queued/running）なら statusで復帰
     if (data?.status === "running" || data?.status === "queued") {
+      await pollUntilDone({
+        feature: FEATURE_ID_GEN,
+        key,
+        kind: "gen",
+        onSucceeded: async (jobResult) => {
+          const fermis = (jobResult?.fermis ?? jobResult?.fermis ?? []) as FermiProblem[];
+          const one = jobResult?.fermi as FermiProblem | undefined;
+
+          const list = uniqById(
+            (Array.isArray(fermis) && fermis.length ? fermis : one ? [one] : []).filter(Boolean)
+          );
+
+          if (!list.length) {
+            setUiError("生成結果が不正です（fermi/fermisがありません）");
+            clearLocalKey("gen");
+            setActiveGenKey(null);
+            return;
+          }
+
+          // ✅ 次の問題セット生成時に前セッション破棄（Caseと同じ）
+          clearSession();
+
+          setProblemPool(list);
+          setPoolIndex(0);
+          materializeProblem(list[0]);
+
+          clearLocalKey("gen");
+          setActiveGenKey(null);
+
+          const bb = await fetchMyBalance();
+          if (typeof bb === "number") setMetaBalance(bb);
+        },
+        onFailed: async (job) => {
+          setUiError(job.error_message ?? "処理に失敗しました。");
+          clearLocalKey("gen");
+          setActiveGenKey(null);
+        },
+      });
+
       return;
     }
 
+    // 即時返却（reused or succeeded）想定
     const fermis = (data?.fermis ?? []) as FermiProblem[];
     const one = data?.fermi as FermiProblem | undefined;
 
@@ -536,185 +688,157 @@ export const FermiEstimateAI: React.FC = () => {
 
     if (!list.length) {
       setUiError("生成結果が不正です（fermi/fermisがありません）");
+      clearLocalKey("gen");
+      setActiveGenKey(null);
       return;
     }
+
+    // ✅ 次の問題セット生成時に前セッション破棄（Caseと同じ）
+    clearSession();
 
     setProblemPool(list);
     setPoolIndex(0);
     materializeProblem(list[0]);
 
-    // meta表示更新（ヘッダーが listen してる想定）
-    window.dispatchEvent(new Event("meta:refresh"));
+    clearLocalKey("gen");
+    setActiveGenKey(null);
+
+    const bb = await fetchMyBalance();
+    if (typeof bb === "number") setMetaBalance(bb);
   };
 
-  /* -------------------------------
-     新規問題生成（ジョブ方式：固定仕様 + 50問プール）
-  -------------------------------- */
-  const generateNewProblem = async () => {
+  const handleGenerate = async () => {
     setUiError(null);
+    if (!userId) return setUiError("ログインが必要です。");
 
-    if (!isAuthed) {
-      setUiError("ログインが必要です。");
-      return;
-    }
+    const key = makeGenIdempotencyKey(category, difficulty);
+    setActiveGenKey(key);
+    setLocalKey("gen", key);
 
+    setIsGenerating(true);
     try {
-      setIsGenerating(true);
-
-      // ✅ 生成は無限にしたいので「毎回ランダムkey」
-      const idempotencyKey = makeGenIdempotencyKey(category, difficulty);
-
-      // localStorage: last_job を保存（固定仕様）
-      setLastJob(FEATURE_ID_GEN, idempotencyKey);
-
-      await runGenerate(idempotencyKey, false);
+      await startGenerateWithKey(key, false);
     } catch (e) {
       console.error(e);
       setUiError("通信エラーが発生しました。時間をおいて再度お試しください。");
+      clearLocalKey("gen");
+      setActiveGenKey(null);
     } finally {
       setIsGenerating(false);
     }
   };
 
-  /* -------------------------------
-     要因操作
-  -------------------------------- */
-  const addFactor = () => {
-    setFactors((prev) => [
-      ...prev,
-      {
-        id: Date.now(),
-        name: "",
-        operator: "×",
-        assumption: "",
-        rationale: "",
-        value: "",
-      },
-    ]);
-  };
+  /* -------------------------
+     ✅ 評価（job方式 + metaConfirm対応）
+  ------------------------- */
+  const applyEvalResult = async (resultObj: any) => {
+    const sc = resultObj?.score ?? null;
+    const fb = resultObj?.feedback ?? null;
+    const lg = resultObj?.logId ?? null;
 
-  const updateFactor = (id: number, field: keyof FermiFactor, value: string) => {
-    setFactors((prev) =>
-      prev.map((f) => (f.id === id ? { ...f, [field]: value } : f))
-    );
-  };
-
-  /* -------------------------------
-     計算
-  -------------------------------- */
-  const handleCompute = () => {
-    try {
-      if (!factors.length) {
-        setResult("");
-        return;
-      }
-
-      const nums = factors.map((f) => Number(f.value || "0") || 0);
-      let acc = nums[0] ?? 0;
-
-      for (let i = 1; i < nums.length; i++) {
-        const op = factors[i]?.operator ?? "×";
-        acc = op === "+" ? acc + nums[i] : acc * nums[i];
-      }
-
-      setResult(`${acc.toExponential(2)} ${unit}（概算）`);
-    } catch {
-      setResult("計算エラー（入力値を確認してください）");
+    if (!sc || !fb) {
+      setUiError("AI評価の結果が取得できませんでした。");
+      return;
     }
+
+    setScore(sc as FermiScore);
+    setFeedback(fb as FermiFeedback);
+    setLastLogId(lg);
   };
 
-  /* -------------------------------
-     AI採点 実行本体（ジョブ方式）
-     - idempotencyKey を必ず渡す
-     - metaConfirm 時は X-Meta-Confirm:1 & 同じ key を使う（固定仕様）
-  -------------------------------- */
-  const runEvaluate = async (idempotencyKey: string, metaConfirm: boolean) => {
-    const payload = {
-      idempotencyKey,
-      question,
-      formula,
-      unit,
-      factors,
-      sanityComment,
-      result,
-      problemId: currentProblemId,
-      category,
-      difficulty,
-    };
-
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (metaConfirm) headers["X-Meta-Confirm"] = "1";
+  const startEvalWithKey = async (key: string, metaConfirm: boolean, payload: any) => {
+    pollingAbortRef.current.eval = false;
 
     const res = await fetch("/api/eval/fermi", {
       method: "POST",
-      headers,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": key,
+        ...(metaConfirm ? { "X-Meta-Confirm": "1" } : {}),
+      },
       body: JSON.stringify(payload),
     });
 
-    const json = (await res.json().catch(() => null)) as
-      | (EvalRes & { jobId?: string; idempotencyKey?: string; reused?: boolean; status?: JobStatus })
-      | NeedMetaErr
-      | ApiErr
-      | GenericErr
-      | any;
+    const data: any = await res.json().catch(() => ({}));
+
+    if (!res.ok && res.status === 402 && data?.error === "need_meta") {
+      const requiredMeta = Number(data?.requiredMeta ?? data?.required ?? 1);
+
+      await openMetaModalFor({
+        requiredMeta,
+        featureLabel: `${FEATURE_LABEL}（採点）`,
+        onProceed: async () => {
+          const b = await fetchMyBalance();
+          if (typeof b === "number" && b < requiredMeta) {
+            closeMetaModal();
+            router.push("/pricing");
+            return;
+          }
+
+          setIsEvaluating(true);
+          try {
+            await startEvalWithKey(key, true, payload);
+          } finally {
+            setIsEvaluating(false);
+          }
+        },
+      });
+
+      return;
+    }
 
     if (!res.ok) {
-      // ✅ need_meta（二段階：固定仕様）
-      if (res.status === 402 && json?.error === "need_meta") {
-        const cost = Number(json?.requiredMeta ?? 1);
-        const balance = await fetchMetaBalance();
-
-        setMetaCost(cost);
-        setMetaBalance(balance);
-
-        // 残高不足 → purchase導線（既存導線維持）
-        if (balance < cost) {
-          setUpgradeMessage("METAが不足しています。購入してください。");
-          setUpgradeOpen(true);
-          return;
-        }
-
-        // 残高あり → モーダル（confirm後に同じkeyで再実行）
-        pendingEvalKeyRef.current = idempotencyKey;
-        setMetaConfirmOpen(true);
-        return;
-      }
-
-      if (res.status === 401) {
-        setUiError("ログインが必要です。いったんログインし直してください。");
-        return;
-      }
-
-      setUiError(json?.message ?? "AI採点に失敗しました。");
+      setUiError(data?.message ?? "AI採点に失敗しました。");
+      clearLocalKey("eval");
+      setActiveEvalKey(null);
       return;
     }
 
-    // running/queued は最小限：復帰ポーリングに任せる
-    if (json?.status === "running" || json?.status === "queued") {
+    // jobが返る設計（running/queued）なら statusで確定
+    if (data?.status === "running" || data?.status === "queued") {
+      await pollUntilDone({
+        feature: FEATURE_ID_EVAL,
+        key,
+        kind: "eval",
+        onSucceeded: async (jobResult) => {
+          await applyEvalResult(jobResult);
+
+          onEvaluated?.();
+
+          clearLocalKey("eval");
+          setActiveEvalKey(null);
+
+          const bb = await fetchMyBalance();
+          if (typeof bb === "number") setMetaBalance(bb);
+        },
+        onFailed: async (job) => {
+          setUiError(job.error_message ?? "処理に失敗しました。");
+          clearLocalKey("eval");
+          setActiveEvalKey(null);
+        },
+      });
       return;
     }
 
-    const data = json as EvalRes;
-    setPlan(data.plan ?? plan);
+    // 即時結果（reused含む）
+    await applyEvalResult(data);
 
-    if (data.score) setScore(data.score);
-    if (data.feedback) setFeedback(data.feedback);
+    onEvaluated?.();
 
-    setLastLogId(data.logId ?? null);
-    setSaved(false);
+    clearLocalKey("eval");
+    setActiveEvalKey(null);
 
-    window.dispatchEvent(new Event("meta:refresh"));
+    const bb = await fetchMyBalance();
+    if (typeof bb === "number") setMetaBalance(bb);
   };
 
-  /* -------------------------------
-     AI採点（入口）
-     - ジョブ方式に統一：idempotencyKey を作り last_job 保存
-  -------------------------------- */
   const handleEvaluate = async () => {
     setUiError(null);
 
-    if (!isAuthed) return setUiError("ログインが必要です。");
+    if (!userId) return setUiError("ログインが必要です。");
+    if (!currentProblem) return setUiError("まずは問題セットを生成してください。");
     if (!question.trim()) return setUiError("お題（Question）を入力してください。");
+    if (isEvaluating) return;
 
     const totalLen =
       question.length +
@@ -737,199 +861,196 @@ export const FermiEstimateAI: React.FC = () => {
       return;
     }
 
+    // 評価表示を一旦リセット
+    setFeedback(null);
+    setLastLogId(null);
+    setScore({
+      reframing: 0,
+      decomposition: 0,
+      assumptions: 0,
+      numbersSense: 0,
+      sanityCheck: 0,
+    });
+
+    const payload = {
+      question,
+      formula,
+      unit,
+      factors,
+      sanityComment,
+      result,
+      problemId: currentProblem.id,
+      category,
+      difficulty,
+    };
+
+    const key = makeEvalIdempotencyKey(payload);
+    setActiveEvalKey(key);
+    setLocalKey("eval", key);
+
+    setIsEvaluating(true);
     try {
-      setIsEvaluating(true);
-
-      // ✅ 評価は同一入力の二重実行を避けたいので deterministic のまま
-      const requestPayload = {
-        question,
-        formula,
-        unit,
-        factors,
-        sanityComment,
-        result,
-        problemId: currentProblemId,
-        category,
-        difficulty,
-      };
-      const idempotencyKey = makeIdempotencyKey(requestPayload);
-
-      setLastJob(FEATURE_ID_EVAL, idempotencyKey);
-
-      await runEvaluate(idempotencyKey, false);
+      await startEvalWithKey(key, false, payload);
     } catch (e) {
       console.error(e);
       setUiError("通信エラーが発生しました。時間をおいて再度お試しください。");
-    } finally {
-      setIsEvaluating(false);
-    }
-  };
-
-  // ✅ MetaConfirmModal OK押下（同じ key / X-Meta-Confirm:1）
-  // - 生成 or 採点 の pending を見て分岐
-  const handleMetaConfirm = async () => {
-    setMetaConfirmOpen(false);
-
-    // 1) 生成 pending があれば生成を優先
-    const genKey = pendingGenKeyRef.current;
-    pendingGenKeyRef.current = null;
-    if (genKey) {
-      try {
-        setIsGenerating(true);
-        await runGenerate(genKey, true);
-      } finally {
-        setIsGenerating(false);
-      }
-      return;
-    }
-
-    // 2) 採点 pending
-    const evalKey = pendingEvalKeyRef.current;
-    pendingEvalKeyRef.current = null;
-    if (!evalKey) return;
-
-    try {
-      setIsEvaluating(true);
-      await runEvaluate(evalKey, true);
+      clearLocalKey("eval");
+      setActiveEvalKey(null);
     } finally {
       setIsEvaluating(false);
     }
   };
 
   /* -------------------------
-     保存状態チェック
+     ✅ リロード復帰（gen/eval）
   ------------------------- */
   useEffect(() => {
-    if (!lastLogId) return;
-    if (!isAuthed) return;
+    if (authLoading) return;
+    if (!userId) return;
 
-    (async () => {
-      try {
-        const res = await fetch("/api/saves/list", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ attemptType: "fermi", saveType: "learning", limit: 100 }),
-        });
+    const resume = async () => {
+      // eval
+      const ek = getLocalKey("eval");
+      if (ek) {
+        setActiveEvalKey(ek);
+        setIsEvaluating(true);
 
-        const json = (await res.json().catch(() => null)) as SavesListRes | ApiErr | null;
-        if (!res.ok) return;
+        try {
+          const job = await fetchJobStatus(FEATURE_ID_EVAL, ek);
+          if (!job) {
+            clearLocalKey("eval");
+            setActiveEvalKey(null);
+          } else if (job.status === "succeeded") {
+            await applyEvalResult(job.result);
 
-        const data = json as SavesListRes;
-        setPlan(data.plan);
+            onEvaluated?.();
 
-        const exists = (data.items ?? []).some(
-          (it) =>
-            it.attempt_type === "fermi" &&
-            it.attempt_id === String(lastLogId) &&
-            it.save_type === "learning"
-        );
-        setSaved(exists);
-      } catch {
-        // ignore
+            clearLocalKey("eval");
+            setActiveEvalKey(null);
+
+            const bb = await fetchMyBalance();
+            if (typeof bb === "number") setMetaBalance(bb);
+          } else if (job.status === "failed") {
+            setUiError(job.error_message ?? "処理に失敗しました。");
+            clearLocalKey("eval");
+            setActiveEvalKey(null);
+          } else {
+            await pollUntilDone({
+              feature: FEATURE_ID_EVAL,
+              key: ek,
+              kind: "eval",
+              onSucceeded: async (r) => {
+                await applyEvalResult(r);
+
+                onEvaluated?.();
+
+                clearLocalKey("eval");
+                setActiveEvalKey(null);
+
+                const bb = await fetchMyBalance();
+                if (typeof bb === "number") setMetaBalance(bb);
+              },
+              onFailed: async (j) => {
+                setUiError(j.error_message ?? "処理に失敗しました。");
+                clearLocalKey("eval");
+                setActiveEvalKey(null);
+              },
+            });
+          }
+        } finally {
+          setIsEvaluating(false);
+        }
       }
-    })();
-  }, [lastLogId, isAuthed]);
+
+      // gen
+      const gk = getLocalKey("gen");
+      if (gk) {
+        setActiveGenKey(gk);
+        setIsGenerating(true);
+
+        try {
+          const job = await fetchJobStatus(FEATURE_ID_GEN, gk);
+          if (!job) {
+            clearLocalKey("gen");
+            setActiveGenKey(null);
+          } else if (job.status === "succeeded") {
+            const fermis = (job.result?.fermis ?? []) as FermiProblem[];
+            const one = job.result?.fermi as FermiProblem | undefined;
+            const list = uniqById(
+              (Array.isArray(fermis) && fermis.length ? fermis : one ? [one] : []).filter(Boolean)
+            );
+
+            if (list.length) {
+              clearSession();
+              setProblemPool(list);
+              setPoolIndex(0);
+              materializeProblem(list[0]);
+            }
+
+            clearLocalKey("gen");
+            setActiveGenKey(null);
+
+            const bb = await fetchMyBalance();
+            if (typeof bb === "number") setMetaBalance(bb);
+          } else if (job.status === "failed") {
+            setUiError(job.error_message ?? "処理に失敗しました。");
+            clearLocalKey("gen");
+            setActiveGenKey(null);
+          } else {
+            await pollUntilDone({
+              feature: FEATURE_ID_GEN,
+              key: gk,
+              kind: "gen",
+              onSucceeded: async (r) => {
+                const fermis = (r?.fermis ?? []) as FermiProblem[];
+                const one = r?.fermi as FermiProblem | undefined;
+                const list = uniqById(
+                  (Array.isArray(fermis) && fermis.length ? fermis : one ? [one] : []).filter(Boolean)
+                );
+
+                if (list.length) {
+                  clearSession();
+                  setProblemPool(list);
+                  setPoolIndex(0);
+                  materializeProblem(list[0]);
+                }
+
+                clearLocalKey("gen");
+                setActiveGenKey(null);
+
+                const bb = await fetchMyBalance();
+                if (typeof bb === "number") setMetaBalance(bb);
+              },
+              onFailed: async (j) => {
+                setUiError(j.error_message ?? "処理に失敗しました。");
+                clearLocalKey("gen");
+                setActiveGenKey(null);
+              },
+            });
+          }
+        } finally {
+          setIsGenerating(false);
+        }
+      }
+    };
+
+    resume();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, userId, onEvaluated]);
 
   /* -------------------------
-     保存
+     unmount cleanup
   ------------------------- */
-  const handleSave = async () => {
-    setUiError(null);
-    if (!isAuthed) return setUiError("ログインが必要です。");
-    if (!lastLogId) return setUiError("先に採点してから保存できます。");
-    if (!feedback) return setUiError("保存する内容がありません。");
+  useEffect(() => {
+    return () => {
+      pollingAbortRef.current.gen = true;
+      pollingAbortRef.current.eval = true;
+    };
+  }, []);
 
-    try {
-      setIsSaving(true);
-
-      const title = `【フェルミ】${question || "Fermi"}`;
-      const summary = `合計 ${
-        typeof feedback.totalScore === "number" ? feedback.totalScore : "-"
-      }点｜${category}/${difficulty}`;
-
-      const payload = {
-        input: {
-          problem: {
-            id: currentProblemId,
-            category,
-            difficulty,
-            title: question,
-            formulaHint: formula,
-            unit,
-            defaultFactors: factors.map((f) => f.name),
-          },
-          answers: {
-            question,
-            formula,
-            unit,
-            factors,
-            sanityComment,
-            result,
-          },
-        },
-        output: {
-          score,
-          feedback,
-          totalScore: feedback.totalScore,
-        },
-        eval: {
-          score,
-          feedback,
-          totalScore: feedback.totalScore,
-        },
-        meta: {
-          attemptType: "fermi",
-          category,
-          difficulty,
-          problemId: currentProblemId,
-          savedAt: new Date().toISOString(),
-          version: 1,
-        },
-      };
-
-      const res = await fetch("/api/saves/toggle", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          attemptId: String(lastLogId),
-          attemptType: "fermi",
-          saveType: "learning",
-          enabled: true,
-          title,
-          summary,
-          scoreTotal: typeof feedback.totalScore === "number" ? feedback.totalScore : null,
-          payload,
-          sourceId: String(lastLogId),
-        }),
-      });
-
-      const json = (await res.json().catch(() => null)) as ToggleSaveRes | ApiErr | any;
-
-      if (!res.ok) {
-        if (res.status === 403) {
-          if (json?.error === "upgrade_required" || json?.error === "limit_exceeded") {
-            setUpgradeMessage(json?.message ?? "保存にはアップグレードが必要です。");
-            setUpgradeOpen(true);
-            return;
-          }
-        }
-        setUiError(json?.message ?? "保存に失敗しました。");
-        return;
-      }
-
-      setPlan(json?.plan ?? plan);
-      setSaved(Boolean(json?.enabled));
-    } catch (e) {
-      console.error(e);
-      setUiError("保存に失敗しました。");
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  /* -------------------------------
-     UI：プール操作
-  -------------------------------- */
+  /* -------------------------
+     プール操作
+  ------------------------- */
   const canPrev = problemPool.length > 0 && poolIndex > 0;
   const canNext = problemPool.length > 0 && poolIndex < problemPool.length - 1;
 
@@ -937,18 +1058,34 @@ export const FermiEstimateAI: React.FC = () => {
     if (!canPrev) return;
     showPoolIndex(poolIndex - 1);
   };
+
   const goNext = () => {
     if (!canNext) return;
     showPoolIndex(poolIndex + 1);
   };
 
-  /* -------------------------------
-     レイアウト
-  -------------------------------- */
+  /* -------------------------
+     UI
+  ------------------------- */
+  if (authLoading) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-slate-600">
+        ログイン情報を読み込み中です…
+      </div>
+    );
+  }
+
+  if (!userId) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-slate-600">
+        ログイン状態を確認できませんでした。
+      </div>
+    );
+  }
+
   return (
     <>
       <div className="flex h-full gap-6">
-        {/* 左カラム */}
         <div className="flex-1 space-y-6 overflow-y-auto pr-2">
           {(authError || uiError) && (
             <div className="rounded-2xl border border-rose-100 bg-rose-50 p-3 text-xs text-rose-700">
@@ -956,16 +1093,16 @@ export const FermiEstimateAI: React.FC = () => {
             </div>
           )}
 
-          {/* フェルミ問題ガチャ */}
+          {/* ガチャ + プール */}
           <section className="mb-2 rounded-2xl border border-sky-100 bg-sky-50/70 p-4 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
               <div>
-                <h1 className="text-sm font-semibold text-sky-900">
-                  Fermi Estimation Trainer
-                </h1>
+                <h1 className="text-sm font-semibold text-sky-900">Fermi Estimation Trainer</h1>
                 <p className="mt-1 text-[11px] text-sky-700">
-                  カテゴリと難易度を選んで「新しい問題セット(50)」を押すと、フェルミ問題が生成されます。
+                  カテゴリと難易度を選んで「新しい問題セット(10)」を押すと、フェルミ問題が10問生成されます。
                 </p>
+
+                {/* 互換表示（不要なら消してOK） */}
                 <p className="mt-1 text-[11px] text-sky-700">
                   Plan: <span className="font-semibold">{plan}</span>
                   {typeof remaining === "number" && (
@@ -975,9 +1112,16 @@ export const FermiEstimateAI: React.FC = () => {
                     </>
                   )}
                 </p>
+
                 <p className="mt-1 text-[11px] text-sky-700">
-                  問題プール:{" "}
-                  <span className="font-semibold">{problemPool.length || 0}</span>
+                  META:{" "}
+                  <span className="font-semibold">
+                    {typeof metaBalance === "number" ? metaBalance : "-"}
+                  </span>
+                </p>
+
+                <p className="mt-1 text-[11px] text-sky-700">
+                  問題プール: <span className="font-semibold">{problemPool.length || 0}</span>
                   {problemPool.length > 0 && (
                     <>
                       {" "}
@@ -994,21 +1138,22 @@ export const FermiEstimateAI: React.FC = () => {
                 <button
                   type="button"
                   onClick={goPrev}
-                  disabled={!canPrev}
+                  disabled={!canPrev || isEvaluating}
                   className={`rounded-full px-3 py-1.5 text-xs font-semibold ${
-                    canPrev
+                    canPrev && !isEvaluating
                       ? "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                       : "cursor-not-allowed bg-slate-100 text-slate-300"
                   }`}
                 >
                   ◀︎ 前
                 </button>
+
                 <button
                   type="button"
                   onClick={goNext}
-                  disabled={!canNext}
+                  disabled={!canNext || isEvaluating}
                   className={`rounded-full px-3 py-1.5 text-xs font-semibold ${
-                    canNext
+                    canNext && !isEvaluating
                       ? "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                       : "cursor-not-allowed bg-slate-100 text-slate-300"
                   }`}
@@ -1018,7 +1163,7 @@ export const FermiEstimateAI: React.FC = () => {
 
                 <button
                   type="button"
-                  onClick={generateNewProblem}
+                  onClick={handleGenerate}
                   disabled={isGenerating}
                   className={`rounded-full px-3 py-1.5 text-xs font-semibold text-white shadow-sm ${
                     isGenerating ? "cursor-not-allowed bg-slate-300" : "bg-sky-500 hover:bg-sky-600"
@@ -1057,16 +1202,15 @@ export const FermiEstimateAI: React.FC = () => {
               </div>
 
               <div className="flex items-end">
-                <div className="w-full text-[11px] text-slate-500">
-                  {currentProblemId ? (
+                <p className="w-full text-[11px] text-slate-500">
+                  {currentProblem ? (
                     <>
-                      現在の問題ID：{" "}
-                      <span className="font-mono text-slate-700">{currentProblemId}</span>
+                      現在の問題ID: <span className="font-mono">{currentProblem.id}</span>
                     </>
                   ) : (
-                    "まずは「新しい問題セット(50)」を押してスタート。"
+                    `まずは「新しい問題セット(${DEFAULT_GEN_COUNT})」でスタート。`
                   )}
-                </div>
+                </p>
               </div>
             </div>
 
@@ -1075,14 +1219,15 @@ export const FermiEstimateAI: React.FC = () => {
               <div className="mt-2 flex items-center gap-2">
                 <span className="text-[11px] text-slate-600">ジャンプ：</span>
                 <select
-                  className="w-56 rounded-xl border border-slate-200 bg-white/80 px-2 py-1.5 text-xs"
+                  className="w-72 rounded-xl border border-slate-200 bg-white/80 px-2 py-1.5 text-xs"
                   value={poolIndex}
                   onChange={(e) => showPoolIndex(Number(e.target.value))}
+                  disabled={isEvaluating}
                 >
                   {problemPool.map((p, i) => (
                     <option key={p.id} value={i}>
-                      {String(i + 1).padStart(2, "0")}. {p.title.slice(0, 26)}
-                      {p.title.length > 26 ? "…" : ""}
+                      {String(i + 1).padStart(2, "0")}. {p.title.slice(0, 28)}
+                      {p.title.length > 28 ? "…" : ""}
                     </option>
                   ))}
                 </select>
@@ -1093,6 +1238,7 @@ export const FermiEstimateAI: React.FC = () => {
                   onClick={() => {
                     if (problemPool[poolIndex]) materializeProblem(problemPool[poolIndex]);
                   }}
+                  disabled={!problemPool[poolIndex] || isEvaluating}
                 >
                   今の問題を初期状態に戻す
                 </button>
@@ -1102,9 +1248,7 @@ export const FermiEstimateAI: React.FC = () => {
 
           {/* ① 再定義 */}
           <section className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-700">
-              ① 問題の再定義（Reframe）
-            </h2>
+            <h2 className="mb-2 text-sm font-semibold text-slate-700">① 問題の再定義（Reframe）</h2>
             <div className="space-y-3">
               <div>
                 <label className="text-xs text-slate-500">お題 / Question</label>
@@ -1165,10 +1309,7 @@ export const FermiEstimateAI: React.FC = () => {
 
             <div className="space-y-3">
               {factors.map((factor, index) => (
-                <div
-                  key={factor.id}
-                  className="rounded-xl border border-slate-100 bg-slate-50/70 p-3"
-                >
+                <div key={factor.id} className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
                   <div className="mb-2 flex items-center gap-2">
                     <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] text-slate-600">
                       Factor {index + 1}
@@ -1230,7 +1371,7 @@ export const FermiEstimateAI: React.FC = () => {
           {/* ③ 計算 */}
           <section className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm">
             <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-slate-700">④ 計算（Computation）</h2>
+              <h2 className="text-sm font-semibold text-slate-700">③ 計算（Computation）</h2>
               <button
                 type="button"
                 className="rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-sky-600"
@@ -1246,9 +1387,7 @@ export const FermiEstimateAI: React.FC = () => {
 
           {/* ④ オーダーチェック */}
           <section className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-700">
-              ⑤ オーダーチェック（Sanity Check）
-            </h2>
+            <h2 className="mb-2 text-sm font-semibold text-slate-700">④ オーダーチェック（Sanity Check）</h2>
             <textarea
               className="w-full rounded-xl border border-slate-200 bg-white/80 p-2 text-sm"
               rows={3}
@@ -1258,49 +1397,32 @@ export const FermiEstimateAI: React.FC = () => {
             />
           </section>
 
-          {/* ✅ 評価 + 保存 */}
-          <section className="mb-2 flex justify-end gap-2">
+          {/* ✅ 評価 */}
+          <section className="mb-6 flex items-center justify-end gap-2">
             <button
               type="button"
               onClick={handleEvaluate}
-              disabled={isEvaluating}
+              disabled={isEvaluating || !currentProblem}
               className={`rounded-full px-5 py-2 text-xs font-semibold text-white ${
-                isEvaluating
+                isEvaluating || !currentProblem
                   ? "cursor-not-allowed bg-slate-300"
                   : "bg-violet-500 hover:bg-violet-600"
               }`}
             >
-              {isEvaluating ? "AIが採点中…" : "AIに採点してもらう"}
-            </button>
-
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={!feedback || isSaving || saved}
-              className={`rounded-full px-4 py-2 text-xs font-semibold ${
-                !feedback || isSaving || saved
-                  ? "cursor-not-allowed bg-slate-100 text-slate-400"
-                  : "bg-white text-slate-700 border border-slate-200 hover:bg-slate-50"
-              }`}
-            >
-              {saved ? "保存済み" : isSaving ? "保存中…" : "保存（あとで見返す）"}
+              {isEvaluating ? "採点中…" : "AIに採点してもらう"}
             </button>
           </section>
 
           {/* フィードバック */}
           {feedback && (
             <section className="mb-8 rounded-2xl border border-violet-100 bg-violet-50/60 p-4 shadow-sm">
-              <h3 className="mb-2 text-xs font-semibold text-violet-700">
-                フィードバック & 模範回答イメージ
-              </h3>
+              <h3 className="mb-2 text-xs font-semibold text-violet-700">フィードバック & 模範回答イメージ</h3>
 
               <p className="mb-3 text-xs text-slate-700">{feedback.summary}</p>
 
               <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-2">
                 <div className="rounded-xl border border-slate-100 bg-white/80 p-3">
-                  <p className="mb-1 text-[11px] font-semibold text-emerald-600">
-                    👍 良いポイント
-                  </p>
+                  <p className="mb-1 text-[11px] font-semibold text-emerald-600">👍 良いポイント</p>
                   <ul className="list-disc space-y-1 pl-4 text-[11px] text-slate-700">
                     {(feedback.strengths ?? []).map((s, i) => (
                       <li key={i}>{s}</li>
@@ -1309,9 +1431,7 @@ export const FermiEstimateAI: React.FC = () => {
                 </div>
 
                 <div className="rounded-xl border border-slate-100 bg-white/80 p-3">
-                  <p className="mb-1 text-[11px] font-semibold text-rose-600">
-                    ⚠ 改善ポイント
-                  </p>
+                  <p className="mb-1 text-[11px] font-semibold text-rose-600">⚠ 改善ポイント</p>
                   <ul className="list-disc space-y-1 pl-4 text-[11px] text-slate-700">
                     {(feedback.weaknesses ?? []).map((w, i) => (
                       <li key={i}>{w}</li>
@@ -1324,10 +1444,12 @@ export const FermiEstimateAI: React.FC = () => {
 
               <div className="rounded-xl border border-slate-100 bg-white/90 px-3 py-2">
                 <p className="mb-1 text-[11px] font-semibold text-slate-700">模範回答イメージ</p>
-                <pre className="whitespace-pre-wrap text-[11px] text-slate-700">
-                  {feedback.sampleAnswer}
-                </pre>
+                <pre className="whitespace-pre-wrap text-[11px] text-slate-700">{feedback.sampleAnswer}</pre>
               </div>
+
+              {lastLogId != null && (
+                <p className="mt-2 text-[10px] text-slate-400">logId: {String(lastLogId)}</p>
+              )}
             </section>
           )}
         </div>
@@ -1338,26 +1460,27 @@ export const FermiEstimateAI: React.FC = () => {
             <h3 className="mb-2 text-xs font-semibold tracking-wide text-sky-700">
               型スコア（Fermi Pattern）
             </h3>
+            <p className="mb-2 text-[11px] text-sky-800">OpenAI評価の結果を反映しています。</p>
             <ul className="space-y-1.5 text-xs text-slate-700">
               <li className="flex justify-between">
                 <span>再定義</span>
-                <span className="font-semibold">{score.reframing}</span>
+                <span className="font-semibold">{score.reframing}/10</span>
               </li>
               <li className="flex justify-between">
                 <span>要素分解</span>
-                <span className="font-semibold">{score.decomposition}</span>
+                <span className="font-semibold">{score.decomposition}/10</span>
               </li>
               <li className="flex justify-between">
                 <span>仮定の質</span>
-                <span className="font-semibold">{score.assumptions}</span>
+                <span className="font-semibold">{score.assumptions}/10</span>
               </li>
               <li className="flex justify-between">
                 <span>数字感</span>
-                <span className="font-semibold">{score.numbersSense}</span>
+                <span className="font-semibold">{score.numbersSense}/10</span>
               </li>
               <li className="flex justify-between">
                 <span>オーダー感</span>
-                <span className="font-semibold">{score.sanityCheck}</span>
+                <span className="font-semibold">{score.sanityCheck}/10</span>
               </li>
             </ul>
           </div>
@@ -1372,28 +1495,33 @@ export const FermiEstimateAI: React.FC = () => {
         </aside>
       </div>
 
-      {/* ✅ META確認モーダル（固定仕様） */}
+      {/* ✅ 共通METAモーダル（Caseと同じ） */}
       <MetaConfirmModal
-        open={metaConfirmOpen}
-        onClose={() => {
-          setMetaConfirmOpen(false);
-          pendingEvalKeyRef.current = null;
-          pendingGenKeyRef.current = null;
-        }}
-        onConfirm={handleMetaConfirm}
-        featureLabel={
-          pendingGenKeyRef.current ? "フェルミ推定AI（問題生成）" : "フェルミ推定AI（採点）"
-        }
-        cost={metaCost}
+        open={metaModalOpen}
+        onClose={closeMetaModal}
+        featureLabel={FEATURE_LABEL}
+        requiredMeta={metaNeed}
         balance={metaBalance}
-      />
+        mode={metaMode}
+        title={metaTitle}
+        message={metaMessage}
+        onConfirm={async () => {
+          const required = metaNeed;
+          const latest = await fetchMyBalance();
+          if (typeof latest === "number") setMetaBalance(latest);
 
-      {/* 既存：サブスク誘導モーダル（残す） */}
-      <UpgradeModal
-        open={upgradeOpen}
-        onClose={() => setUpgradeOpen(false)}
-        message={upgradeMessage}
-        featureLabel="フェルミ推定AI"
+          if (typeof latest === "number" && latest < required) {
+            closeMetaModal();
+            router.push("/pricing");
+            return;
+          }
+
+          const fn = pendingAction;
+          closeMetaModal();
+          if (!fn) return;
+          await fn();
+        }}
+        onPurchase={() => router.push("/pricing")}
       />
     </>
   );

@@ -9,6 +9,15 @@ import { useRouter } from "next/navigation";
 import { createBrowserClient } from "@supabase/ssr";
 import type { TopicType } from "@/lib/types/story";
 
+/**
+ * ✅ 完成版方針（このページ内で完結）
+ * - UI：localStorage で last_job / draft を保持し、リロード・戻る・再訪問でも復帰
+ * - 評価API：/api/interview-eval は generation_jobs + idempotency + metaConfirm 二段階（402 → confirm → X-Meta-Confirm:1）
+ * - 開始：/api/usage/check で「開始可否の真実」を取得（開始自体は消費しない）。need_meta なら購入導線
+ * - エラー：課金や二重実行は API 側の idempotency + 失敗時非消費で担保
+ * - 入力条件変更（persona/topic 変更）：混線防止のため last_job / draft を削除
+ */
+
 type QA = { question: string; answer: string };
 
 type EvaluationResult = {
@@ -36,10 +45,14 @@ type Profile = {
 
 const MAX_Q = 10 as const;
 
-// ✅ featureGate.ts の interview_10 と “必ず一致” させる
+// ✅ featureGate.ts の interview_10 と “必ず一致”
 const FEATURE_ID = "interview_10";
 const FEATURE_LABEL = "一般面接AI（音声版）";
-const REQUIRED_META = 2; // ←ここが違うと事故るので必ず統一
+const EVAL_REQUIRED_META = 2;
+
+// localStorage keys（UI仕様）
+const LS_LAST_JOB = `last_job:${FEATURE_ID}` as const;
+const LS_DRAFT = `draft:${FEATURE_ID}` as const;
 
 const PERSONAS = [
   { id: "consulting_finance", label: "コンサル・外銀系" },
@@ -47,7 +60,7 @@ const PERSONAS = [
   { id: "finance_banking_insurance", label: "金融（銀行・証券・保険）系" },
   { id: "maker_it_telecom", label: "メーカー・IT・通信系" },
   { id: "service_education_entertainment", label: "サービス・教育・エンタメ系" },
-];
+] as const;
 
 const TOPIC_LABEL: Record<TopicType, string> = {
   gakuchika: "ガクチカ（学生時代に力を入れたこと）",
@@ -59,27 +72,10 @@ const TOPIC_LABEL: Record<TopicType, string> = {
 
 type Step = "idle" | "asking" | "thinking" | "editing" | "evaluating" | "finished";
 
-function extractAxesFromLearnings(text: string): string[] {
-  const axes: string[] = [];
-  const t = text.toLowerCase();
-
-  if (t.includes("主体") || t.includes("自分から") || t.includes("オーナー")) {
-    axes.push("主体性 / オーナーシップ");
-  }
-  if (t.includes("チーム") || t.includes("協力") || t.includes("巻き込")) {
-    axes.push("チームワーク / 巻き込み力");
-  }
-  if (t.includes("継続") || t.includes("粘り") || t.includes("粘り強")) {
-    axes.push("粘り強さ / 継続力");
-  }
-  if (t.includes("改善") || t.includes("工夫") || t.includes("試行錯誤")) {
-    axes.push("改善志向 / PDCA");
-  }
-  if (axes.length === 0) {
-    axes.push("成長意欲 / 学習姿勢");
-  }
-  return axes;
-}
+/** /api/usage/check の返却に合わせる */
+type ProceedMode = "unlimited" | "free" | "need_meta";
+type UsageCheckOK = { ok: true; mode: ProceedMode; requiredMeta?: number; balance?: number };
+type UsageCheckNeedMeta = { ok: false; error: "need_meta"; requiredMeta: number; balance?: number };
 
 function buildQuestions(profile: Profile | null): string[] {
   const hasProfile = !!profile;
@@ -90,7 +86,9 @@ function buildQuestions(profile: Profile | null): string[] {
   const mainIndustry = profile?.interested_industries?.[0];
 
   const baseIntro = hasProfile
-    ? `まずは ${name} さんの簡単な自己紹介をお願いします。（${uni}${faculty ? ` / ${faculty}` : ""}${grade ? ` / ${grade}年` : ""} などを含めて）`
+    ? `まずは ${name} さんの簡単な自己紹介をお願いします。（${uni}${faculty ? ` / ${faculty}` : ""}${
+        grade ? ` / ${grade}年` : ""
+      } などを含めて）`
     : "それでは模擬面接を始めます。まずは簡単な自己紹介をお願いします。";
 
   const baseGakuchika = hasProfile
@@ -125,6 +123,98 @@ async function fetchMyMetaBalance(): Promise<number | null> {
     return null;
   }
 }
+
+/**
+ * ✅ 開始時のチェック（消費はしない）
+ * - feature は必須
+ * - requiredMeta も送っておく（API側の判定材料/将来互換）
+ */
+async function callUsageCheckClient(): Promise<
+  | { ok: true; mode: ProceedMode; requiredMeta: number; balance: number | null }
+  | { ok: false; status: number; requiredMeta: number; balance: number | null }
+> {
+  try {
+    const res = await fetch("/api/usage/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        feature: FEATURE_ID,
+        requiredMeta: EVAL_REQUIRED_META,
+      }),
+    });
+
+    const data = (await res.json().catch(() => ({}))) as Partial<UsageCheckOK | UsageCheckNeedMeta>;
+
+    if (res.status === 402 || (data as any)?.error === "need_meta") {
+      const requiredMeta =
+        Number((data as any)?.requiredMeta ?? (data as any)?.required ?? EVAL_REQUIRED_META) || EVAL_REQUIRED_META;
+      const balance = Number.isFinite(Number((data as any)?.balance)) ? Number((data as any)?.balance) : null;
+      return { ok: false, status: 402, requiredMeta, balance };
+    }
+
+    if (!res.ok) {
+      const requiredMeta =
+        Number((data as any)?.requiredMeta ?? (data as any)?.required ?? EVAL_REQUIRED_META) || EVAL_REQUIRED_META;
+      const balance = Number.isFinite(Number((data as any)?.balance)) ? Number((data as any)?.balance) : null;
+      return { ok: false, status: res.status || 500, requiredMeta, balance };
+    }
+
+    const mode = ((data as any)?.mode as ProceedMode) || "free";
+    const requiredMeta =
+      Number((data as any)?.requiredMeta ?? (data as any)?.required ?? EVAL_REQUIRED_META) || EVAL_REQUIRED_META;
+    const balance = Number.isFinite(Number((data as any)?.balance)) ? Number((data as any)?.balance) : null;
+
+    return { ok: true, mode, requiredMeta, balance };
+  } catch (e) {
+    console.error("callUsageCheckClient failed:", e);
+    return { ok: false, status: 500, requiredMeta: EVAL_REQUIRED_META, balance: null };
+  }
+}
+
+function safeJsonParse<T>(s: string | null): T | null {
+  if (!s) return null;
+  try {
+    return JSON.parse(s) as T;
+  } catch {
+    return null;
+  }
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function newIdempotencyKey(): string {
+  const g = (globalThis as any)?.crypto?.randomUUID?.();
+  if (typeof g === "string" && g.length > 10) return g;
+  return `${Date.now()}_${Math.random().toString(16).slice(2)}_${Math.random().toString(16).slice(2)}`;
+}
+
+type LastJobLS = { key: string; createdAt: string };
+type DraftLS = {
+  personaId: string;
+  topicType: TopicType;
+  step: Step;
+  qaList: QA[];
+  currentIdx: number;
+  currentQuestion: string;
+  pendingTranscript: string;
+  updatedAt: string;
+  evalIdempotencyKey?: string | null;
+};
+
+type JobStatusResponse = {
+  ok: boolean;
+  job?: {
+    id?: string | null;
+    status: "queued" | "running" | "succeeded" | "failed";
+    request?: any;
+    result?: any;
+    error_code?: string | null;
+    error_message?: string | null;
+  };
+  error?: string;
+};
 
 export default function InterviewPage() {
   const router = useRouter();
@@ -169,20 +259,90 @@ export default function InterviewPage() {
   // ✅ meta不足時の導線（評価APIで402になった時）
   const [needMeta, setNeedMeta] = useState<number | null>(null);
 
-  // ✅ 開始時に確認するためのモーダル
+  // ✅ 開始モーダル（開始時は消費しない：チェック結果に応じて表示だけ変える）
   const [metaModalOpen, setMetaModalOpen] = useState(false);
   const [metaBalance, setMetaBalance] = useState<number | null>(null);
   const [metaMode, setMetaMode] = useState<"confirm" | "purchase">("confirm");
-
-  // “開始確定”の実行予約
+  const [startDisplayRequiredMeta, setStartDisplayRequiredMeta] = useState<number>(0);
   const pendingStartRef = useRef<null | (() => void)>(null);
+
+  // ✅ 評価API 402用（ジョブ方式）
+  const [evalMetaModalOpen, setEvalMetaModalOpen] = useState(false);
+  const [evalMetaMode, setEvalMetaMode] = useState<"confirm" | "purchase">("confirm");
+  const [evalRequiredMeta, setEvalRequiredMeta] = useState<number>(EVAL_REQUIRED_META);
+  const evalIdempotencyKeyRef = useRef<string | null>(null);
+  const evalConfirmTriedRef = useRef(false);
 
   const logRef = useRef<HTMLDivElement | null>(null);
 
+  // ------------------------------
+  // localStorage helpers
+  // ------------------------------
+  const clearLastJob = () => {
+    try {
+      localStorage.removeItem(LS_LAST_JOB);
+    } catch {}
+  };
+  const saveLastJob = (key: string) => {
+    const v: LastJobLS = { key, createdAt: nowIso() };
+    try {
+      localStorage.setItem(LS_LAST_JOB, JSON.stringify(v));
+    } catch {}
+  };
+  const loadLastJob = (): LastJobLS | null => {
+    try {
+      return safeJsonParse<LastJobLS>(localStorage.getItem(LS_LAST_JOB));
+    } catch {
+      return null;
+    }
+  };
+  // ✅ 評価を「再実行」するために、ジョブ紐づけを捨てて新規評価にする
+ const resetEvaluationJob = () => {
+   clearLastJob(); // last_job を消す（復帰対象を消す）
+   evalIdempotencyKeyRef.current = null; // 新しい key で新ジョブを作る
+   evalConfirmTriedRef.current = false;
+  setEvaluation(null);
+   setNeedMeta(null);
+  };
+
+  const clearDraft = () => {
+    try {
+      localStorage.removeItem(LS_DRAFT);
+    } catch {}
+  };
+  const loadDraft = (): DraftLS | null => {
+    try {
+      return safeJsonParse<DraftLS>(localStorage.getItem(LS_DRAFT));
+    } catch {
+      return null;
+    }
+  };
+  const saveDraft = (d: DraftLS) => {
+    try {
+      localStorage.setItem(LS_DRAFT, JSON.stringify(d));
+    } catch {}
+  };
+
+  // 入力条件が変わる操作：last_job + draft を削除（混線防止）
+  const resetPersistenceForInputChange = () => {
+    clearLastJob();
+    clearDraft();
+    evalIdempotencyKeyRef.current = null;
+    evalConfirmTriedRef.current = false;
+    setEvaluation(null);
+    setError(null);
+    setNeedMeta(null);
+  };
+
+  // ------------------------------
+  // auth & profile
+  // ------------------------------
   useEffect(() => {
     const run = async () => {
       try {
-        const { data: { user } } = await supabase.auth.getUser();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
         if (!user) {
           router.push("/auth");
           return;
@@ -212,12 +372,177 @@ export default function InterviewPage() {
     }, 120);
   };
 
-  // ✅ 本体：面接を開始する（ここは今のstartInterviewと同じ）
+  // ------------------------------
+  // Draft persistence
+  // ------------------------------
+  const draftSaveTimer = useRef<number | null>(null);
+  useEffect(() => {
+    if (!authChecked) return;
+
+    const isTrivialIdle =
+      step === "idle" && qaList.length === 0 && !pendingTranscript && !evaluation && currentIdx === 0;
+
+    if (isTrivialIdle) return;
+
+    if (draftSaveTimer.current) {
+      window.clearTimeout(draftSaveTimer.current);
+      draftSaveTimer.current = null;
+    }
+
+    draftSaveTimer.current = window.setTimeout(() => {
+      const d: DraftLS = {
+        personaId,
+        topicType,
+        step,
+        qaList,
+        currentIdx,
+        currentQuestion,
+        pendingTranscript,
+        updatedAt: nowIso(),
+        evalIdempotencyKey: evalIdempotencyKeyRef.current,
+      };
+      saveDraft(d);
+    }, 180);
+
+    return () => {
+      if (draftSaveTimer.current) {
+        window.clearTimeout(draftSaveTimer.current);
+        draftSaveTimer.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authChecked, personaId, topicType, step, qaList, currentIdx, currentQuestion, pendingTranscript, evaluation]);
+
+  // 起動時：draft 復元
+  useEffect(() => {
+    if (!authChecked) return;
+
+    const d = loadDraft();
+    if (!d) return;
+
+    if (!d.personaId || !d.topicType) {
+      clearDraft();
+      return;
+    }
+
+    setPersonaId(d.personaId);
+    setTopicType(d.topicType);
+
+    setStep(d.step);
+    setQAList(Array.isArray(d.qaList) ? d.qaList : []);
+    setCurrentIdx(Number.isFinite(d.currentIdx as any) ? d.currentIdx : 0);
+    setCurrentQuestion(typeof d.currentQuestion === "string" ? d.currentQuestion : "");
+    setPendingTranscript(typeof d.pendingTranscript === "string" ? d.pendingTranscript : "");
+
+    if (typeof d.evalIdempotencyKey === "string" && d.evalIdempotencyKey.length > 5) {
+      evalIdempotencyKeyRef.current = d.evalIdempotencyKey;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authChecked]);
+
+  // ------------------------------
+  // generation_jobs status復帰
+  // ------------------------------
+  const fetchJobStatus = async (key: string): Promise<JobStatusResponse> => {
+    const qs = new URLSearchParams({ feature: FEATURE_ID, key });
+    const res = await fetch(`/api/generation-jobs/status?${qs.toString()}`, { method: "GET" });
+    const data = (await res.json().catch(() => null)) as JobStatusResponse | null;
+    if (!data) return { ok: false, error: "bad_response" };
+    return data;
+  };
+
+  const pollJobUntilDone = async (key: string) => {
+    const maxTries = 24;
+    const sleepMs = 1100;
+
+    for (let i = 0; i < maxTries; i++) {
+      const st = await fetchJobStatus(key);
+      if (st.ok && st.job) {
+        if (st.job.status === "succeeded") {
+          const r = st.job.result as EvaluationResult | undefined;
+          if (r) setEvaluation(r);
+
+          const req = st.job.request;
+          if (req?.qaList && Array.isArray(req.qaList) && req.qaList.length) {
+            setQAList(req.qaList);
+          }
+
+          setStep("finished");
+          setError(null);
+          setNeedMeta(null);
+          scrollToBottom();
+          return;
+        }
+        if (st.job.status === "failed") {
+          setStep("finished");
+          setError(st.job.error_message || "評価ジョブが失敗しました。時間をおいて再度お試しください。");
+          scrollToBottom();
+          return;
+        }
+        setStep("evaluating");
+      }
+      await new Promise((r) => setTimeout(r, sleepMs));
+    }
+
+    // タイムアウト（復帰はできるので強くエラーにはしない）
+    setError("評価の作成に時間がかかっています。しばらくしてから再読み込みしてください（復帰できます）。");
+    setStep("evaluating");
+  };
+
+  useEffect(() => {
+    if (!authChecked) return;
+
+    const lj = loadLastJob();
+    if (!lj?.key) return;
+
+    (async () => {
+      const st = await fetchJobStatus(lj.key);
+
+      if (!st.ok || !st.job) {
+        clearLastJob();
+        return;
+      }
+
+      if (st.job.status === "succeeded") {
+        const r = st.job.result as EvaluationResult | undefined;
+        if (r) setEvaluation(r);
+
+        const req = st.job.request;
+        if (req?.qaList && Array.isArray(req.qaList) && req.qaList.length) {
+          setQAList(req.qaList);
+        }
+
+        setStep("finished");
+        setError(null);
+        setNeedMeta(null);
+        scrollToBottom();
+        return;
+      }
+
+      if (st.job.status === "failed") {
+        setStep("finished");
+        setError(st.job.error_message || "評価ジョブが失敗しました。");
+        scrollToBottom();
+        return;
+      }
+
+      setStep("evaluating");
+      await pollJobUntilDone(lj.key);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authChecked]);
+
+  // ------------------------------
+  // 面接の開始（消費しない）
+  // ------------------------------
   const startInterviewCore = () => {
     if (!authChecked || !userId) {
       router.push("/auth");
       return;
     }
+
+    resetPersistenceForInputChange();
+
     setQAList([]);
     setEvaluation(null);
     setCurrentIdx(0);
@@ -231,7 +556,6 @@ export default function InterviewPage() {
     scrollToBottom();
   };
 
-  // ✅ 入口：開始ボタン押下 → meta確認 → モーダル
   const startInterview = async () => {
     if (!authChecked || !userId) {
       router.push("/auth");
@@ -242,24 +566,74 @@ export default function InterviewPage() {
     setError(null);
     setNeedMeta(null);
 
-    const balance = await fetchMyMetaBalance(); // ✅ meta_lots 正（RPC）
-    setMetaBalance(balance);
+    // ✅ まず usage/check（開始できるか？の真実）
+    const check = await callUsageCheckClient();
 
-    const hasEnough = typeof balance === "number" ? balance >= REQUIRED_META : true; // 取得失敗ならconfirmで進める
-    setMetaMode(hasEnough ? "confirm" : "purchase");
+    // 表示用残高：checkに入ってたらそれ優先 / 無ければ balance API
+    let displayBalance: number | null = null;
+    if (check.ok || (!check.ok && check.status === 402)) displayBalance = check.balance ?? null;
+    if (displayBalance == null) displayBalance = await fetchMyMetaBalance();
+    setMetaBalance(displayBalance);
 
-    // “確定”で開始するように予約
+    // ✅ need_meta のときだけ購入導線
+    if (!check.ok && check.status === 402) {
+      setMetaMode("purchase");
+      setStartDisplayRequiredMeta(check.requiredMeta || EVAL_REQUIRED_META);
+      pendingStartRef.current = null;
+      setMetaModalOpen(true);
+      return;
+    }
+
+    // usage/check が死んでる：真実が取れないので開始は止める（安全側）
+    if (!check.ok) {
+      setError("回数確認に失敗しました。通信環境を確認して、もう一度お試しください。");
+      return;
+    }
+
+    // ✅ free/unlimited なら開始はMETA不要（評価時のみ消費）
+    if (check.mode === "free" || check.mode === "unlimited") {
+      setMetaMode("confirm");
+      setStartDisplayRequiredMeta(0); // ← 無料/無制限なら0（開始は消費しない）
+      pendingStartRef.current = () => startInterviewCore();
+      setMetaModalOpen(true);
+      return;
+    }
+
+    // ✅ 万一 mode: need_meta が ok:true で返る実装でも、購入導線に倒す
+    if (check.mode === "need_meta") {
+      setMetaMode("purchase");
+      setStartDisplayRequiredMeta(check.requiredMeta || EVAL_REQUIRED_META);
+      pendingStartRef.current = null;
+      setMetaModalOpen(true);
+      return;
+    }
+
+    // フォールバック（基本ここには来ない）
+    setMetaMode("confirm");
+    setStartDisplayRequiredMeta(0);
     pendingStartRef.current = () => startInterviewCore();
-
     setMetaModalOpen(true);
   };
 
-  const closeMetaModal = () => {
-    setMetaModalOpen(false);
+  const closeMetaModal = () => setMetaModalOpen(false);
+
+  // ------------------------------
+  // 評価（ジョブ方式）
+  // ------------------------------
+  const openEvalMetaModal = async (required: number) => {
+    setEvalRequiredMeta(required);
+
+    const b = await fetchMyMetaBalance();
+    setMetaBalance(b);
+
+    // 402 を一回踏んだら confirm → purchase の二段階。2回目以降は purchase を先に見せる
+    setEvalMetaMode(evalConfirmTriedRef.current ? "purchase" : "confirm");
+    setEvalMetaModalOpen(true);
   };
 
-  // ✅ 10問終了 → /api/interview-eval（ここで課金の真実）
-  const runEvaluation = async (finishedList: QA[]) => {
+  const closeEvalMetaModal = () => setEvalMetaModalOpen(false);
+
+  const runEvaluation = async (finishedList: QA[], opts?: { metaConfirm?: boolean }) => {
     try {
       setStep("evaluating");
       setError(null);
@@ -268,10 +642,25 @@ export default function InterviewPage() {
 
       const topicLabel = TOPIC_LABEL[topicType] || "一般面接";
 
+      let key = evalIdempotencyKeyRef.current;
+      if (!key) {
+        key = newIdempotencyKey();
+        evalIdempotencyKeyRef.current = key;
+      }
+      saveLastJob(key);
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": key,
+      };
+      if (opts?.metaConfirm) headers["X-Meta-Confirm"] = "1";
+
       const res = await fetch("/api/interview-eval", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
+          idempotencyKey: key,
+          featureId: FEATURE_ID, // ✅ API側で参照するなら送る（無視されてもOK）
           persona_id: personaId,
           qaList: finishedList,
           topic: topicLabel,
@@ -279,29 +668,77 @@ export default function InterviewPage() {
         }),
       });
 
-      if (!res.ok) {
+      if (res.status === 402) {
         const data = await res.json().catch(() => ({}));
+        const required =
+          Number((data as any)?.requiredMeta ?? (data as any)?.required ?? EVAL_REQUIRED_META) || EVAL_REQUIRED_META;
 
-        if (res.status === 402) {
-          const required = Number(data?.required ?? data?.requiredMeta ?? REQUIRED_META);
-          setNeedMeta(required);
-          throw new Error("METAが不足しています。購入後に再度お試しください。");
-        }
-
-        throw new Error(data.error || data.message || "面接評価APIでエラーが発生しました。");
+        setNeedMeta(required);
+        await openEvalMetaModal(required);
+        return;
       }
 
-      const evalData = (await res.json()) as EvaluationResult;
-      setEvaluation(evalData);
-      setStep("finished");
-      scrollToBottom();
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.message || data?.error || "面接評価APIでエラーが発生しました。");
+      }
+
+      const data = (await res.json().catch(() => null)) as any;
+
+      if (!data?.ok) {
+        throw new Error(data?.message || data?.error || "面接評価の取得に失敗しました。");
+      }
+
+      // 直返し（succeeded）
+      const direct: EvaluationResult | null =
+        (data?.total_score != null ? (data as EvaluationResult) : null) ||
+        (data?.result ? (data.result as EvaluationResult) : null);
+
+      if (direct) {
+        setEvaluation(direct);
+        setStep("finished");
+        scrollToBottom();
+        return;
+      }
+
+      // ジョブが走ってるならポーリング
+      const status = data?.status as string | undefined;
+      if (status === "running" || status === "queued") {
+        setStep("evaluating");
+        await pollJobUntilDone(key);
+        return;
+      }
+
+      // フォールバック：念のため
+      await pollJobUntilDone(key);
     } catch (e: any) {
       console.error(e);
-      setError(e?.message || "面接評価の作成中にエラーが発生しました。時間をおいて再度お試しください。");
+      setError(e?.message || "面接評価の作成中にエラーが発生しました。通信環境を確認して再度お試しください。");
       setStep("finished");
+      scrollToBottom();
     }
   };
 
+  const retryEvaluationWithMetaConfirm = async () => {
+    const key = evalIdempotencyKeyRef.current;
+    if (!key) return;
+
+    evalConfirmTriedRef.current = true;
+    setEvalMetaModalOpen(false);
+
+    const finishedList = qaList;
+    if (!finishedList.length) {
+      setError("Q&Aログが復元できませんでした。もう一度面接を実施してください。");
+      setStep("finished");
+      return;
+    }
+
+    await runEvaluation(finishedList, { metaConfirm: true });
+  };
+
+  // ------------------------------
+  // 音声文字起こし〜確定
+  // ------------------------------
   const handleRecorded = async (blob: Blob) => {
     try {
       setStep("thinking");
@@ -373,6 +810,9 @@ export default function InterviewPage() {
     scrollToBottom();
   };
 
+  // ------------------------------
+  // ストーリーカード作成（既存）
+  // ------------------------------
   const createStoryCardFromSession = async () => {
     if (!userId) {
       router.push("/auth");
@@ -423,23 +863,21 @@ export default function InterviewPage() {
 
   return (
     <div className="px-10 py-8 space-y-8">
-      {/* ✅ 開始時の meta 確認モーダル（新規追加なし / 既存コンポーネント流用） */}
+      {/* ✅ 開始時：消費しない。無料/無制限なら META 不要 を自然に表示 */}
       <MetaConfirmModal
         open={metaModalOpen}
         onClose={closeMetaModal}
         featureLabel={FEATURE_LABEL}
-        requiredMeta={REQUIRED_META}
+        requiredMeta={startDisplayRequiredMeta} // ★無料/無制限なら0
         balance={metaBalance}
         mode={metaMode}
-        title={
-          metaMode === "purchase"
-            ? "METAが不足しています"
-            : "面接を開始しますか？"
-        }
+        title={metaMode === "purchase" ? "METAが不足しています" : "面接を開始しますか？"}
         message={
           metaMode === "purchase"
-            ? `この練習を開始するには META が ${REQUIRED_META} 必要です。購入して続行してください。`
-            : `開始します。10問終了後の評価時に META を ${REQUIRED_META} 消費します。`
+            ? `この機能の「評価」を実行するには META が ${
+                startDisplayRequiredMeta || EVAL_REQUIRED_META
+              } 必要です。購入して続行してください。`
+            : `開始に META は不要です。10問終了後の「評価」を実行する際に META を ${EVAL_REQUIRED_META} 消費します。`
         }
         confirmLabel="開始する"
         cancelLabel="キャンセル"
@@ -453,6 +891,30 @@ export default function InterviewPage() {
         onPurchase={() => {
           setMetaModalOpen(false);
           pendingStartRef.current = null;
+          router.push("/pricing");
+        }}
+      />
+
+      {/* ✅ 評価時：402 need_meta（confirm/purchase 二段階） */}
+      <MetaConfirmModal
+        open={evalMetaModalOpen}
+        onClose={closeEvalMetaModal}
+        featureLabel={FEATURE_LABEL}
+        requiredMeta={evalRequiredMeta}
+        balance={metaBalance}
+        mode={evalMetaMode}
+        title={evalMetaMode === "purchase" ? "METAが不足しています" : "METAの確認"}
+        message={
+          evalMetaMode === "purchase"
+            ? `この評価を実行するには META が ${evalRequiredMeta} 必要です。購入して続行してください。`
+            : `この評価の実行には META を ${evalRequiredMeta} 消費します。続行しますか？`
+        }
+        confirmLabel="続行する"
+        cancelLabel="キャンセル"
+        purchaseLabel="METAを購入する"
+        onConfirm={retryEvaluationWithMetaConfirm}
+        onPurchase={() => {
+          setEvalMetaModalOpen(false);
           router.push("/pricing");
         }}
       />
@@ -488,7 +950,10 @@ export default function InterviewPage() {
                 <select
                   className="text-xs border border-slate-200 rounded-full px-3 py-1.5 bg-slate-50"
                   value={personaId}
-                  onChange={(e) => setPersonaId(e.target.value)}
+                  onChange={(e) => {
+                    resetPersistenceForInputChange();
+                    setPersonaId(e.target.value);
+                  }}
                   disabled={isLocked}
                 >
                   {PERSONAS.map((p) => (
@@ -504,7 +969,10 @@ export default function InterviewPage() {
                 <select
                   className="text-xs border border-slate-200 rounded-full px-3 py-1.5 bg-slate-50"
                   value={topicType}
-                  onChange={(e) => setTopicType(e.target.value as TopicType)}
+                  onChange={(e) => {
+                    resetPersistenceForInputChange();
+                    setTopicType(e.target.value as TopicType);
+                  }}
                   disabled={isLocked}
                 >
                   <option value="gakuchika">{TOPIC_LABEL.gakuchika}</option>
@@ -523,7 +991,7 @@ export default function InterviewPage() {
                   <button
                     type="button"
                     onClick={startInterview}
-                    className="rounded-full bg-sky-500 text-white text-xs px-4 py-2 hover:bg-sky-600"
+                    className="rounded-full bg-sky-500 text-white text-xs px-4 py-2 hover:bg-sky-600 disabled:opacity-60"
                     disabled={!authChecked || !userId}
                   >
                     {step === "finished" ? "もう一度やる" : "面接を開始する"}
@@ -535,9 +1003,7 @@ export default function InterviewPage() {
 
           <div ref={logRef} className="flex-1 max-h-[420px] overflow-y-auto space-y-3 pr-1 pt-2">
             {qaList.length === 0 && step === "idle" && (
-              <p className="text-xs text-slate-400">
-                「面接を開始する」を押すと、Q1から順番に音声面接がスタートします。
-              </p>
+              <p className="text-xs text-slate-400">「面接を開始する」を押すと、Q1から順番に音声面接がスタートします。</p>
             )}
 
             {qaList.map((qa, i) => (
@@ -609,7 +1075,7 @@ export default function InterviewPage() {
 
           {step === "evaluating" && (
             <p className="text-[11px] text-slate-500 pt-2">
-              AI が10問分の回答をまとめて解析し、評価を作成しています…
+              AI が10問分の回答をまとめて解析し、評価を作成しています…（通信が切れても復帰できます）
             </p>
           )}
 
@@ -625,6 +1091,39 @@ export default function InterviewPage() {
                   METAを購入する（必要: {needMeta}）
                 </button>
               )}
+
+              {/* ✅ 同じジョブの「復帰」を試す（last_job がある場合） */}
+{loadLastJob()?.key && (
+  <button
+    type="button"
+    onClick={async () => {
+      const lj = loadLastJob();
+      if (!lj?.key) return;
+      setError(null);
+      setStep("evaluating");
+      await pollJobUntilDone(lj.key);
+    }}
+    className="rounded-full bg-slate-700 text-white text-xs px-4 py-2 hover:bg-slate-800"
+  >
+    評価の復帰を試す
+  </button>
+)}
+
+{/* ✅ 新しいジョブで「評価を再実行」する（fetch failed / failed 対策の本命） */}
+{qaList.length >= MAX_Q && !evaluation && (
+  <button
+    type="button"
+    onClick={async () => {
+      resetEvaluationJob();
+      setError(null);
+      await runEvaluation(qaList);
+    }}
+    className="rounded-full bg-sky-600 text-white text-xs px-4 py-2 hover:bg-sky-700"
+  >
+    評価を再実行する
+  </button>
+)}
+
             </div>
           )}
         </div>
@@ -635,9 +1134,7 @@ export default function InterviewPage() {
             <div>
               <h2 className="text-sm font-semibold text-slate-800 mb-1">面接評価（AI自動解析）</h2>
               {!evaluation && (
-                <p className="text-xs text-slate-400">
-                  面接が終了すると、ここに総合スコアとフィードバックが表示されます。
-                </p>
+                <p className="text-xs text-slate-400">面接が終了すると、ここに総合スコアとフィードバックが表示されます。</p>
               )}
             </div>
 

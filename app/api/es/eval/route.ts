@@ -1,8 +1,8 @@
 // app/api/es/eval/route.ts
-import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/utils/supabase/server";
-import { getUserPlan } from "@/lib/plan";
-import { requireFeatureOrConsumeMeta } from "@/lib/payment/featureGate";
+import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
+import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,11 +10,46 @@ export const dynamic = "force-dynamic";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL_ES = process.env.OPENAI_MODEL_EVAL_ES || "gpt-4.1-mini";
 
-// ✅ usage側（/api/usage/consume に合わせる）
+// ✅ usage側（/api/usage/check / /api/usage/log に合わせる）
 const USAGE_FEATURE_KEY = "es_correction";
-// ✅ featureGate側（FEATURE_META_COST のキー）
+// ✅ meta消費（FEATURE_META_COSTのキー）
 const GATE_FEATURE_ID = "es_correction";
 
+// ✅ generation_jobs の feature_id（status復帰で使う）
+const FEATURE_ID = "es_eval";
+
+// service role（Route内だけ）
+const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
+
+type Database = any;
+
+async function createSupabaseFromCookies() {
+  const cookieStore = await cookies();
+  return createServerClient<Database>(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value;
+        },
+        set(name: string, value: string, options: any) {
+          cookieStore.set({ name, value, ...options });
+        },
+        remove(name: string, options: any) {
+          cookieStore.set({ name, value: "", ...options });
+        },
+      },
+    }
+  );
+}
+
+/* ------------------------------
+   Types
+--------------------------------*/
 const ALLOWED_QTYPES = ["self_pr", "gakuchika", "why_company", "why_industry", "other"] as const;
 type QuestionType = (typeof ALLOWED_QTYPES)[number];
 
@@ -23,9 +58,28 @@ type EvalRequestBody = {
   company?: string;
   qType?: string;
   limit?: number;
+  userId?: string; // 互換：送られてきても無視
+};
 
-  // 互換：送られてきても無視
-  userId?: string;
+type EsScore = {
+  structure: number;
+  logic: number;
+  clarity: number;
+  companyFit: number;
+  lengthFit: number;
+};
+
+type EsFeedback = {
+  summary: string;
+  strengths: string[];
+  improvements: string[];
+  checklist: string[];
+  sampleStructure: string;
+};
+
+type EvalResult = {
+  score: EsScore;
+  feedback: EsFeedback;
 };
 
 function clampInt(n: unknown, min: number, max: number, fallback: number) {
@@ -33,10 +87,12 @@ function clampInt(n: unknown, min: number, max: number, fallback: number) {
   if (!Number.isFinite(x)) return fallback;
   return Math.max(min, Math.min(max, Math.floor(x)));
 }
+
 function safeStr(v: unknown, maxLen: number) {
   if (typeof v !== "string") return "";
   return v.slice(0, maxLen);
 }
+
 function avgScore5(s: any) {
   const arr = [s?.structure, s?.logic, s?.clarity, s?.companyFit, s?.lengthFit].map((x) => Number(x));
   if (arr.some((x) => !Number.isFinite(x))) return null;
@@ -44,7 +100,13 @@ function avgScore5(s: any) {
   return Math.round(avg);
 }
 
-export async function POST(req: NextRequest) {
+function rid() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+export async function POST(req: Request) {
+  const requestId = rid();
+
   try {
     if (!OPENAI_API_KEY) {
       return NextResponse.json(
@@ -54,14 +116,32 @@ export async function POST(req: NextRequest) {
     }
 
     // ✅ cookieセッションから本人確定
-    const supabase = await createServerSupabase();
+    const supabase = await createSupabaseFromCookies();
     const { data: auth, error: authErr } = await supabase.auth.getUser();
     const user = auth?.user ?? null;
 
     if (authErr || !user?.id) {
       return NextResponse.json({ ok: false, error: "unauthorized", message: "login required" }, { status: 401 });
     }
-    const userId = user.id;
+    const authUserId = user.id;
+
+    // ✅ idempotency key（必須）
+    const idempotencyKey =
+      req.headers.get("x-idempotency-key") ||
+      req.headers.get("X-Idempotency-Key") ||
+      "";
+
+    if (!idempotencyKey) {
+      return NextResponse.json(
+        { ok: false, error: "bad_request", message: "idempotency key is required" },
+        { status: 400 }
+      );
+    }
+
+    // ✅ meta confirm（モーダル confirm 後だけ true）
+    const metaConfirm =
+      req.headers.get("x-meta-confirm") === "1" ||
+      req.headers.get("X-Meta-Confirm") === "1";
 
     const body = (await req.json().catch(() => null)) as EvalRequestBody | null;
     if (!body) {
@@ -89,33 +169,141 @@ export async function POST(req: NextRequest) {
     const MAX_ES_LENGTH = 4000;
     const truncatedText = text.length > MAX_ES_LENGTH ? text.slice(0, MAX_ES_LENGTH) : text;
 
-    // ✅ usage/consume（Cookie転送）
+    const safeCompany = companyRaw?.trim() ? companyRaw.trim() : "（未指定）";
+
+    // =========================
+    // ✅ 0) generation_jobs upsert（recovery/idempotency）
+    // =========================
+    const { data: existing, error: exErr } = await supabase
+      .from("generation_jobs")
+      .select("id, status, result")
+      .eq("auth_user_id", authUserId)
+      .eq("feature_id", FEATURE_ID)
+      .eq("idempotency_key", idempotencyKey)
+      .maybeSingle();
+
+    if (exErr) {
+      console.error(`[es-eval:${requestId}] job lookup error`, exErr);
+      return NextResponse.json({ ok: false, error: "db_error" }, { status: 500 });
+    }
+
+    if (existing?.status === "succeeded" && existing?.result) {
+      return NextResponse.json({ ok: true, ...(existing.result as any), reused: true });
+    }
+
+    const jobRequest = {
+      text: truncatedText,
+      company: safeCompany,
+      qType: safeQType,
+      limit: safeLimit,
+    };
+
+    const { data: upserted, error: upErr } = await supabase
+      .from("generation_jobs")
+      .upsert(
+        {
+          auth_user_id: authUserId,
+          feature_id: FEATURE_ID,
+          idempotency_key: idempotencyKey,
+          status: "running",
+          request: jobRequest,
+          error_code: null,
+          error_message: null,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "auth_user_id,feature_id,idempotency_key" }
+      )
+      .select("id, status")
+      .single();
+
+    if (upErr || !upserted?.id) {
+      console.error(`[es-eval:${requestId}] job upsert error`, upErr);
+      return NextResponse.json({ ok: false, error: "db_error" }, { status: 500 });
+    }
+    const jobId = upserted.id as string;
+
+    // =========================
+    // ✅ 1) usage/check（消費しない）
+    // =========================
     const baseUrl = new URL(req.url).origin;
     const cookieHeader = req.headers.get("cookie") ?? "";
 
-    const usageRes = await fetch(`${baseUrl}/api/usage/consume`, {
+    const checkRes = await fetch(`${baseUrl}/api/usage/check`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Cookie: cookieHeader },
       body: JSON.stringify({ feature: USAGE_FEATURE_KEY }),
     });
 
-    const usageJson = await usageRes.json().catch(() => null);
+    const checkBody: any = await checkRes.json().catch(() => ({}));
 
-    // ✅ 無料枠超え → meta消費（唯一の消費場所）
-    if (!usageRes.ok) {
-      if (usageRes.status === 402 && usageJson?.error === "need_meta") {
-        const gate = await requireFeatureOrConsumeMeta(GATE_FEATURE_ID);
-        if (!gate.ok) return NextResponse.json(gate, { status: gate.status });
+    if (!checkRes.ok) {
+      if (checkRes.status === 402 && checkBody?.error === "need_meta") {
+        const requiredMeta = Number(checkBody?.requiredMeta ?? 1);
+
+        // ✅ confirm前は 402 で止める（課金しない）
+        if (!metaConfirm) {
+          await supabase
+            .from("generation_jobs")
+            .update({
+              status: "blocked",
+              error_code: "need_meta",
+              error_message: "need_meta_before_confirm",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", jobId);
+
+          return NextResponse.json(
+            { ok: false, error: "need_meta", requiredMeta },
+            { status: 402 }
+          );
+        }
+        // ✅ confirm後は続行（後段で残高最終防衛）
+      } else if (checkRes.status === 401) {
+        return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
       } else {
-        console.error("usage/consume error:", usageRes.status, usageJson);
-        return NextResponse.json({ ok: false, error: "usage_error", message: "Failed to check usage" }, { status: 500 });
+        console.error(`[es-eval:${requestId}] usage/check unexpected`, checkRes.status, checkBody);
+        return NextResponse.json({ ok: false, error: "usage_error" }, { status: 500 });
       }
     }
 
-    const plan = await getUserPlan(userId);
+    const proceedMode: "unlimited" | "free" | "need_meta" =
+      checkBody?.mode ?? (metaConfirm ? "need_meta" : "free");
+
+    const requiredMeta = Number(checkBody?.requiredMeta ?? 1);
 
     // =========================
-    // ✅ ここから「採点が振れる」プロンプトに変更（差し替え）
+    // ✅ 1.5) confirm後の最終防衛：残高不足なら OpenAI を叩かない
+    // =========================
+    if (proceedMode === "need_meta" && metaConfirm) {
+      // ⚠️ あなたのDBに meta_balances が無いなら、ここを「meta_lots合算RPC」に差し替えてOK
+      const { data: mb, error: mbErr } = await supabaseAdmin
+        .from("meta_balances")
+        .select("balance")
+        .eq("auth_user_id", authUserId)
+        .maybeSingle();
+
+      const bal = Number(mb?.balance ?? 0);
+
+      if (mbErr || !Number.isFinite(bal) || bal < requiredMeta) {
+        await supabase
+          .from("generation_jobs")
+          .update({
+            status: "blocked",
+            error_code: "need_meta",
+            error_message: "insufficient_meta_after_confirm",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", jobId);
+
+        return NextResponse.json(
+          { ok: false, error: "need_meta", requiredMeta, balance: Number.isFinite(bal) ? bal : null },
+          { status: 402 }
+        );
+      }
+    }
+
+    // =========================
+    // ✅ 2) OpenAI（採点が振れるプロンプト）
     // =========================
     const systemPrompt = `
 あなたは日本の就活に詳しいES添削のプロフェッショナルです。
@@ -142,7 +330,7 @@ export async function POST(req: NextRequest) {
 構成・ロジック・分かりやすさ・企業フィット・文字数フィットの5項目について、
 それぞれ10点満点で厳密に評価し、具体的なフィードバックを作成してください。
 
-【企業名】:${companyRaw}
+【企業名】:${safeCompany}
 【設問タイプ】:${safeQType}
 【文字数目安】:${safeLimit} 文字
 
@@ -177,9 +365,6 @@ ${truncatedText}
   }
 }
 `.trim();
-    // =========================
-    // ✅ ここまで差し替え
-    // =========================
 
     const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -200,55 +385,162 @@ ${truncatedText}
     });
 
     const data = await openaiRes.json().catch(() => null);
+
     if (!openaiRes.ok) {
-      console.error("OpenAI API error:", data);
-      return NextResponse.json({ ok: false, error: "openai_error", detail: data }, { status: 500 });
+      console.error(`[es-eval:${requestId}] OpenAI API error:`, data);
+
+      await supabase
+        .from("generation_jobs")
+        .update({
+          status: "failed",
+          error_code: "openai_error",
+          error_message: JSON.stringify(data)?.slice(0, 4000) ?? "openai_error",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
+
+      return NextResponse.json({ ok: false, error: "openai_error" }, { status: 500 });
     }
 
     const content = data?.choices?.[0]?.message?.content;
-    if (!content) return NextResponse.json({ ok: false, error: "openai_empty" }, { status: 500 });
+    if (!content) {
+      await supabase
+        .from("generation_jobs")
+        .update({
+          status: "failed",
+          error_code: "empty_content",
+          error_message: "OpenAI returned empty content",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
+
+      return NextResponse.json({ ok: false, error: "openai_empty" }, { status: 500 });
+    }
 
     let parsed: any;
     try {
       parsed = JSON.parse(content);
     } catch {
-      return NextResponse.json({ ok: false, error: "parse_error", raw: content }, { status: 500 });
+      await supabase
+        .from("generation_jobs")
+        .update({
+          status: "failed",
+          error_code: "json_parse_error",
+          error_message: content.slice(0, 2000),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
+
+      return NextResponse.json({ ok: false, error: "parse_error" }, { status: 500 });
     }
 
     const s = parsed?.score;
     const f = parsed?.feedback;
+
     if (!s || typeof s.structure !== "number" || !f) {
-      return NextResponse.json({ ok: false, error: "invalid_shape", raw: parsed }, { status: 500 });
+      await supabase
+        .from("generation_jobs")
+        .update({
+          status: "failed",
+          error_code: "invalid_shape",
+          error_message: JSON.stringify(parsed)?.slice(0, 2000) ?? "invalid_shape",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
+
+      return NextResponse.json({ ok: false, error: "invalid_shape" }, { status: 500 });
     }
 
+    const result: EvalResult = {
+      score: {
+        structure: Number(s.structure),
+        logic: Number(s.logic),
+        clarity: Number(s.clarity),
+        companyFit: Number(s.companyFit),
+        lengthFit: Number(s.lengthFit),
+      },
+      feedback: {
+        summary: String(f?.summary ?? ""),
+        strengths: Array.isArray(f?.strengths) ? f.strengths.map(String) : [],
+        improvements: Array.isArray(f?.improvements) ? f.improvements.map(String) : [],
+        checklist: Array.isArray(f?.checklist) ? f.checklist.map(String) : [],
+        sampleStructure: String(f?.sampleStructure ?? ""),
+      },
+    };
+
+    // =========================
+    // ✅ 3) 成功判定 = generation_jobs に result 保存できた
+    // =========================
+    const { error: saveErr } = await supabase
+      .from("generation_jobs")
+      .update({
+        status: "succeeded",
+        result,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", jobId);
+
+    if (saveErr) {
+      console.error(`[es-eval:${requestId}] result save failed`, saveErr);
+      return NextResponse.json({ ok: false, error: "result_save_failed" }, { status: 500 });
+    }
+
+    // =========================
+    // ✅ 4) 成功後だけ課金
+    // =========================
+    if (proceedMode === "free") {
+      await fetch(`${baseUrl}/api/usage/log`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookieHeader },
+        body: JSON.stringify({ feature: USAGE_FEATURE_KEY, jobId }),
+      }).catch(() => {});
+    } else if (proceedMode === "need_meta" && metaConfirm) {
+      const { error: consumeErr } = await supabaseAdmin.rpc("consume_meta_fifo", {
+        p_auth_user_id: authUserId,
+        p_cost: requiredMeta,
+      });
+
+      if (consumeErr) {
+        await supabase
+          .from("generation_jobs")
+          .update({
+            error_code: "need_meta",
+            error_message: `meta_charge_failed:${String(consumeErr.message ?? "").slice(0, 200)}`,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", jobId);
+
+        return NextResponse.json(
+          { ok: false, error: "need_meta", requiredMeta },
+          { status: 402 }
+        );
+      }
+    }
+
+    // =========================
+    // ✅ 5) 既存ログ保存（あなたのDBに合わせて維持）
+    // =========================
     const nowIso = new Date().toISOString();
-    const avg = avgScore5(s);
+    const avg = avgScore5(result.score);
     const avgScore = Number.isFinite(avg as any) ? (avg as number) : 0;
 
-    // ✅ null禁止寄せ
-    const safeCompany = companyRaw?.trim() ? companyRaw.trim() : "（未指定）";
-    const safeMode = "eval";
-
-    // 一覧で見やすいように summary+要点を軽く整形（全部埋める）
+    // 一覧で見やすいように summary+要点を軽く整形
     const afterText = [
-      `【要約】${String(f?.summary ?? "").trim()}`,
+      `【要約】${String(result.feedback.summary ?? "").trim()}`,
       "",
-      `【強み】${Array.isArray(f?.strengths) ? f.strengths.join(" / ") : ""}`,
-      `【改善】${Array.isArray(f?.improvements) ? f.improvements.join(" / ") : ""}`,
+      `【強み】${Array.isArray(result.feedback.strengths) ? result.feedback.strengths.join(" / ") : ""}`,
+      `【改善】${Array.isArray(result.feedback.improvements) ? result.feedback.improvements.join(" / ") : ""}`,
     ]
       .filter(Boolean)
       .join("\n");
 
-    // =========================
-    // ✅ 保存：es_logs のみ
-    // =========================
     try {
       const { error: logErr } = await supabase.from("es_logs").insert({
-        user_id: userId,
-        profile_id: userId,
+        user_id: authUserId,
+        profile_id: authUserId,
         company_name: safeCompany,
-        es_question: safeQType, // 今は qType を入れる（将来は設問本文へ）
-        mode: safeMode,
+        es_question: safeQType,
+        mode: "eval",
         score: avgScore,
         es_before: truncatedText,
         es_after: afterText,
@@ -260,15 +552,11 @@ ${truncatedText}
       console.error("es_logs insert crash (es/eval):", e);
     }
 
-    // =========================
-    // ✅ growth_logs（任意）
-    // =========================
     try {
-      const titleBase = safeCompany !== "（未指定）" ? `ES評価：${safeCompany}` : "ES評価";
       await supabase.from("growth_logs").insert({
-        user_id: userId,
+        user_id: authUserId,
         source: "es_correction",
-        title: `${titleBase} [Score]`,
+        title: `${safeCompany !== "（未指定）" ? `ES評価：${safeCompany}` : "ES評価"} [Score]`,
         description: "ESのスコアリングとフィードバックを生成しました。",
         metadata: {
           mode: "eval",
@@ -277,13 +565,11 @@ ${truncatedText}
           qType: safeQType,
           limit: safeLimit,
           model: OPENAI_MODEL_ES,
-          scores: {
-            structure: s.structure,
-            logic: s.logic,
-            clarity: s.clarity,
-            companyFit: s.companyFit,
-            lengthFit: s.lengthFit,
-          },
+          scores: result.score,
+          jobId,
+          idempotencyKey,
+          proceedMode,
+          requiredMeta,
         },
         created_at: nowIso,
       });
@@ -293,10 +579,10 @@ ${truncatedText}
 
     return NextResponse.json({
       ok: true,
-      plan,
-      usedThisMonth: typeof usageJson?.usedThisMonth === "number" ? usageJson.usedThisMonth : null,
-      freeLimit: typeof usageJson?.freeLimit === "number" ? usageJson.freeLimit : null,
-      ...parsed,
+      ...result,
+      jobId,
+      idempotencyKey,
+      proceedMode,
     });
   } catch (e) {
     console.error("POST /api/es/eval error:", e);

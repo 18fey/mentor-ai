@@ -59,11 +59,27 @@ type CaseFeedback = {
   nextTraining: string;
 };
 
+// ✅ 追加：模範解答（UIでそのまま見せられる粒度）
+type CaseModelAnswer = {
+  goal: string;
+  kpi: string; // KPI候補（箇条書きOK）
+  framework: string; // 分解（式・ツリー・観点）
+  hypothesis: string; // 初手仮説
+  deepDivePlan: string; // 深掘りの順序（1-5）
+  analysis: string; // 置く数字・計算例・感度
+  solutions: string; // 打ち手（優先順位）
+  risks: string; // 前提/リスク
+  wrapUp: string; // 30秒クロージング
+};
+
 type CaseEvalResult = {
   score: CaseScore;
   feedback: CaseFeedback;
   totalScore: number;
   logId: string | number | null; // case_logs の id
+
+  // ✅ 追加（後方互換：UIが知らなくても壊れない）
+  modelAnswer?: CaseModelAnswer;
 };
 
 type FeatureId = "case_interview";
@@ -120,6 +136,38 @@ async function getBalanceAdmin(authUserId: string): Promise<number> {
   let sum = 0;
   for (const row of data ?? []) sum += Number((row as any).remaining ?? 0);
   return Number.isFinite(sum) ? sum : 0;
+}
+
+// ✅ 追加：模範解答の正規化（長すぎ・null対策）
+function normalizeModelAnswer(v: any): CaseModelAnswer | null {
+  if (!v || typeof v !== "object") return null;
+
+  const out: CaseModelAnswer = {
+    goal: safeStr(v.goal ?? "", 1200),
+    kpi: safeStr(v.kpi ?? "", 1600),
+    framework: safeStr(v.framework ?? "", 2400),
+    hypothesis: safeStr(v.hypothesis ?? "", 1200),
+    deepDivePlan: safeStr(v.deepDivePlan ?? "", 2000),
+    analysis: safeStr(v.analysis ?? "", 2400),
+    solutions: safeStr(v.solutions ?? "", 2000),
+    risks: safeStr(v.risks ?? "", 1200),
+    wrapUp: safeStr(v.wrapUp ?? "", 1400),
+  };
+
+  // ほぼ空なら返さない
+  const totalLen =
+    out.goal.length +
+    out.kpi.length +
+    out.framework.length +
+    out.hypothesis.length +
+    out.deepDivePlan.length +
+    out.analysis.length +
+    out.solutions.length +
+    out.risks.length +
+    out.wrapUp.length;
+
+  if (totalLen < 40) return null;
+  return out;
 }
 
 export async function POST(req: Request) {
@@ -264,21 +312,17 @@ export async function POST(req: Request) {
 
     const checkBody: any = await checkRes.json().catch(() => ({}));
 
-    // ✅ checkResが402 need_metaの場合の requiredMeta
     const requiredMetaFromCheck = Number(checkBody?.requiredMeta ?? checkBody?.required ?? 1);
 
-    // ✅ proceedMode / requiredMeta の確定
     let proceedMode: "unlimited" | "free" | "need_meta" =
       checkBody?.mode ?? (metaConfirm ? "need_meta" : "free");
     let requiredMeta = Number(checkBody?.requiredMeta ?? 1);
 
-    // ✅ usage/checkがエラーのとき
     if (!checkRes.ok) {
       if (checkRes.status === 402 && checkBody?.error === "need_meta") {
         requiredMeta = requiredMetaFromCheck;
         proceedMode = "need_meta";
 
-        // ❌ confirm前はここで止める
         if (!metaConfirm) {
           await supabase
             .from("generation_jobs")
@@ -296,7 +340,6 @@ export async function POST(req: Request) {
           );
         }
 
-        // ✅ confirm後でも「本当に残高あるか」を必ずチェック（ここが今回の本丸）
         const bal = await getBalanceAdmin(authUserId);
         if (bal < requiredMeta) {
           await supabase
@@ -314,7 +357,6 @@ export async function POST(req: Request) {
             { status: 402 }
           );
         }
-        // ✅ 残高OKなら続行（成功後に課金する）
       } else if (checkRes.status === 401) {
         return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
       } else {
@@ -322,7 +364,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: false, error: "usage_error" }, { status: 500 });
       }
     } else {
-      // ✅ checkRes OKでも、mode が need_meta のときは confirmが無ければ止める
       proceedMode = checkBody?.mode ?? "free";
       requiredMeta = Number(checkBody?.requiredMeta ?? 1);
 
@@ -333,7 +374,6 @@ export async function POST(req: Request) {
         );
       }
 
-      // ✅ confirmありでneed_metaなら、念のため残高チェック（レースに強くする）
       if (proceedMode === "need_meta" && metaConfirm) {
         const bal = await getBalanceAdmin(authUserId);
         if (bal < requiredMeta) {
@@ -346,13 +386,16 @@ export async function POST(req: Request) {
     }
 
     // =========================
-    // ✅ 2) OpenAI（必ずJSON）
+    // ✅ 2) OpenAI（必ずJSON）※ modelAnswer を追加
     // =========================
     const systemPrompt = `
 あなたはケース面接官。日本語で、辛口だが建設的。
 出力は必ず JSON 形式のみ。前後に説明文は書かない。
 スコアは0〜10の整数。
 フィードバックは具体例・理由つきで短く鋭く。
+
+加えて、同じケースに対する「模範解答（modelAnswer）」を、初心者でも真似できる粒度で作ること。
+ただし長文にしすぎない（各フィールドは最大10行程度）。
 `.trim();
 
     const userPrompt = `
@@ -390,6 +433,17 @@ export async function POST(req: Request) {
     "goodPoints": "良い点（箇条書き改行OK）",
     "improvePoints": "改善点（理由つきで箇条書き改行OK）",
     "nextTraining": "次の練習（1〜3個、すぐやれる形）"
+  },
+  "modelAnswer": {
+    "goal": "ゴール定義（1〜3行）",
+    "kpi": "KPI候補（箇条書き）",
+    "framework": "分解の仕方（式/ツリー/観点。箇条書きOK）",
+    "hypothesis": "初手仮説（1〜3行）",
+    "deepDivePlan": "深掘り手順（1〜5）",
+    "analysis": "置く数字・計算例・感度の当て方（箇条書きOK）",
+    "solutions": "打ち手（優先順位つきで最大3つ）",
+    "risks": "前提/リスク（最大5つ）",
+    "wrapUp": "30秒クロージング（結論→理由→次アクション）"
   }
 }
 `.trim();
@@ -464,6 +518,7 @@ export async function POST(req: Request) {
 
     const sc = parsed?.score ?? {};
     const fb = parsed?.feedback ?? {};
+    const ma = parsed?.modelAnswer ?? null;
 
     const normalizedScore: CaseScore = {
       structure: clamp0to10(sc.structure),
@@ -474,11 +529,13 @@ export async function POST(req: Request) {
     };
 
     const normalizedFeedback: CaseFeedback = {
-      summary: String(fb.summary ?? ""),
-      goodPoints: String(fb.goodPoints ?? ""),
-      improvePoints: String(fb.improvePoints ?? ""),
-      nextTraining: String(fb.nextTraining ?? ""),
+      summary: safeStr(String(fb.summary ?? ""), 1200),
+      goodPoints: safeStr(String(fb.goodPoints ?? ""), 2000),
+      improvePoints: safeStr(String(fb.improvePoints ?? ""), 2400),
+      nextTraining: safeStr(String(fb.nextTraining ?? ""), 1600),
     };
+
+    const normalizedModelAnswer = normalizeModelAnswer(ma);
 
     const totalScore =
       normalizedScore.structure +
@@ -493,6 +550,12 @@ export async function POST(req: Request) {
     let logId: string | number | null = null;
 
     try {
+      const aiFeedbackPayload: any = {
+        ...normalizedFeedback,
+        // ✅ DB schema増やさずにJSONへ同居
+        ...(normalizedModelAnswer ? { modelAnswer: normalizedModelAnswer } : {}),
+      };
+
       const insertPayload: any = {
         user_id: authUserId,
         problem_id: caseQ.id ?? null,
@@ -501,7 +564,7 @@ export async function POST(req: Request) {
 
         problem: caseQ,
         answer: answers,
-        ai_feedback: normalizedFeedback,
+        ai_feedback: aiFeedbackPayload,
         score: totalScore,
 
         goal: answers.goal ?? null,
@@ -547,6 +610,7 @@ export async function POST(req: Request) {
       feedback: normalizedFeedback,
       totalScore,
       logId,
+      ...(normalizedModelAnswer ? { modelAnswer: normalizedModelAnswer } : {}),
     };
 
     const { error: saveErr } = await supabase

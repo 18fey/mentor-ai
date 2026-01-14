@@ -1,6 +1,7 @@
 // app/api/fermi/new/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/utils/supabase/server";
+import { supabaseAdmin } from "@/lib/supabase-admin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,10 +12,20 @@ const OPENAI_MODEL_GEN = process.env.OPENAI_MODEL_GEN_FERMI || "gpt-4o-mini";
 type FermiCategory = "daily" | "business" | "consulting";
 type FermiDifficulty = "easy" | "medium" | "hard";
 
+// ✅ usage/check の key と揃える（fermiの生成）
 type FeatureId = "fermi_generate";
-type ProceedMode = "unlimited" | "free" | "need_meta";
 
-function safeJsonParseStrict(s: string) {
+type FermiProblem = {
+  id: string;
+  category: FermiCategory;
+  difficulty: FermiDifficulty;
+  title: string;
+  formulaHint: string;
+  defaultFactors: string[];
+  unit: string;
+};
+
+function safeJsonParse(s: string) {
   try {
     return JSON.parse(s);
   } catch {
@@ -24,10 +35,80 @@ function safeJsonParseStrict(s: string) {
   }
 }
 
-function clampInt(n: unknown, min: number, max: number, fallback: number) {
+const isValidCategory = (v: any): v is FermiCategory =>
+  v === "daily" || v === "business" || v === "consulting";
+
+const isValidDifficulty = (v: any): v is FermiDifficulty =>
+  v === "easy" || v === "medium" || v === "hard";
+
+function clampInt(n: any, min: number, max: number, fallback: number) {
   const x = Number(n);
   if (!Number.isFinite(x)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(x)));
+  return Math.max(min, Math.min(max, Math.trunc(x)));
+}
+
+function pickMetaConfirm(req: Request) {
+  const v = req.headers.get("x-meta-confirm") || req.headers.get("X-Meta-Confirm");
+  return v === "1";
+}
+
+function normalizeOne(
+  raw: any,
+  category: FermiCategory,
+  difficulty: FermiDifficulty,
+  idx: number
+): FermiProblem | null {
+  if (!raw || typeof raw !== "object") return null;
+
+  const id = String(raw.id ?? "").trim();
+  const title = String(raw.title ?? "").trim();
+  const formulaHint = String(raw.formulaHint ?? "").trim();
+  const unit = String(raw.unit ?? "").trim();
+
+  const dfRaw = raw.defaultFactors;
+  const defaultFactors = Array.isArray(dfRaw)
+    ? dfRaw.map((x) => String(x ?? "").trim()).filter(Boolean)
+    : [];
+
+  if (!title) return null;
+
+  const safeId =
+    id && id.length >= 6
+      ? id
+      : `fermi_${category}_${difficulty}_${Date.now()}_${idx}_${Math.random()
+          .toString(36)
+          .slice(2, 8)}`;
+
+  const factors =
+    defaultFactors.length >= 3
+      ? defaultFactors.slice(0, 5)
+      : ["母数（例：人口/世帯数）", "利用率/対象割合", "頻度（回/年）", "単価/金額", "補正要因"].slice(
+          0,
+          Math.max(3, Math.min(5, defaultFactors.length || 4))
+        );
+
+  return {
+    id: safeId,
+    category,
+    difficulty,
+    title,
+    formulaHint: formulaHint || "例：母数 × 利用割合 × 頻度 × 単価",
+    defaultFactors: factors,
+    unit: unit || "（単位未指定）",
+  };
+}
+
+function uniqById(arr: FermiProblem[]) {
+  const seen = new Set<string>();
+  const out: FermiProblem[] = [];
+  for (const x of arr) {
+    if (!x?.id) continue;
+    let id = x.id;
+    if (seen.has(id)) id = `${id}_${Math.random().toString(36).slice(2, 6)}`;
+    seen.add(id);
+    out.push({ ...x, id });
+  }
+  return out;
 }
 
 export async function POST(req: NextRequest) {
@@ -39,84 +120,53 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const supabase = await createServerSupabase();
+    // ✅ cookieセッションから本人確定（最重要）
+    const supabase = createServerSupabase();
     const {
       data: { user },
       error: userErr,
     } = await supabase.auth.getUser();
 
     if (userErr || !user?.id) {
-      return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: "unauthorized", message: "ログインが必要です。" },
+        { status: 401 }
+      );
     }
     const authUserId = user.id;
 
+    // ✅ meta confirm（confirm後だけ true）
+    const metaConfirm = pickMetaConfirm(req);
+
+    // ✅ 入力（category/difficulty/count）
     const body = (await req.json().catch(() => null)) as
-      | {
-          category?: FermiCategory;
-          difficulty?: FermiDifficulty;
-          idempotencyKey?: string;
-          count?: number;
-        }
+      | { category?: FermiCategory; difficulty?: FermiDifficulty; count?: number }
       | null;
 
     const category = body?.category;
     const difficulty = body?.difficulty;
-    const idempotencyKey = String(body?.idempotencyKey ?? "").trim();
-    const count = clampInt(body?.count, 1, 50, 1); // 1〜50
 
-    if (!category || !difficulty || !idempotencyKey) {
+    // ✅ 一度の生成は最大10（デフォ10）
+    const count = clampInt(body?.count, 1, 10, 10);
+
+    if (!isValidCategory(category) || !isValidDifficulty(difficulty)) {
       return NextResponse.json(
-        { ok: false, error: "bad_request", message: "category/difficulty/idempotencyKey is required" },
+        { ok: false, error: "bad_request", message: "category / difficulty is required" },
         { status: 400 }
       );
     }
 
     const feature: FeatureId = "fermi_generate";
 
-    // 既存job確認（reused / running復帰）
-    const existing = await supabase
-      .from("generation_jobs")
-      .select("*")
-      .eq("auth_user_id", authUserId)
-      .eq("feature_id", feature)
-      .eq("idempotency_key", idempotencyKey)
-      .maybeSingle();
-
-    if (existing.data?.status === "succeeded" && existing.data?.result) {
-      const r = existing.data.result ?? {};
-      return NextResponse.json({
-        ok: true,
-        ...(r || {}),
-        jobId: existing.data.id,
-        idempotencyKey,
-        reused: true,
-      });
-    }
-
-    if (existing.data?.status === "running" || existing.data?.status === "queued") {
-      return NextResponse.json({
-        ok: true,
-        status: existing.data.status,
-        jobId: existing.data.id,
-        idempotencyKey,
-        reused: true,
-      });
-    }
-
-    // usage/check（最優先）
+    // =========================
+    // ✅ 1) usage/check（消費しない）
+    // =========================
     const baseUrl = new URL(req.url).origin;
     const cookieHeader = req.headers.get("cookie") ?? "";
-    const metaConfirmHeader = req.headers.get("x-meta-confirm"); // ✅ 追加（evalと同じ）
-
-    const checkHeaders: Record<string, string> = {
-      "Content-Type": "application/json",
-      Cookie: cookieHeader,
-    };
-    if (metaConfirmHeader) checkHeaders["X-Meta-Confirm"] = metaConfirmHeader; // ✅ 追加
 
     const checkRes = await fetch(`${baseUrl}/api/usage/check`, {
       method: "POST",
-      headers: checkHeaders,
+      headers: { "Content-Type": "application/json", Cookie: cookieHeader },
       body: JSON.stringify({ feature }),
     });
 
@@ -125,51 +175,35 @@ export async function POST(req: NextRequest) {
     if (!checkRes.ok) {
       if (checkRes.status === 402 && checkBody?.error === "need_meta") {
         const requiredMeta = Number(checkBody?.requiredMeta ?? 1);
-        return NextResponse.json(
-          { ok: false, error: "need_meta", requiredMeta },
-          { status: 402 }
-        );
-      }
-      if (checkRes.status === 401) {
+
+        // ✅ confirm前は止める（課金しない）
+        if (!metaConfirm) {
+          return NextResponse.json({ ok: false, error: "need_meta", requiredMeta }, { status: 402 });
+        }
+        // ✅ confirm後は “実行は許可”（課金は成功後）
+      } else if (checkRes.status === 401) {
         return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+      } else {
+        console.error("usage/check unexpected", checkRes.status, checkBody);
+        return NextResponse.json({ ok: false, error: "usage_error" }, { status: 500 });
       }
-      console.error("usage/check unexpected", checkRes.status, checkBody);
-      return NextResponse.json({ ok: false, error: "usage_error" }, { status: 500 });
     }
 
-    const proceedMode: ProceedMode = (checkBody?.mode ?? "free") as ProceedMode;
+    const proceedMode: "unlimited" | "free" | "need_meta" = checkBody?.mode ?? "free";
+    const requiredMeta = Number(checkBody?.requiredMeta ?? 1);
+    const plan = (checkBody?.plan ?? "free") as any;
 
-    // job upsert(running)
-    const up = await supabase
-      .from("generation_jobs")
-      .upsert(
-        {
-          auth_user_id: authUserId,
-          feature_id: feature,
-          idempotency_key: idempotencyKey,
-          status: "running",
-          request: { category, difficulty, count },
-          result: null,
-          error_code: null,
-          error_message: null,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "auth_user_id,feature_id,idempotency_key" }
-      )
-      .select("*")
-      .single();
-
-    if (up.error || !up.data?.id) {
-      console.error("generation_jobs upsert error:", up.error);
-      return NextResponse.json({ ok: false, error: "db_error" }, { status: 500 });
-    }
-
-    const jobId = up.data.id as string;
-
-    // OpenAI（json_object）
+    // =========================
+    // ✅ 2) OpenAI（フェルミ生成：まとめて count 件）
+    // =========================
     const system = `
 あなたはフェルミ推定の出題者。日本語。
-必ずJSONのみで返す（前後に文章を付けない）。
+必ず「JSONのみ」で返す（前後に文章を付けない）。
+次の形で返す：
+{
+  "fermis": [ ... ]
+}
+fermis は必ず指定件数ぶん生成する。
 `.trim();
 
     const userPrompt = `
@@ -177,7 +211,7 @@ category: ${category}
 difficulty: ${difficulty}
 count: ${count}
 
-次のJSONでフェルミ問題を ${count} 個生成して（配列で返す）：
+次のJSONを返して：
 {
   "fermis": [
     {
@@ -224,19 +258,6 @@ count: ${count}
     if (!r.ok) {
       const t = await r.text().catch(() => "");
       console.error("OpenAI error:", t);
-
-      await supabase
-        .from("generation_jobs")
-        .update({
-          status: "failed",
-          error_code: "openai_error",
-          error_message: "OpenAI API error",
-          updated_at: new Date().toISOString(),
-        })
-        .eq("auth_user_id", authUserId)
-        .eq("feature_id", feature)
-        .eq("idempotency_key", idempotencyKey);
-
       return NextResponse.json(
         { ok: false, error: "openai_error", message: "OpenAI API error" },
         { status: 500 }
@@ -246,112 +267,65 @@ count: ${count}
     const j = await r.json().catch(() => null);
     const content = j?.choices?.[0]?.message?.content ?? "";
 
-    let obj: any;
-    try {
-      obj = safeJsonParseStrict(content);
-    } catch (e) {
-      console.error(e);
+    const obj = safeJsonParse(content);
+    const rawFermis: any[] = Array.isArray(obj?.fermis) ? obj.fermis : [];
 
-      await supabase
-        .from("generation_jobs")
-        .update({
-          status: "failed",
-          error_code: "json_parse_error",
-          error_message: "Failed to parse model JSON",
-          updated_at: new Date().toISOString(),
-        })
-        .eq("auth_user_id", authUserId)
-        .eq("feature_id", feature)
-        .eq("idempotency_key", idempotencyKey);
+    const normalized = rawFermis
+      .map((f, i) => normalizeOne(f, category, difficulty, i))
+      .filter(Boolean) as FermiProblem[];
 
-      return NextResponse.json(
-        { ok: false, error: "json_parse_error", message: "Failed to parse model JSON" },
-        { status: 500 }
-      );
-    }
+    const fermis = uniqById(normalized).slice(0, count);
 
-    const fermis = Array.isArray(obj?.fermis) ? obj.fermis : [];
     if (!fermis.length) {
-      await supabase
-        .from("generation_jobs")
-        .update({
-          status: "failed",
-          error_code: "invalid_payload",
-          error_message: "Model returned empty fermis",
-          updated_at: new Date().toISOString(),
-        })
-        .eq("auth_user_id", authUserId)
-        .eq("feature_id", feature)
-        .eq("idempotency_key", idempotencyKey);
-
       return NextResponse.json(
-        { ok: false, error: "invalid_payload", message: "Model returned empty fermis" },
+        { ok: false, error: "invalid_response", message: "生成結果が不正です（fermisがありません）" },
         { status: 500 }
       );
     }
 
-    // generation_jobs に結果保存（成功判定）
-    const resultObj = {
-      plan: (checkBody?.plan ?? "free") as any,
-      // ✅ 互換：単体も残す
-      fermi: fermis[0],
-      // ✅ 新仕様：複数
-      fermis,
-    };
-
-    const save = await supabase
-      .from("generation_jobs")
-      .update({
-        status: "succeeded",
-        result: resultObj,
-        error_code: null,
-        error_message: null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("auth_user_id", authUserId)
-      .eq("feature_id", feature)
-      .eq("idempotency_key", idempotencyKey)
-      .select("id")
-      .single();
-
-    if (save.error) {
-      console.error("result_save_failed:", save.error);
-      await supabase
-        .from("generation_jobs")
-        .update({
-          status: "failed",
-          error_code: "result_save_failed",
-          error_message: "Failed to save result",
-          updated_at: new Date().toISOString(),
-        })
-        .eq("auth_user_id", authUserId)
-        .eq("feature_id", feature)
-        .eq("idempotency_key", idempotencyKey);
-
-      return NextResponse.json(
-        { ok: false, error: "result_save_failed", message: "Failed to save result" },
-        { status: 500 }
-      );
-    }
-
-    // 成功後のみ課金（freeのみ）
+    // =========================
+    // ✅ 3) 成功後だけ課金
+    // =========================
     if (proceedMode === "free") {
       await fetch(`${baseUrl}/api/usage/log`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: cookieHeader },
         body: JSON.stringify({ feature }),
       }).catch(() => {});
+    } else if (proceedMode === "need_meta") {
+      if (!metaConfirm) {
+        return NextResponse.json({ ok: false, error: "need_meta", requiredMeta }, { status: 402 });
+      }
+
+      const { error: consumeErr } = await supabaseAdmin.rpc("consume_meta_fifo", {
+        p_auth_user_id: authUserId,
+        p_cost: requiredMeta,
+      });
+
+      if (consumeErr) {
+        console.error("consume_meta_fifo failed:", consumeErr);
+        return NextResponse.json(
+          { ok: false, error: "need_meta", requiredMeta, message: "METAが不足しています。" },
+          { status: 402 }
+        );
+      }
     }
 
+    // ✅ 互換：単体fermiも返す（UIが単体前提でも死なない）
     return NextResponse.json({
       ok: true,
-      ...resultObj,
-      jobId,
-      idempotencyKey,
-      reused: false,
+      plan,
+      mode: proceedMode,
+      requiredMeta,
+      fermi: fermis[0],
+      fermis,
+      count: fermis.length,
     });
   } catch (e) {
     console.error(e);
-    return NextResponse.json({ ok: false, error: "server_error" }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: "server_error", message: "server error" },
+      { status: 500 }
+    );
   }
 }
