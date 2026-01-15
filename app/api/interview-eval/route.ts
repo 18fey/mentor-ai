@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
+import { createClient } from "@supabase/supabase-js";
 import personasConfig from "@/config/personas.json";
 import scoringConfig from "@/config/scoring_config.json";
 
@@ -9,6 +10,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = "gpt-4o-mini";
 
 // ✅ generation_jobs の feature_id と一致
 const FEATURE_ID = "interview_10";
@@ -39,6 +41,12 @@ async function createSupabaseFromCookies() {
     }
   );
 }
+
+// ✅ 課金系は service role（Route内だけ）
+const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
 
 // ------------------------------
 // Types
@@ -77,14 +85,18 @@ const DEFAULT_RESULT: EvaluationResult = {
   },
 };
 
-function findPersona(personaId?: string): Persona {
-  const list = personasConfig.personas as Persona[];
-  return (personaId && list.find((p) => p.id === personaId)) || list[0];
+function nowIso() {
+  return new Date().toISOString();
 }
 
 function safeStr(v: unknown, maxLen: number) {
   if (typeof v !== "string") return "";
   return v.slice(0, maxLen);
+}
+
+function findPersona(personaId?: string): Persona {
+  const list = personasConfig.personas as Persona[];
+  return (personaId && list.find((p) => p.id === personaId)) || list[0];
 }
 
 function toSafeEval(parsed: any): EvaluationResult {
@@ -125,48 +137,67 @@ function toSafeEval(parsed: any): EvaluationResult {
   };
 }
 
-async function callUsageCheck(req: NextRequest): Promise<
-  | { ok: true; mode: ProceedMode; requiredMeta: number }
-  | { ok: false; status: number; requiredMeta: number }
-> {
-  const base = req.nextUrl.origin;
+// ------------------------------
+// helpers: 402 response unified（stage無し）
+// ------------------------------
+function needMetaResponse(args: { requiredMeta: number; balance?: number | null }) {
+  const { requiredMeta, balance } = args;
+  return NextResponse.json(
+    {
+      ok: false,
+      error: "need_meta",
+      requiredMeta,
+      ...(balance != null ? { balance } : {}),
+    },
+    { status: 402 }
+  );
+}
 
+async function markJobBlocked(args: {
+  supabase: any;
+  jobId: string;
+  reason: string;
+}) {
+  const { supabase, jobId, reason } = args;
   try {
-    const res = await fetch(`${base}/api/usage/check`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Cookie: req.headers.get("cookie") ?? "",
-      },
-      body: JSON.stringify({
-        feature: FEATURE_ID,
-        requiredMeta: REQUIRED_META,
-      }),
-    });
-
-    const data = await res.json().catch(() => ({}));
-
-    if (res.status === 402 || data?.error === "need_meta") {
-      const requiredMeta =
-        Number(data?.requiredMeta ?? data?.required ?? REQUIRED_META) || REQUIRED_META;
-      return { ok: false, status: 402, requiredMeta };
-    }
-
-    if (!res.ok) {
-      const requiredMeta = Number(data?.requiredMeta ?? REQUIRED_META) || REQUIRED_META;
-      return { ok: false, status: res.status || 500, requiredMeta };
-    }
-
-    const mode = (data?.mode as ProceedMode) || "free";
-    const requiredMeta = Number(data?.requiredMeta ?? REQUIRED_META) || REQUIRED_META;
-    return { ok: true, mode, requiredMeta };
+    await supabase
+      .from("generation_jobs")
+      .update({
+        status: "blocked",
+        error_code: "need_meta",
+        error_message: reason,
+        updated_at: nowIso(),
+      })
+      .eq("id", jobId);
   } catch (e) {
-    console.error("usage/check call failed:", e);
-    return { ok: false, status: 500, requiredMeta: REQUIRED_META };
+    console.error("markJobBlocked crashed:", e);
   }
 }
 
-async function callUsageLog(req: NextRequest, idempotencyKey: string) {
+async function markJobFailed(args: {
+  supabase: any;
+  jobId: string;
+  error_code: string;
+  error_message: string;
+}) {
+  const { supabase, jobId, error_code, error_message } = args;
+  try {
+    await supabase
+      .from("generation_jobs")
+      .update({
+        status: "failed",
+        result: null,
+        error_code,
+        error_message,
+        updated_at: nowIso(),
+      })
+      .eq("id", jobId);
+  } catch (e) {
+    console.error("markJobFailed crashed:", e);
+  }
+}
+
+async function callUsageLog(req: NextRequest, jobId: string) {
   const base = req.nextUrl.origin;
   try {
     await fetch(`${base}/api/usage/log`, {
@@ -174,11 +205,10 @@ async function callUsageLog(req: NextRequest, idempotencyKey: string) {
       headers: {
         "Content-Type": "application/json",
         Cookie: req.headers.get("cookie") ?? "",
-        "X-Idempotency-Key": idempotencyKey,
       },
       body: JSON.stringify({
         feature: FEATURE_ID,
-        idempotencyKey,
+        jobId,
       }),
     });
   } catch (e) {
@@ -186,17 +216,21 @@ async function callUsageLog(req: NextRequest, idempotencyKey: string) {
   }
 }
 
-function nowIso() {
-  return new Date().toISOString();
-}
-
 // ------------------------------
-// Route
+// Route（industry-insights と同フロー）
 // ------------------------------
 export async function POST(req: NextRequest) {
+  // 0) server config
+  if (!OPENAI_API_KEY) {
+    return NextResponse.json(
+      { ok: false, error: "server_config", message: "OPENAI_API_KEY is not set" },
+      { status: 500 }
+    );
+  }
+
   const supabase = await createSupabaseFromCookies();
 
-  // auth
+  // auth（RLS前提）
   const { data: auth, error: authErr } = await supabase.auth.getUser();
   const user = auth?.user ?? null;
   if (authErr || !user?.id) {
@@ -204,26 +238,31 @@ export async function POST(req: NextRequest) {
   }
   const authUserId = user.id;
 
-  // idempotency key（header優先）
-  const headerKey = req.headers.get("x-idempotency-key") || "";
-  const headerMetaConfirm = req.headers.get("x-meta-confirm") || "";
-  const metaConfirm = headerMetaConfirm === "1";
+  // idempotency key（必須）
+  const idempotencyKey =
+    req.headers.get("x-idempotency-key") ||
+    req.headers.get("X-Idempotency-Key") ||
+    "";
 
+  if (!idempotencyKey) {
+    return NextResponse.json(
+      { ok: false, error: "bad_request", message: "idempotency key is required" },
+      { status: 400 }
+    );
+  }
+
+  // meta confirm（モーダル confirm 後だけ true）
+  const metaConfirm =
+    req.headers.get("x-meta-confirm") === "1" ||
+    req.headers.get("X-Meta-Confirm") === "1";
+
+  // body
   const body = (await req.json().catch(() => ({}))) as {
-    idempotencyKey?: string;
     qaList?: QA[];
     persona_id?: string;
     topic?: string;
     is_sensitive?: boolean;
   };
-
-  const idempotencyKey = safeStr(headerKey || body.idempotencyKey, 160);
-  if (!idempotencyKey) {
-    return NextResponse.json(
-      { ok: false, error: "bad_request", message: "idempotencyKey is required" },
-      { status: 400 }
-    );
-  }
 
   const qaList: QA[] = Array.isArray(body.qaList) ? body.qaList : [];
   const personaId = typeof body.persona_id === "string" ? body.persona_id : undefined;
@@ -237,84 +276,42 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 1) 既存ジョブ確認（reused / running）
-  try {
-    const { data: existing, error: selErr } = await supabase
-      .from("generation_jobs")
-      .select("id,status,result,request,error_code,error_message")
-      .eq("auth_user_id", authUserId)
-      .eq("feature_id", FEATURE_ID)
-      .eq("idempotency_key", idempotencyKey)
-      .maybeSingle();
+  // =========================
+  // ✅ 0) generation_jobs upsert（industry方式）
+  // =========================
+  // 既に succeeded なら即返す（再実行しない）
+  const { data: existing, error: exErr } = await supabase
+    .from("generation_jobs")
+    .select("id, status, result")
+    .eq("auth_user_id", authUserId)
+    .eq("feature_id", FEATURE_ID)
+    .eq("idempotency_key", idempotencyKey)
+    .maybeSingle();
 
-    if (selErr) {
-      console.error("generation_jobs select error:", selErr);
-      return NextResponse.json({ ok: false, error: "db_error" }, { status: 500 });
-    }
-
-    if (existing?.status === "succeeded" && existing?.result) {
-      return NextResponse.json({
-        ok: true,
-        ...(existing.result as any),
-        jobId: existing.id,
-        idempotencyKey,
-        reused: true,
-      });
-    }
-
-    if (existing && (existing.status === "running" || existing.status === "queued")) {
-      return NextResponse.json({
-        ok: true,
-        jobId: existing.id,
-        idempotencyKey,
-        status: existing.status,
-        reused: true,
-      });
-    }
-  } catch (e) {
-    console.error("generation_jobs precheck crash:", e);
+  if (exErr) {
+    console.error("[interview] job lookup error", exErr);
     return NextResponse.json({ ok: false, error: "db_error" }, { status: 500 });
   }
 
-  // 2) proceedMode は /api/usage/check の mode が真実
-  const check = await callUsageCheck(req);
-
-  // 残高不足：purchase導線へ
-  if (!check.ok && check.status === 402) {
-    return NextResponse.json(
-      { ok: false, error: "need_meta", requiredMeta: check.requiredMeta },
-      { status: 402 }
-    );
+  if (existing?.status === "succeeded" && existing?.result) {
+    return NextResponse.json({
+      ok: true,
+      ...(existing.result as any),
+      jobId: existing.id,
+      idempotencyKey,
+      reused: true,
+    });
   }
 
-  // usage/check が死んでたら止める（真実が取れない）
-  if (!check.ok) {
-    return NextResponse.json(
-      { ok: false, error: "server_error", message: "usage_check_failed" },
-      { status: 500 }
-    );
-  }
-
-  const proceedMode = check.mode;
-  const requiredMeta = check.requiredMeta;
-
-  // ✅ need_meta（=メタ消費機能）では confirm 二段階
-  if (proceedMode === "need_meta" && !metaConfirm) {
-    return NextResponse.json(
-      { ok: false, error: "need_meta", requiredMeta },
-      { status: 402 }
-    );
-  }
-
-  // 3) generation_jobs upsert(running)
-  const requestPayload = {
+  const jobRequest = {
     persona_id: personaId ?? null,
     topic,
     is_sensitive: isSensitive,
     qaList,
   };
 
-  const { data: jobRow, error: upsertErr } = await supabase
+  // なければ作成、あれば running に更新
+  const { data: upserted, error: upErr } = await supabase
     .from("generation_jobs")
     .upsert(
       {
@@ -322,44 +319,111 @@ export async function POST(req: NextRequest) {
         feature_id: FEATURE_ID,
         idempotency_key: idempotencyKey,
         status: "running",
-        request: requestPayload,
-        result: null,
+        request: jobRequest,
         error_code: null,
         error_message: null,
-        log_id: null,
         updated_at: nowIso(),
       },
       { onConflict: "auth_user_id,feature_id,idempotency_key" }
     )
-    .select("id,status")
+    .select("id, status")
     .single();
 
-  if (upsertErr || !jobRow?.id) {
-    console.error("generation_jobs upsert error:", upsertErr);
+  if (upErr || !upserted?.id) {
+    console.error("[interview] job upsert error", upErr);
     return NextResponse.json({ ok: false, error: "db_error" }, { status: 500 });
   }
-  const jobId = jobRow.id as string;
+  const jobId = upserted.id as string;
 
-  // 4) OpenAI
-  if (!OPENAI_API_KEY) {
-    await supabase
-      .from("generation_jobs")
-      .update({
-        status: "failed",
-        error_code: "server_config",
-        error_message: "OPENAI_API_KEY is not set",
-        updated_at: nowIso(),
-      })
-      .eq("auth_user_id", authUserId)
-      .eq("feature_id", FEATURE_ID)
-      .eq("idempotency_key", idempotencyKey);
+  // =========================
+  // ✅ 1) usage/check（消費しない）… industry方式
+  // =========================
+  const baseUrl = req.nextUrl.origin;
+  const cookieHeader = req.headers.get("cookie") ?? "";
 
-    return NextResponse.json(
-      { ok: false, error: "server_config", message: "OPENAI_API_KEY is not set" },
-      { status: 500 }
-    );
+  const checkRes = await fetch(`${baseUrl}/api/usage/check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: cookieHeader },
+    body: JSON.stringify({ feature: FEATURE_ID, requiredMeta: REQUIRED_META }),
+  });
+
+  const checkBody: any = await checkRes.json().catch(() => ({}));
+
+  if (!checkRes.ok) {
+    if (checkRes.status === 402 && checkBody?.error === "need_meta") {
+      const requiredMeta = Number(checkBody?.requiredMeta ?? REQUIRED_META);
+
+      // ✅ confirm 前は 402 を返して止める（課金はしない）
+      if (!metaConfirm) {
+        await markJobBlocked({
+          supabase,
+          jobId,
+          reason: "need_meta_before_confirm",
+        });
+        return needMetaResponse({ requiredMeta });
+      }
+      // ✅ confirm 後は続行（ただし後段で残高チェックを挟む）
+    } else if (checkRes.status === 401) {
+      return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
+    } else {
+      console.error("[interview] usage/check unexpected", checkRes.status, checkBody);
+      await markJobFailed({
+        supabase,
+        jobId,
+        error_code: "usage_error",
+        error_message: `usage/check failed: ${String(checkRes.status)}`,
+      });
+      return NextResponse.json({ ok: false, error: "usage_error" }, { status: 500 });
+    }
   }
 
+  const proceedMode: ProceedMode =
+    (checkBody?.mode as ProceedMode) ?? (metaConfirm ? "need_meta" : "free");
+
+  const requiredMeta = Number(checkBody?.requiredMeta ?? REQUIRED_META);
+
+  // =========================
+  // ✅ 1.5) confirm後の最終防衛：残高が足りないなら OpenAI を叩かない（industry方式）
+  //     残高参照を get_my_meta_balance に統一（meta_lots 集計が真実）
+  // =========================
+  if (proceedMode === "need_meta" && metaConfirm) {
+    const { data: mbData, error: mbErr } = await supabase.rpc("get_my_meta_balance");
+
+    let bal = 0;
+    if (!mbErr) {
+      if (typeof mbData === "number") {
+        bal = mbData;
+      } else if (mbData && typeof mbData === "object") {
+        const anyData = mbData as any;
+        const v =
+          anyData.balance ??
+          anyData.meta_balance ??
+          anyData.metaBalance ??
+          anyData.value ??
+          0;
+        bal = Number(v);
+      } else {
+        bal = Number(mbData ?? 0);
+      }
+    }
+
+    if (mbErr || !Number.isFinite(bal) || bal < requiredMeta) {
+      await markJobBlocked({
+        supabase,
+        jobId,
+        reason: mbErr ? "meta_balance_rpc_error" : "insufficient_meta_after_confirm",
+      });
+
+      return needMetaResponse({
+        requiredMeta,
+        balance: Number.isFinite(bal) ? bal : null,
+      });
+    }
+  }
+
+  // =========================
+  // ✅ 2) OpenAI
+  // =========================
   const persona = findPersona(personaId);
 
   const interviewLog = qaList
@@ -379,8 +443,8 @@ export async function POST(req: NextRequest) {
     persona.system_prompt,
     "",
     "あなたは上記の人格で、候補者の模擬面接全体を評価する役割です。",
-    "出力は必ず JSON 形式のみで返してください（日本語）。",
-    "JSON 以外のテキストは一切書かないでください。",
+    "出力は必ず JSON 形式「のみ」で返してください（日本語）。",
+    "前後に説明文は書かないでください。",
     "",
     "スコアリング仕様:",
     criteriaDescription,
@@ -416,102 +480,77 @@ ${interviewLog}
   let safeEval: EvaluationResult = DEFAULT_RESULT;
 
   try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: OPENAI_MODEL,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
         ],
+        temperature: 0.35,
       }),
     });
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      console.error("interview-eval OpenAI error:", errText);
+    if (!r.ok) {
+      const errText = await r.text().catch(() => "");
+      console.error("[interview] openai error", errText);
 
-      await supabase
-        .from("generation_jobs")
-        .update({
-          status: "failed",
-          error_code: "openai_error",
-          error_message: `OpenAI error: ${res.status}`,
-          updated_at: nowIso(),
-        })
-        .eq("auth_user_id", authUserId)
-        .eq("feature_id", FEATURE_ID)
-        .eq("idempotency_key", idempotencyKey);
+      await markJobFailed({
+        supabase,
+        jobId,
+        error_code: "openai_error",
+        error_message: errText.slice(0, 4000),
+      });
 
       return NextResponse.json({ ok: false, error: "openai_error" }, { status: 500 });
     }
 
-    const data = await res.json().catch(() => null);
-    const content = data?.choices?.[0]?.message?.content;
+    const j = await r.json().catch(() => null);
+    const content: string | null = j?.choices?.[0]?.message?.content ?? null;
 
-    if (!content || typeof content !== "string") {
-      console.error("interview-eval invalid OpenAI response:", data);
-
-      await supabase
-        .from("generation_jobs")
-        .update({
-          status: "failed",
-          error_code: "openai_error",
-          error_message: "invalid OpenAI response",
-          updated_at: nowIso(),
-        })
-        .eq("auth_user_id", authUserId)
-        .eq("feature_id", FEATURE_ID)
-        .eq("idempotency_key", idempotencyKey);
-
-      return NextResponse.json({ ok: false, error: "openai_error" }, { status: 500 });
+    if (!content) {
+      await markJobFailed({
+        supabase,
+        jobId,
+        error_code: "empty_content",
+        error_message: "OpenAI returned empty content",
+      });
+      return NextResponse.json({ ok: false, error: "empty_content" }, { status: 500 });
     }
 
     try {
       const parsed = JSON.parse(content);
       safeEval = toSafeEval(parsed);
     } catch (e) {
-      console.error("JSON parse error (interview-eval):", e, content);
-
-      await supabase
-        .from("generation_jobs")
-        .update({
-          status: "failed",
-          error_code: "json_parse_error",
-          error_message: "failed to parse model JSON",
-          updated_at: nowIso(),
-        })
-        .eq("auth_user_id", authUserId)
-        .eq("feature_id", FEATURE_ID)
-        .eq("idempotency_key", idempotencyKey);
-
+      await markJobFailed({
+        supabase,
+        jobId,
+        error_code: "json_parse_error",
+        error_message: String(e).slice(0, 1000),
+      });
       return NextResponse.json({ ok: false, error: "json_parse_error" }, { status: 500 });
     }
   } catch (e: any) {
-    console.error("OpenAI call crash (interview-eval):", e);
-
-    await supabase
-      .from("generation_jobs")
-      .update({
-        status: "failed",
-        error_code: "openai_error",
-        error_message: e?.message || "OpenAI call failed",
-        updated_at: nowIso(),
-      })
-      .eq("auth_user_id", authUserId)
-      .eq("feature_id", FEATURE_ID)
-      .eq("idempotency_key", idempotencyKey);
-
+    await markJobFailed({
+      supabase,
+      jobId,
+      error_code: "openai_error",
+      error_message: e?.message || "OpenAI call failed",
+    });
     return NextResponse.json({ ok: false, error: "openai_error" }, { status: 500 });
   }
 
-  // 5) generation_jobs に result 保存(succeeded)
+  // =========================
+  // ✅ 3) 成功判定 = generation_jobs に result 保存できた
+  // =========================
   const saveAt = nowIso();
+
   const { error: saveErr } = await supabase
     .from("generation_jobs")
     .update({
@@ -521,123 +560,43 @@ ${interviewLog}
       error_message: null,
       updated_at: saveAt,
     })
-    .eq("auth_user_id", authUserId)
-    .eq("feature_id", FEATURE_ID)
-    .eq("idempotency_key", idempotencyKey);
+    .eq("id", jobId);
 
   if (saveErr) {
-    console.error("generation_jobs result_save_failed:", saveErr);
-
-    await supabase
-      .from("generation_jobs")
-      .update({
-        status: "failed",
-        error_code: "result_save_failed",
-        error_message: "failed to save result to generation_jobs",
-        updated_at: nowIso(),
-      })
-      .eq("auth_user_id", authUserId)
-      .eq("feature_id", FEATURE_ID)
-      .eq("idempotency_key", idempotencyKey);
-
+    console.error("[interview] result save failed", saveErr);
+    // ここで課金しない（事故回避）
     return NextResponse.json({ ok: false, error: "result_save_failed" }, { status: 500 });
   }
 
-  // 6) 成功後のみ課金（proceedMode）
-  // ✅ 方針統一：課金に失敗したら「結果を返さない」（= API失敗）
-  // ✅ DB上の consume_meta_fifo は (p_auth_user_id uuid, p_cost integer) -> jsonb
-  try {
-    if (proceedMode === "unlimited") {
-      // no-op
-    } else if (proceedMode === "free") {
-      // free は “計測” が落ちても致命ではない（※ここは best-effort 維持）
-      await callUsageLog(req, idempotencyKey);
-    } else if (proceedMode === "need_meta") {
-      const { data: rpcData, error: rpcErr } = await supabase.rpc("consume_meta_fifo", {
-        p_auth_user_id: authUserId,
-        p_cost: requiredMeta,
-      });
+  // =========================
+  // ✅ 4) 成功後だけ課金（free: usage/log / meta: consume_meta_fifo）… industry方式
+  // =========================
+  if (proceedMode === "free") {
+    await callUsageLog(req, jobId);
+  } else if (proceedMode === "need_meta" && metaConfirm) {
+    const { error: consumeErr } = await supabaseAdmin.rpc("consume_meta_fifo", {
+      p_auth_user_id: authUserId,
+      p_cost: requiredMeta,
+    });
 
-      if (rpcErr) {
-        console.error("consume_meta_fifo error:", rpcErr);
-
-        // ✅ 重要：課金失敗なら結果を返さない。ジョブも失敗に戻す（再試行前提）
-        await supabase
-          .from("generation_jobs")
-          .update({
-            status: "failed",
-            result: null,
-            error_code: "billing_failed",
-            error_message: "META消費に失敗しました。通信環境を確認して再度お試しください。",
-            updated_at: nowIso(),
-          })
-          .eq("auth_user_id", authUserId)
-          .eq("feature_id", FEATURE_ID)
-          .eq("idempotency_key", idempotencyKey);
-
-        return NextResponse.json(
-          {
-            ok: false,
-            error: "billing_failed",
-            message: "META消費に失敗しました。時間をおいて再度お試しください。",
-          },
-          { status: 500 }
-        );
-      }
-
-      // 念のため：関数が jsonb で失敗情報を返す設計だった場合にも備える（安全側）
-      // 例: { ok:false, error:"insufficient" } など
-      const maybeOk = (rpcData as any)?.ok;
-      if (maybeOk === false) {
-        console.error("consume_meta_fifo returned non-ok:", rpcData);
-
-        await supabase
-          .from("generation_jobs")
-          .update({
-            status: "failed",
-            result: null,
-            error_code: "billing_failed",
-            error_message: "META消費に失敗しました。もう一度お試しください。",
-            updated_at: nowIso(),
-          })
-          .eq("auth_user_id", authUserId)
-          .eq("feature_id", FEATURE_ID)
-          .eq("idempotency_key", idempotencyKey);
-
-        return NextResponse.json(
-          { ok: false, error: "billing_failed", message: "META消費に失敗しました。もう一度お試しください。" },
-          { status: 500 }
-        );
-      }
-    }
-  } catch (e) {
-    console.error("post-success billing step crashed:", e);
-
-    if (proceedMode === "need_meta") {
+    // ✅ 失敗したら結果を渡さず 402 で戻す（industryの肝）
+    if (consumeErr) {
       await supabase
         .from("generation_jobs")
         .update({
-          status: "failed",
-          result: null,
-          error_code: "billing_failed",
-          error_message: "META消費に失敗しました。通信環境を確認して再度お試しください。",
+          error_code: "need_meta",
+          error_message: `meta_charge_failed:${String(consumeErr.message ?? "").slice(0, 200)}`,
           updated_at: nowIso(),
         })
-        .eq("auth_user_id", authUserId)
-        .eq("feature_id", FEATURE_ID)
-        .eq("idempotency_key", idempotencyKey);
+        .eq("id", jobId);
 
-      return NextResponse.json(
-        { ok: false, error: "billing_failed", message: "META消費に失敗しました。時間をおいて再度お試しください。" },
-        { status: 500 }
-      );
+      return needMetaResponse({ requiredMeta });
     }
-
-    // free/unlimited はログ周りの例外は握って良い
   }
 
-  // 7) 既存ログ（成功時のみ）
-  // ✅ need_meta は課金成功後にのみログを積む（整合性のため）
+  // =========================
+  // ✅ 5) ログ（best-effort）… 既存維持
+  // =========================
   try {
     await supabase.from("usage_logs").insert({
       user_id: authUserId,
@@ -652,8 +611,11 @@ ${interviewLog}
       description: "模擬面接の回答を評価し、フィードバックを生成しました。",
       metadata: {
         feature: FEATURE_ID,
+        jobId,
+        idempotencyKey,
         persona_id: personaId ?? null,
         topic,
+        proceedMode,
         scores: {
           total: safeEval.total_score,
           star: safeEval.star_score,
@@ -705,11 +667,10 @@ ${interviewLog}
         created_at: saveAt,
       });
     } else if (sessionErr) {
-      console.error("interview_sessions insert error:", sessionErr);
+      console.error("[interview] interview_sessions insert error:", sessionErr);
     }
   } catch (e) {
-    console.error("post-success logs insert crash:", e);
-    // ログ失敗は致命にしない（課金は終わっている/結果は返す）
+    console.error("[interview] post-success logs insert crash:", e);
   }
 
   return NextResponse.json({

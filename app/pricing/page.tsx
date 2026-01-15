@@ -55,7 +55,7 @@ export default function PricingPage() {
       const res = await fetch("/api/meta/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pack }),
+        body: JSON.stringify({ pack , agree}),
       });
 
       if (!res.ok) {

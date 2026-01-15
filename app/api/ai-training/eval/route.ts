@@ -1,7 +1,8 @@
 // app/api/ai-training/eval/route.ts
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
-import { requireFeatureOrConsumeMeta } from "@/lib/payment/featureGate";
+import { createServerClient } from "@supabase/ssr";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,7 +49,7 @@ type LegacyBody = {
   department_id?: string | null;
   task_id?: string | null;
   task_variant_id?: string | null;
-  task_seed?: number | null; // int8想定（JS numberで持てる範囲のみ）
+  task_seed?: number | null;
   task_mode?: string | null;
 };
 
@@ -72,13 +73,12 @@ type NewUiBody = {
   // optional AI meta (if UI sends it)
   used_ai_provider?: string | null;
   used_ai_model?: string | null;
-  used_ai_temp?: number | null;
+  used_ai_temperature?: number | null;
   used_ai_tools?: any | null;
-  system_prompt?: string | null;
+  system_prompt_version?: string | null;
   used_ai_mode?: string | null;
 };
 
-// UIが期待してる返却形式（0-9）
 type AcsScores0to9 = {
   goal_framing: number;
   constraint_design: number;
@@ -146,6 +146,40 @@ function makeSupabaseAdmin() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
+/**
+ * ✅ Next.js の sync-dynamic-apis 対応:
+ * cookies() は Promise なので await 必須
+ */
+async function makeSupabaseFromCookies() {
+  const cookieStore = await cookies();
+
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value;
+        },
+        set(name: string, value: string, options: any) {
+          try {
+            cookieStore.set({ name, value, ...options });
+          } catch {
+            // Route Handler では set が禁止されるケースがあるので握りつぶす
+          }
+        },
+        remove(name: string, options: any) {
+          try {
+            cookieStore.set({ name, value: "", ...options, maxAge: 0 });
+          } catch {
+            // 同上
+          }
+        },
+      },
+    }
+  );
+}
+
 // =====================
 // Scoring (heuristic v1)
 // =====================
@@ -193,7 +227,8 @@ function evaluateLegacy(answers: Record<number, string>): LegacyScores {
   else reproducibility = 5;
 
   let strategy = 1;
-  const hasSplit = /AIに任せ|人間|自分が|役割分担/.test(a4) || /(①|②|③|④)/.test(a4);
+  const hasSplit =
+    /AIに任せ|人間|自分が|役割分担/.test(a4) || /(①|②|③|④)/.test(a4);
   const mentionsReason = /(理由|から|ため)/.test(a4);
 
   if (len4 < 20) strategy = 1;
@@ -250,7 +285,7 @@ function scoreCore10(answers: Record<number, string>, legacy: LegacyScores): Cor
   return { goal_framing, constraint_design, structuring, evaluation, refinement, output_quality };
 }
 
-function scoreModifiers(answers: Record<number, string>, dialogLen: number): Modifiers {
+function scoreModifiers(answers: Record<number, string>, turnsOrDialogLen: number): Modifiers {
   const text = Object.values(answers ?? {}).join("\n");
 
   const compliance: ModifierGrade =
@@ -261,7 +296,7 @@ function scoreModifiers(answers: Record<number, string>, dialogLen: number): Mod
       : "C";
 
   const totalLen = text.length;
-  const efficiency: ModifierGrade = gradeFromTurnsOrLength(dialogLen, totalLen);
+  const efficiency: ModifierGrade = gradeFromTurnsOrLength(turnsOrDialogLen, totalLen);
 
   return { compliance, efficiency };
 }
@@ -269,18 +304,21 @@ function scoreModifiers(answers: Record<number, string>, dialogLen: number): Mod
 // =====================
 // Body normalization (旧/新両対応)
 // =====================
-function normalizeBody(raw: any): { body: LegacyBody; aiMeta: Partial<NewUiBody> } | null {
+function normalizeBody(raw: any): {
+  body: LegacyBody;
+  aiMeta: Partial<NewUiBody>;
+  uiTurnCount?: number;
+} | null {
   // 旧形式
   if (raw?.scenario && raw?.answers) {
     const b = raw as LegacyBody;
-    return { body: b, aiMeta: {} };
+    return { body: b, aiMeta: {}, uiTurnCount: b.dialog?.length ?? 0 };
   }
 
   // 新UI形式
   if (raw?.scenario_key && raw?.user_prompt != null) {
     const b = raw as NewUiBody;
 
-    // 新UIは step が3つ寄りなので、heuristic用に 4/5 を補う
     const body: LegacyBody = {
       scenario: b.scenario_key,
       answers: {
@@ -305,13 +343,14 @@ function normalizeBody(raw: any): { body: LegacyBody; aiMeta: Partial<NewUiBody>
     const aiMeta: Partial<NewUiBody> = {
       used_ai_provider: b.used_ai_provider ?? null,
       used_ai_model: b.used_ai_model ?? null,
-      used_ai_temp: b.used_ai_temp ?? null,
+      used_ai_temperature: b.used_ai_temperature?? null,
       used_ai_tools: b.used_ai_tools ?? null,
-      system_prompt: b.system_prompt ?? null,
+      system_prompt_version: b.system_prompt_version ?? null,
       used_ai_mode: b.used_ai_mode ?? null,
     };
 
-    return { body, aiMeta };
+    const uiTurnCount = typeof b.turn_count === "number" ? b.turn_count : 0;
+    return { body, aiMeta, uiTurnCount };
   }
 
   return null;
@@ -322,7 +361,8 @@ function normalizeBody(raw: any): { body: LegacyBody; aiMeta: Partial<NewUiBody>
 // =====================
 function buildFlags(text: string, aiType: AiTypeKey) {
   const pii_or_secret_risk = /(住所|電話|メール|口座|顧客名|社外秘|機密|NDA)/.test(text);
-  const hallucination_risk = /(断定|必ず|確実|絶対)/.test(text) && /(出典|参照|ソース)/.test(text) === false;
+  const hallucination_risk =
+    /(断定|必ず|確実|絶対)/.test(text) && /(出典|参照|ソース)/.test(text) === false;
   const overdelegation_risk = aiType === "dependent" || /(丸投げ|全部AI)/.test(text);
   return { pii_or_secret_risk, hallucination_risk, overdelegation_risk };
 }
@@ -336,8 +376,10 @@ function buildEvidence(core10: Core10, modifiers: Modifiers) {
   if (core10.structuring >= 7) positive.push("構造化（箇条書き/テンプレ）で収束しやすい。");
 
   if (modifiers.compliance === "C") risk.push("前提・注意書きが薄く、断定や漏洩リスクが上がりやすい。");
-  if (modifiers.efficiency === "C") risk.push("往復が増えやすい。最初に出力形式と制約を固定すると良い。");
-  if (core10.output_quality <= 4) risk.push("最終成果物の“そのまま使える度”が弱い（結論/要点/次アクション不足）。");
+  if (modifiers.efficiency === "C")
+    risk.push("往復が増えやすい。最初に出力形式と制約を固定すると良い。");
+  if (core10.output_quality <= 4)
+    risk.push("最終成果物の“そのまま使える度”が弱い（結論/要点/次アクション不足）。");
 
   return { positive: positive.slice(0, 5), risk: risk.slice(0, 5) };
 }
@@ -383,33 +425,40 @@ function buildDiagnosis(scores0to9: AcsScores0to9, aiType: AiTypeKey) {
 }
 
 // =====================
-// Handler
+// Handler (FREE / unlimited)
 // =====================
 export async function POST(req: Request) {
   try {
-    const gate = await requireFeatureOrConsumeMeta(FEATURE_ID as any);
-    if (!gate.ok) {
+    // ✅ 無料でも「誰のログか」は必要なのでログイン必須（RLS前提）
+    const supabaseUser = await makeSupabaseFromCookies();
+    const { data: auth, error: authError } = await supabaseUser.auth.getUser();
+
+    if (authError || !auth?.user?.id) {
       return NextResponse.json(
-        { ok: false, reason: gate.reason, required: gate.required ?? undefined },
-        { status: gate.status }
+        { ok: false, reason: "unauthorized", message: "login required" },
+        { status: 401 }
       );
     }
+    const authUserId = auth.user.id;
 
     const raw = await req.json().catch(() => ({}));
     const normalized = normalizeBody(raw);
+
     if (!normalized?.body?.scenario || !normalized.body.answers) {
       return NextResponse.json({ ok: false, error: "INVALID_BODY" }, { status: 400 });
     }
 
-    const { body, aiMeta } = normalized;
+    const { body, aiMeta, uiTurnCount } = normalized;
 
     // score
     const legacy = evaluateLegacy(body.answers);
     const aiType = detectAiType(body.answers, legacy);
     const core10 = scoreCore10(body.answers, legacy);
 
-    const dialogLen = body.dialog?.length ?? 0;
-    const modifiers = scoreModifiers(body.answers, dialogLen);
+    // ✅ 新UIは turn_count を優先、なければ旧dialog length
+    const turnsForEfficiency =
+      (uiTurnCount ?? 0) > 0 ? (uiTurnCount ?? 0) : body.dialog?.length ?? 0;
+    const modifiers = scoreModifiers(body.answers, turnsForEfficiency);
 
     const scores0to9: AcsScores0to9 = {
       goal_framing: to0to9(core10.goal_framing),
@@ -453,9 +502,10 @@ export async function POST(req: Request) {
       flags,
     };
 
-    // store attempt
+    // =====================
+    // DB write (service role)
+    // =====================
     const supabase = makeSupabaseAdmin();
-    const authUserId = gate.authUserId;
 
     const insertPayload: any = {
       auth_user_id: authUserId,
@@ -473,7 +523,6 @@ export async function POST(req: Request) {
       eval_model: null,
       eval_trace: null,
 
-      // BtoB future axes (nullable)
       org_id: body.org_id ?? null,
       department_id: body.department_id ?? null,
       task_id: body.task_id ?? null,
@@ -481,17 +530,55 @@ export async function POST(req: Request) {
       task_seed: body.task_seed ?? null,
       task_mode: body.task_mode ?? null,
 
-      // optional AI meta (nullable)
-      used_ai_provider: (aiMeta as any).used_ai_provider ?? null,
-      used_ai_model: (aiMeta as any).used_ai_model ?? null,
-      used_ai_temp: (aiMeta as any).used_ai_temp ?? null,
-      used_ai_tools: (aiMeta as any).used_ai_tools ?? null,
-      system_prompt: (aiMeta as any).system_prompt ?? null,
-      used_ai_mode: (aiMeta as any).used_ai_mode ?? null,
+      used_ai_provider: aiMeta.used_ai_provider ?? null,
+      used_ai_model: aiMeta.used_ai_model ?? null,
+      used_ai_temperature: aiMeta.used_ai_temperature ?? null,
+      used_ai_tools: aiMeta.used_ai_tools ?? null,
+      system_prompt_version: aiMeta.system_prompt_version ?? null,
+      used_ai_mode: aiMeta.used_ai_mode ?? null,
     };
 
-    const { error: dbErr } = await supabase.from("acs_attempts").insert(insertPayload);
-    if (dbErr) console.error("acs_attempts insert error:", dbErr);
+    // ✅ 1) acs_attempts（必須）
+    const { data: attemptRow, error: attemptErr } = await supabase
+      .from("acs_attempts")
+      .insert(insertPayload)
+      .select("id")
+      .single();
+
+    if (attemptErr) {
+      console.error("acs_attempts insert error:", attemptErr);
+      return NextResponse.json({ ok: false, error: "DB_INSERT_FAILED" }, { status: 500 });
+    }
+
+    // ✅ 2) usage_logs（無料でも行動ログとして残す）
+    const { error: usageErr } = await supabase.from("usage_logs").insert({
+      user_id: authUserId,
+      feature: FEATURE_ID,
+      used_at: new Date().toISOString(),
+    });
+    if (usageErr) console.error("usage_logs insert error:", usageErr);
+
+    // ✅ 3) growth_logs（タイムライン）
+    const finalAcs = result.scores.final_acs;
+    const title = `AI思考力トレーニング：${body.scenario}（ACS ${finalAcs}/9）`;
+
+    const { error: growthErr } = await supabase.from("growth_logs").insert({
+      user_id: authUserId,
+      source: "ai_training",
+      title,
+      description: result.diagnosis.one_liner,
+      metadata: {
+        attempt_id: attemptRow?.id ?? null,
+        scenario: body.scenario,
+        scores: result.scores,
+        modifiers: result.modifiers,
+        flags: result.flags,
+        top_strengths: result.diagnosis.top_strengths,
+        top_gaps: result.diagnosis.top_gaps,
+        next_actions: result.diagnosis.next_actions,
+      },
+    });
+    if (growthErr) console.error("growth_logs insert error:", growthErr);
 
     return NextResponse.json(result, { status: 200 });
   } catch (e: any) {

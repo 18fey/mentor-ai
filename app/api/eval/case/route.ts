@@ -59,26 +59,23 @@ type CaseFeedback = {
   nextTraining: string;
 };
 
-// ✅ 追加：模範解答（UIでそのまま見せられる粒度）
 type CaseModelAnswer = {
   goal: string;
-  kpi: string; // KPI候補（箇条書きOK）
-  framework: string; // 分解（式・ツリー・観点）
-  hypothesis: string; // 初手仮説
-  deepDivePlan: string; // 深掘りの順序（1-5）
-  analysis: string; // 置く数字・計算例・感度
-  solutions: string; // 打ち手（優先順位）
-  risks: string; // 前提/リスク
-  wrapUp: string; // 30秒クロージング
+  kpi: string;
+  framework: string;
+  hypothesis: string;
+  deepDivePlan: string;
+  analysis: string;
+  solutions: string;
+  risks: string;
+  wrapUp: string;
 };
 
 type CaseEvalResult = {
   score: CaseScore;
   feedback: CaseFeedback;
   totalScore: number;
-  logId: string | number | null; // case_logs の id
-
-  // ✅ 追加（後方互換：UIが知らなくても壊れない）
+  logId: string | number | null; // case_logs.id
   modelAnswer?: CaseModelAnswer;
 };
 
@@ -120,7 +117,7 @@ async function createSupabaseFromCookies() {
   );
 }
 
-// ✅ adminで残高を正として取る（meta_lotsのremaining合計）
+// adminで残高を正として取る（meta_lotsのremaining合計）
 async function getBalanceAdmin(authUserId: string): Promise<number> {
   const { data, error } = await supabaseAdmin
     .from("meta_lots")
@@ -138,7 +135,6 @@ async function getBalanceAdmin(authUserId: string): Promise<number> {
   return Number.isFinite(sum) ? sum : 0;
 }
 
-// ✅ 追加：模範解答の正規化（長すぎ・null対策）
 function normalizeModelAnswer(v: any): CaseModelAnswer | null {
   if (!v || typeof v !== "object") return null;
 
@@ -154,7 +150,6 @@ function normalizeModelAnswer(v: any): CaseModelAnswer | null {
     wrapUp: safeStr(v.wrapUp ?? "", 1400),
   };
 
-  // ほぼ空なら返さない
   const totalLen =
     out.goal.length +
     out.kpi.length +
@@ -170,6 +165,30 @@ function normalizeModelAnswer(v: any): CaseModelAnswer | null {
   return out;
 }
 
+async function insertGrowthLogSafe(params: {
+  authUserId: string;
+  source: string;
+  title: string;
+  description?: string | null;
+  metadata?: any;
+}) {
+  // growth_logs は NOT NULL があるので必須2つは絶対入れる
+  const payload = {
+    user_id: params.authUserId,
+    source: params.source,
+    title: params.title,
+    description: params.description ?? null,
+    metadata: params.metadata ?? null,
+  };
+
+  // まずRLS前提の supabase で試す → 失敗したら admin
+  let r = await supabaseAdmin.from("growth_logs").insert(payload);
+  if (r.error) {
+    console.error("growth_logs insert failed (admin):", r.error);
+    // adminでも失敗したら諦め（本処理は成功させたい）
+  }
+}
+
 export async function POST(req: Request) {
   const requestId = rid();
 
@@ -183,7 +202,7 @@ export async function POST(req: Request) {
 
     const supabase = await createSupabaseFromCookies();
 
-    // ✅ auth
+    // auth
     const { data: auth, error: authErr } = await supabase.auth.getUser();
     const user = auth?.user ?? null;
     if (authErr || !user?.id) {
@@ -191,7 +210,7 @@ export async function POST(req: Request) {
     }
     const authUserId = user.id;
 
-    // ✅ idempotency key（必須）
+    // idempotency key（必須）
     const idempotencyKey =
       req.headers.get("x-idempotency-key") ||
       req.headers.get("X-Idempotency-Key") ||
@@ -204,12 +223,12 @@ export async function POST(req: Request) {
       );
     }
 
-    // ✅ meta confirm（confirm 後だけ true）
+    // meta confirm
     const metaConfirm =
       req.headers.get("x-meta-confirm") === "1" ||
       req.headers.get("X-Meta-Confirm") === "1";
 
-    // ✅ 入力
+    // 入力
     const body = (await req.json().catch(() => ({}))) as {
       case: CaseQuestion;
       answers: Answers;
@@ -227,9 +246,7 @@ export async function POST(req: Request) {
 
     const feature: FeatureId = "case_interview";
 
-    // =========================
-    // ✅ 0) generation_jobs lookup (idempotent)
-    // =========================
+    // 0) generation_jobs lookup (idempotent)
     const { data: existing, error: exErr } = await supabase
       .from("generation_jobs")
       .select("id, status, result")
@@ -247,9 +264,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, ...existing.result, reused: true });
     }
 
-    // =========================
-    // ✅ 0.5) generation_jobs upsert running
-    // =========================
+    // 0.5) generation_jobs upsert running
     const jobRequest = {
       case: {
         id: safeStr(caseQ.id, 80),
@@ -298,9 +313,7 @@ export async function POST(req: Request) {
     }
     const jobId = upserted.id as string;
 
-    // =========================
-    // ✅ 1) usage/check（消費しない）
-    // =========================
+    // 1) usage/check（消費しない）
     const baseUrl = new URL(req.url).origin;
     const cookieHeader = req.headers.get("cookie") ?? "";
 
@@ -385,9 +398,7 @@ export async function POST(req: Request) {
       }
     }
 
-    // =========================
-    // ✅ 2) OpenAI（必ずJSON）※ modelAnswer を追加
-    // =========================
+    // 2) OpenAI（必ずJSON）
     const systemPrompt = `
 あなたはケース面接官。日本語で、辛口だが建設的。
 出力は必ず JSON 形式のみ。前後に説明文は書かない。
@@ -544,26 +555,26 @@ export async function POST(req: Request) {
       normalizedScore.practicality +
       normalizedScore.communication;
 
-    // =========================
-    // ✅ 3) case_logs insert（任意）
-    // =========================
+    // 3) case_logs insert（確実に通す版）
     let logId: string | number | null = null;
 
     try {
       const aiFeedbackPayload: any = {
         ...normalizedFeedback,
-        // ✅ DB schema増やさずにJSONへ同居
         ...(normalizedModelAnswer ? { modelAnswer: normalizedModelAnswer } : {}),
       };
 
+      // ✅ problem/answer は text なので stringify
       const insertPayload: any = {
         user_id: authUserId,
         problem_id: caseQ.id ?? null,
         domain: caseQ.domain ?? null,
         pattern: caseQ.pattern ?? null,
 
-        problem: caseQ,
-        answer: answers,
+        // text列なのでJSON文字列で保存
+        problem: JSON.stringify(caseQ),
+        answer: JSON.stringify(answers),
+
         ai_feedback: aiFeedbackPayload,
         score: totalScore,
 
@@ -582,29 +593,23 @@ export async function POST(req: Request) {
         insight_score: normalizedScore.insight,
         practicality_score: normalizedScore.practicality,
         communication_score: normalizedScore.communication,
-
-        job_id: jobId,
-        idempotency_key: idempotencyKey,
       };
 
-      const ins = await supabase.from("case_logs").insert(insertPayload).select("id").single();
-      if (ins.data?.id) logId = ins.data.id;
-
+      // まずRLS想定（cookie auth）で
+      let ins = await supabase.from("case_logs").insert(insertPayload).select("id").single();
       if (ins.error) {
-        const ins2 = await supabaseAdmin
-          .from("case_logs")
-          .insert(insertPayload)
-          .select("id")
-          .single();
-        if (ins2.data?.id) logId = ins2.data.id;
+        // だめならadminで
+        ins = await supabaseAdmin.from("case_logs").insert(insertPayload).select("id").single();
+        if (ins.error) {
+          console.error(`[case:${requestId}] case_logs insert error`, ins.error);
+        }
       }
+      if (ins.data?.id) logId = ins.data.id;
     } catch (e) {
       console.error(`[case:${requestId}] case_logs insert failed`, e);
     }
 
-    // =========================
-    // ✅ 4) generation_jobs result保存
-    // =========================
+    // 4) generation_jobs result保存
     const result: CaseEvalResult = {
       score: normalizedScore,
       feedback: normalizedFeedback,
@@ -628,9 +633,27 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "result_save_failed" }, { status: 500 });
     }
 
-    // =========================
-    // ✅ 5) 成功後だけ課金
-    // =========================
+    // ✅ 4.5) growth_logs（成功後に必ず）
+    // growth_logs は NOT NULL (source/title) なので必ず入れる
+    await insertGrowthLogSafe({
+  authUserId,
+  source: "case",
+  title: "ケース面接：評価完了",
+  description: `題材：${String(caseQ.title ?? "").slice(0, 48)}\nスコア：${totalScore}/50（模範解答つき）`,
+  metadata: {
+    jobId,
+    idempotencyKey,
+    logId: logId ?? null, // 取れなかったらnullでOK
+    problem_id: caseQ.id ?? null,
+    domain: caseQ.domain ?? null,
+    pattern: caseQ.pattern ?? null,
+    totalScore,
+    proceedMode,
+  },
+});
+
+
+    // 5) 成功後だけ課金
     if (proceedMode === "free") {
       await fetch(`${baseUrl}/api/usage/log`, {
         method: "POST",

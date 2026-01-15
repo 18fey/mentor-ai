@@ -234,7 +234,10 @@ export async function POST(req: Request) {
     const user = auth?.user ?? null;
 
     if (authErr || !user?.id) {
-      return NextResponse.json({ ok: false, error: "unauthorized", message: "login required" }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: "unauthorized", message: "login required" },
+        { status: 401 }
+      );
     }
     const authUserId = user.id;
 
@@ -258,7 +261,10 @@ export async function POST(req: Request) {
 
     const body = (await req.json().catch(() => null)) as BoostRequestBody | null;
     if (!body) {
-      return NextResponse.json({ ok: false, error: "bad_request", message: "Invalid JSON body" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "bad_request", message: "Invalid JSON body" },
+        { status: 400 }
+      );
     }
 
     const storyCardId = safeStr(body.storyCardId, 80);
@@ -360,10 +366,7 @@ export async function POST(req: Request) {
             })
             .eq("id", jobId);
 
-          return NextResponse.json(
-            { ok: false, error: "need_meta", requiredMeta },
-            { status: 402 }
-          );
+          return NextResponse.json({ ok: false, error: "need_meta", requiredMeta }, { status: 402 });
         }
       } else if (checkRes.status === 401) {
         return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
@@ -380,16 +383,23 @@ export async function POST(req: Request) {
 
     // =========================
     // ✅ 1.5) confirm後の最終防衛：残高不足なら OpenAI を叩かない
+    // ✅ 残高は meta_lots 集計RPC（get_my_meta_balance）を真実にする
     // =========================
     if (proceedMode === "need_meta" && metaConfirm) {
-      // ⚠️ meta_balances が無いなら差し替えてOK
-      const { data: mb, error: mbErr } = await supabaseAdmin
-        .from("meta_balances")
-        .select("balance")
-        .eq("auth_user_id", authUserId)
-        .maybeSingle();
+      const { data: mbData, error: mbErr } = await supabase.rpc("get_my_meta_balance");
 
-      const bal = Number(mb?.balance ?? 0);
+      // 返り値 shape 吸収（number / {balance} / {meta_balance} など）
+      let bal = 0;
+      if (!mbErr) {
+        if (typeof mbData === "number") bal = mbData;
+        else if (mbData && typeof mbData === "object") {
+          const anyData = mbData as any;
+          const v = anyData.balance ?? anyData.meta_balance ?? anyData.metaBalance ?? anyData.value ?? 0;
+          bal = Number(v);
+        } else {
+          bal = Number(mbData ?? 0);
+        }
+      }
 
       if (mbErr || !Number.isFinite(bal) || bal < requiredMeta) {
         await supabase
@@ -397,7 +407,7 @@ export async function POST(req: Request) {
           .update({
             status: "blocked",
             error_code: "need_meta",
-            error_message: "insufficient_meta_after_confirm",
+            error_message: mbErr ? "meta_balance_rpc_error" : "insufficient_meta_after_confirm",
             updated_at: new Date().toISOString(),
           })
           .eq("id", jobId);
@@ -428,7 +438,10 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: false, error: "story_card_fetch_failed" }, { status: 500 });
       }
       if (!card) {
-        return NextResponse.json({ ok: false, error: "not_found", message: "story card not found" }, { status: 404 });
+        return NextResponse.json(
+          { ok: false, error: "not_found", message: "story card not found" },
+          { status: 404 }
+        );
       }
 
       usedStoryCard = card;
@@ -460,7 +473,10 @@ export async function POST(req: Request) {
         })
         .eq("id", jobId);
 
-      return NextResponse.json({ ok: false, error: "openai_error", message: "ドラフト生成に失敗しました" }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: "openai_error", message: "ドラフト生成に失敗しました" },
+        { status: 500 }
+      );
     }
 
     const rewriteFull = String(boost.boost.rewrite ?? "").trim();
@@ -516,10 +532,7 @@ export async function POST(req: Request) {
           })
           .eq("id", jobId);
 
-        return NextResponse.json(
-          { ok: false, error: "need_meta", requiredMeta },
-          { status: 402 }
-        );
+        return NextResponse.json({ ok: false, error: "need_meta", requiredMeta }, { status: 402 });
       }
     }
 

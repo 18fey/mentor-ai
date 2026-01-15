@@ -217,30 +217,50 @@ export async function POST(req: Request) {
 
     // =========================
     // ✅ 1.5) confirm後の“最終防衛”：残高が足りないなら OpenAI を叩かない
+    //     残高参照を RPC get_my_meta_balance に統一（meta_lots 集計が真実）
     // =========================
     if (proceedMode === "need_meta" && metaConfirm) {
-      // ※ テーブル名/カラムはあなたの実DBに合わせて変更してOK
-      // 例: meta_balances(auth_user_id, balance)
-      const { data: mb, error: mbErr } = await supabaseAdmin
-        .from("meta_balances")
-        .select("balance")
-        .eq("auth_user_id", authUserId)
-        .maybeSingle();
+      const { data: mbData, error: mbErr } = await supabase.rpc("get_my_meta_balance");
 
-      const bal = Number(mb?.balance ?? 0);
+      // RPCの返り値 shape 吸収（number / {balance} / {meta_balance} 等）
+      let bal = 0;
+      if (!mbErr) {
+        if (typeof mbData === "number") {
+          bal = mbData;
+        } else if (mbData && typeof mbData === "object") {
+          const anyData = mbData as any;
+          const v =
+            anyData.balance ??
+            anyData.meta_balance ??
+            anyData.metaBalance ??
+            anyData.value ??
+            0;
+          bal = Number(v);
+        } else {
+          bal = Number(mbData ?? 0);
+        }
+      }
+
       if (mbErr || !Number.isFinite(bal) || bal < requiredMeta) {
         await supabase
           .from("generation_jobs")
           .update({
             status: "blocked",
             error_code: "need_meta",
-            error_message: "insufficient_meta_after_confirm",
+            error_message: mbErr
+              ? "meta_balance_rpc_error"
+              : "insufficient_meta_after_confirm",
             updated_at: new Date().toISOString(),
           })
           .eq("id", jobId);
 
         return NextResponse.json(
-          { ok: false, error: "need_meta", requiredMeta, balance: Number.isFinite(bal) ? bal : null },
+          {
+            ok: false,
+            error: "need_meta",
+            requiredMeta,
+            balance: Number.isFinite(bal) ? bal : null,
+          },
           { status: 402 }
         );
       }

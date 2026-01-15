@@ -117,6 +117,28 @@ async function getBalanceAdmin(authUserId: string): Promise<number> {
   return Number.isFinite(sum) ? sum : 0;
 }
 
+// ✅ growth_logs へ確実に入れる（RLSに詰まりやすいのでadminで）
+async function insertGrowthLogSafe(params: {
+  authUserId: string;
+  source: string;
+  title: string;
+  description?: string | null;
+  metadata?: any;
+}) {
+  const payload = {
+    user_id: params.authUserId,
+    source: params.source,
+    title: params.title,
+    description: params.description ?? null,
+    metadata: params.metadata ?? null,
+  };
+
+  const r = await supabaseAdmin.from("growth_logs").insert(payload);
+  if (r.error) {
+    console.error("growth_logs insert failed:", r.error);
+  }
+}
+
 export async function POST(req: Request) {
   const requestId = rid();
 
@@ -130,7 +152,7 @@ export async function POST(req: Request) {
 
     const supabase = await createSupabaseFromCookies();
 
-    // ✅ auth（caseと同じ）
+    // ✅ auth
     const { data: auth, error: authErr } = await supabase.auth.getUser();
     const user = auth?.user ?? null;
     if (authErr || !user?.id) {
@@ -138,7 +160,7 @@ export async function POST(req: Request) {
     }
     const authUserId = user.id;
 
-    // ✅ idempotency key（必須 / case と同じ）
+    // ✅ idempotency key（必須）
     const idempotencyKey =
       req.headers.get("x-idempotency-key") ||
       req.headers.get("X-Idempotency-Key") ||
@@ -151,7 +173,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // ✅ meta confirm（confirm 後だけ true / case と同じ）
+    // ✅ meta confirm（confirm 後だけ true）
     const metaConfirm =
       req.headers.get("x-meta-confirm") === "1" ||
       req.headers.get("X-Meta-Confirm") === "1";
@@ -182,7 +204,7 @@ export async function POST(req: Request) {
     }
 
     // =========================
-    // ✅ 0) generation_jobs lookup (idempotent)  ※caseと同じ
+    // ✅ 0) generation_jobs lookup (idempotent)
     // =========================
     const { data: existing, error: exErr } = await supabase
       .from("generation_jobs")
@@ -202,7 +224,7 @@ export async function POST(req: Request) {
     }
 
     // =========================
-    // ✅ 0.5) generation_jobs upsert running  ※caseと同じ
+    // ✅ 0.5) generation_jobs upsert running
     // =========================
     const jobRequest = {
       question,
@@ -241,7 +263,7 @@ export async function POST(req: Request) {
     const jobId = upserted.id as string;
 
     // =========================
-    // ✅ 1) usage/check（消費しない） ※caseと同じ
+    // ✅ 1) usage/check（消費しない）
     // =========================
     const baseUrl = new URL(req.url).origin;
     const cookieHeader = req.headers.get("cookie") ?? "";
@@ -267,7 +289,6 @@ export async function POST(req: Request) {
         requiredMeta = requiredMetaFromCheck;
         proceedMode = "need_meta";
 
-        // ❌ confirm前はここで止める（OpenAI叩かない / caseと同じ挙動）
         if (!metaConfirm) {
           await supabase
             .from("generation_jobs")
@@ -285,7 +306,6 @@ export async function POST(req: Request) {
           );
         }
 
-        // ✅ confirm後でも残高チェック（caseと同じ）
         const bal = await getBalanceAdmin(authUserId);
         if (bal < requiredMeta) {
           await supabase
@@ -303,7 +323,6 @@ export async function POST(req: Request) {
             { status: 402 }
           );
         }
-        // ✅ 残高OKなら続行（成功後に課金）
       } else if (checkRes.status === 401) {
         return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
       } else {
@@ -314,7 +333,6 @@ export async function POST(req: Request) {
       proceedMode = (checkBody?.mode as ProceedMode) ?? "free";
       requiredMeta = Number(checkBody?.requiredMeta ?? REQUIRED_META_DEFAULT);
 
-      // ✅ checkRes OKでも need_meta なら confirm無しは止める（caseと同じ）
       if (proceedMode === "need_meta" && !metaConfirm) {
         return NextResponse.json(
           { ok: false, error: "need_meta", requiredMeta },
@@ -322,7 +340,6 @@ export async function POST(req: Request) {
         );
       }
 
-      // ✅ confirmありでneed_metaなら、念のため残高チェック（caseと同じ）
       if (proceedMode === "need_meta" && metaConfirm) {
         const bal = await getBalanceAdmin(authUserId);
         if (bal < requiredMeta) {
@@ -335,7 +352,7 @@ export async function POST(req: Request) {
     }
 
     // =========================
-    // ✅ 2) OpenAI（必ずJSON） ※caseと同じ構造
+    // ✅ 2) OpenAI（必ずJSON）
     // =========================
     const system = `
 あなたはフェルミ推定の面接官。日本語で辛口だが建設的。
@@ -477,11 +494,12 @@ ${body.sanityComment || "(なし)"}
     };
 
     // =========================
-    // ✅ 3) fermi_sessions insert（任意 / case_logs と同じ位置）
+    // ✅ 3) fermi_sessions insert（確実に通す）
     // =========================
     let logId: string | number | null = null;
 
     try {
+      // ✅ 注意：fermi_sessions に job_id / idempotency_key の列が無いなら入れない
       const insertPayload: any = {
         user_id: authUserId,
         problem_id: body.problemId ?? null,
@@ -503,15 +521,16 @@ ${body.sanityComment || "(なし)"}
           sanityComment: body.sanityComment ?? null,
           result: body.result ?? null,
           feedback,
+          // ✅ 追跡したいなら payload 内に入れる（列増やさずOK）
+          jobId,
+          idempotencyKey,
         },
-
-        job_id: jobId,
-        idempotency_key: idempotencyKey,
       };
 
       let ins = await supabase.from("fermi_sessions").insert(insertPayload).select("id").single();
       if (ins.error) {
         ins = await supabaseAdmin.from("fermi_sessions").insert(insertPayload).select("id").single();
+        if (ins.error) console.error(`[fermi:${requestId}] fermi_sessions insert error`, ins.error);
       }
       if (ins.data?.id) logId = ins.data.id;
     } catch (e) {
@@ -519,7 +538,7 @@ ${body.sanityComment || "(なし)"}
     }
 
     // =========================
-    // ✅ 4) generation_jobs result保存（caseと同じ）
+    // ✅ 4) generation_jobs result保存
     // =========================
     const result: FermiEvalResult = {
       score,
@@ -544,7 +563,28 @@ ${body.sanityComment || "(なし)"}
     }
 
     // =========================
-    // ✅ 5) 成功後だけ課金（caseと同じ）
+    // ✅ 4.5) growth_logs（成功後に必ず）
+    // =========================
+    await insertGrowthLogSafe({
+  authUserId,
+  source: "fermi",
+  title: "フェルミ推定：評価完了",
+  description: `お題：${String(question).slice(0, 48)}\nスコア：${totalScore}/50`,
+  metadata: {
+    jobId,
+    idempotencyKey,
+    logId,
+    problem_id: body.problemId ?? null,
+    category: body.category ?? null,
+    difficulty: body.difficulty ?? null,
+    totalScore,
+    proceedMode,
+  },
+});
+
+
+    // =========================
+    // ✅ 5) 成功後だけ課金
     // =========================
     if (proceedMode === "free") {
       await fetch(`${baseUrl}/api/usage/log`, {
@@ -558,7 +598,6 @@ ${body.sanityComment || "(なし)"}
         p_cost: requiredMeta,
       });
 
-      // ✅ caseと同じ：課金失敗しても「評価結果」は返す（ただしログに残す）
       if (consumeErr) {
         await supabase
           .from("generation_jobs")

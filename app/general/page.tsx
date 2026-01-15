@@ -10,12 +10,13 @@ import { createBrowserClient } from "@supabase/ssr";
 import type { TopicType } from "@/lib/types/story";
 
 /**
- * ✅ 完成版方針（このページ内で完結）
- * - UI：localStorage で last_job / draft を保持し、リロード・戻る・再訪問でも復帰
- * - 評価API：/api/interview-eval は generation_jobs + idempotency + metaConfirm 二段階（402 → confirm → X-Meta-Confirm:1）
- * - 開始：/api/usage/check で「開始可否の真実」を取得（開始自体は消費しない）。need_meta なら購入導線
- * - エラー：課金や二重実行は API 側の idempotency + 失敗時非消費で担保
- * - 入力条件変更（persona/topic 変更）：混線防止のため last_job / draft を削除
+ * ✅ 方針（CaseInterviewAI と同じ形に寄せる）
+ * - 「開始」は消費しない（usage/check で開始可否だけ確認し、OKなら即開始）
+ * - 「評価」完了時だけ消費（/api/interview-eval が job化 + 成功後消費）
+ * - MetaConfirmModal は 1つだけ（評価APIで 402 need_meta のときだけ出す）
+ * - UI：localStorage で last_job / draft を保持して復帰
+ * - エラー時：復帰ボタン / 再実行ボタン（ジョブ方式）
+ * - persona/topic 変更：混線防止で last_job / draft を削除
  */
 
 type QA = { question: string; answer: string };
@@ -126,12 +127,12 @@ async function fetchMyMetaBalance(): Promise<number | null> {
 
 /**
  * ✅ 開始時のチェック（消費はしない）
- * - feature は必須
- * - requiredMeta も送っておく（API側の判定材料/将来互換）
+ * - 「開始」は通してOK（評価時に消費）
+ * - ただし free枠/権限などの “開始可否” は usage/check を信じる
  */
 async function callUsageCheckClient(): Promise<
   | { ok: true; mode: ProceedMode; requiredMeta: number; balance: number | null }
-  | { ok: false; status: number; requiredMeta: number; balance: number | null }
+  | { ok: false; status: number; requiredMeta: number; balance: number | null; reason?: string }
 > {
   try {
     const res = await fetch("/api/usage/check", {
@@ -145,18 +146,19 @@ async function callUsageCheckClient(): Promise<
 
     const data = (await res.json().catch(() => ({}))) as Partial<UsageCheckOK | UsageCheckNeedMeta>;
 
+    // need_meta は「評価時に必要」なので開始は許可してよい（ただしここでは情報として返す）
     if (res.status === 402 || (data as any)?.error === "need_meta") {
       const requiredMeta =
         Number((data as any)?.requiredMeta ?? (data as any)?.required ?? EVAL_REQUIRED_META) || EVAL_REQUIRED_META;
       const balance = Number.isFinite(Number((data as any)?.balance)) ? Number((data as any)?.balance) : null;
-      return { ok: false, status: 402, requiredMeta, balance };
+      return { ok: false, status: 402, requiredMeta, balance, reason: "need_meta" };
     }
 
     if (!res.ok) {
       const requiredMeta =
         Number((data as any)?.requiredMeta ?? (data as any)?.required ?? EVAL_REQUIRED_META) || EVAL_REQUIRED_META;
       const balance = Number.isFinite(Number((data as any)?.balance)) ? Number((data as any)?.balance) : null;
-      return { ok: false, status: res.status || 500, requiredMeta, balance };
+      return { ok: false, status: res.status || 500, requiredMeta, balance, reason: "server_error" };
     }
 
     const mode = ((data as any)?.mode as ProceedMode) || "free";
@@ -167,7 +169,7 @@ async function callUsageCheckClient(): Promise<
     return { ok: true, mode, requiredMeta, balance };
   } catch (e) {
     console.error("callUsageCheckClient failed:", e);
-    return { ok: false, status: 500, requiredMeta: EVAL_REQUIRED_META, balance: null };
+    return { ok: false, status: 500, requiredMeta: EVAL_REQUIRED_META, balance: null, reason: "network_error" };
   }
 }
 
@@ -221,10 +223,7 @@ export default function InterviewPage() {
 
   const supabase = useMemo(
     () =>
-      createBrowserClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-      ),
+      createBrowserClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!),
     []
   );
 
@@ -256,24 +255,58 @@ export default function InterviewPage() {
   const [isCreatingCard, setIsCreatingCard] = useState(false);
   const [createMessage, setCreateMessage] = useState<string | null>(null);
 
-  // ✅ meta不足時の導線（評価APIで402になった時）
+  // ✅ 402 need_meta の表示（評価で必要になった時）
   const [needMeta, setNeedMeta] = useState<number | null>(null);
 
-  // ✅ 開始モーダル（開始時は消費しない：チェック結果に応じて表示だけ変える）
-  const [metaModalOpen, setMetaModalOpen] = useState(false);
-  const [metaBalance, setMetaBalance] = useState<number | null>(null);
-  const [metaMode, setMetaMode] = useState<"confirm" | "purchase">("confirm");
-  const [startDisplayRequiredMeta, setStartDisplayRequiredMeta] = useState<number>(0);
-  const pendingStartRef = useRef<null | (() => void)>(null);
+  // ✅ 「開始時」チェック情報（表示だけ・開始は通す）
+  const [startNotice, setStartNotice] = useState<string | null>(null);
 
-  // ✅ 評価API 402用（ジョブ方式）
-  const [evalMetaModalOpen, setEvalMetaModalOpen] = useState(false);
-  const [evalMetaMode, setEvalMetaMode] = useState<"confirm" | "purchase">("confirm");
-  const [evalRequiredMeta, setEvalRequiredMeta] = useState<number>(EVAL_REQUIRED_META);
+  // ✅ 評価ジョブ key
   const evalIdempotencyKeyRef = useRef<string | null>(null);
-  const evalConfirmTriedRef = useRef(false);
 
   const logRef = useRef<HTMLDivElement | null>(null);
+
+  // ✅ MetaConfirmModal（評価だけで使う / 1個だけ）
+  const [metaModalOpen, setMetaModalOpen] = useState(false);
+  const [metaBalance, setMetaBalance] = useState<number | null>(null);
+  const [metaNeed, setMetaNeed] = useState<number>(EVAL_REQUIRED_META);
+  const [metaMode, setMetaMode] = useState<"confirm" | "purchase">("confirm");
+  const [metaTitle, setMetaTitle] = useState<string | undefined>(undefined);
+  const [metaMessage, setMetaMessage] = useState<string | undefined>(undefined);
+  const [pendingAction, setPendingAction] = useState<null | (() => Promise<void>)>(null);
+
+  const closeMetaModal = () => {
+    setMetaModalOpen(false);
+    setMetaTitle(undefined);
+    setMetaMessage(undefined);
+    setPendingAction(null);
+  };
+
+  const openMetaModalFor = async (params: { requiredMeta: number; onProceed: () => Promise<void> }) => {
+    const { requiredMeta, onProceed } = params;
+
+    const b = await fetchMyMetaBalance();
+    setMetaNeed(requiredMeta);
+    setMetaBalance(typeof b === "number" ? b : null);
+
+    const mode: "confirm" | "purchase" = typeof b === "number" && b < requiredMeta ? "purchase" : "confirm";
+    setMetaMode(mode);
+
+    setMetaTitle(mode === "purchase" ? "METAが不足しています" : "METAの確認");
+    setMetaMessage(
+      mode === "purchase"
+        ? `この評価を実行するには META が ${requiredMeta} 必要です。購入して続行してください。`
+        : `この評価の実行には META を ${requiredMeta} 消費します。続行しますか？`
+    );
+
+    setPendingAction(() => async () => {
+      await onProceed();
+      const bb = await fetchMyMetaBalance();
+      if (typeof bb === "number") setMetaBalance(bb);
+    });
+
+    setMetaModalOpen(true);
+  };
 
   // ------------------------------
   // localStorage helpers
@@ -296,13 +329,13 @@ export default function InterviewPage() {
       return null;
     }
   };
+
   // ✅ 評価を「再実行」するために、ジョブ紐づけを捨てて新規評価にする
- const resetEvaluationJob = () => {
-   clearLastJob(); // last_job を消す（復帰対象を消す）
-   evalIdempotencyKeyRef.current = null; // 新しい key で新ジョブを作る
-   evalConfirmTriedRef.current = false;
-  setEvaluation(null);
-   setNeedMeta(null);
+  const resetEvaluationJob = () => {
+    clearLastJob();
+    evalIdempotencyKeyRef.current = null;
+    setEvaluation(null);
+    setNeedMeta(null);
   };
 
   const clearDraft = () => {
@@ -328,10 +361,10 @@ export default function InterviewPage() {
     clearLastJob();
     clearDraft();
     evalIdempotencyKeyRef.current = null;
-    evalConfirmTriedRef.current = false;
     setEvaluation(null);
     setError(null);
     setNeedMeta(null);
+    setStartNotice(null);
   };
 
   // ------------------------------
@@ -484,7 +517,6 @@ export default function InterviewPage() {
       await new Promise((r) => setTimeout(r, sleepMs));
     }
 
-    // タイムアウト（復帰はできるので強くエラーにはしない）
     setError("評価の作成に時間がかかっています。しばらくしてから再読み込みしてください（復帰できます）。");
     setStep("evaluating");
   };
@@ -533,14 +565,9 @@ export default function InterviewPage() {
   }, [authChecked]);
 
   // ------------------------------
-  // 面接の開始（消費しない）
+  // 面接の開始（消費しない / モーダル無し）
   // ------------------------------
   const startInterviewCore = () => {
-    if (!authChecked || !userId) {
-      router.push("/auth");
-      return;
-    }
-
     resetPersistenceForInputChange();
 
     setQAList([]);
@@ -565,74 +592,27 @@ export default function InterviewPage() {
 
     setError(null);
     setNeedMeta(null);
+    setStartNotice(null);
 
-    // ✅ まず usage/check（開始できるか？の真実）
     const check = await callUsageCheckClient();
 
-    // 表示用残高：checkに入ってたらそれ優先 / 無ければ balance API
-    let displayBalance: number | null = null;
-    if (check.ok || (!check.ok && check.status === 402)) displayBalance = check.balance ?? null;
-    if (displayBalance == null) displayBalance = await fetchMyMetaBalance();
-    setMetaBalance(displayBalance);
-
-    // ✅ need_meta のときだけ購入導線
-    if (!check.ok && check.status === 402) {
-      setMetaMode("purchase");
-      setStartDisplayRequiredMeta(check.requiredMeta || EVAL_REQUIRED_META);
-      pendingStartRef.current = null;
-      setMetaModalOpen(true);
-      return;
-    }
-
-    // usage/check が死んでる：真実が取れないので開始は止める（安全側）
-    if (!check.ok) {
+    // ✅ usage/check が死んでる：開始は止める（安全側）
+    if (!check.ok && check.status !== 402) {
       setError("回数確認に失敗しました。通信環境を確認して、もう一度お試しください。");
       return;
     }
 
-    // ✅ free/unlimited なら開始はMETA不要（評価時のみ消費）
-    if (check.mode === "free" || check.mode === "unlimited") {
-      setMetaMode("confirm");
-      setStartDisplayRequiredMeta(0); // ← 無料/無制限なら0（開始は消費しない）
-      pendingStartRef.current = () => startInterviewCore();
-      setMetaModalOpen(true);
-      return;
+    // ✅ need_meta でも「開始」は通す（評価時にだけ必要）
+    if (!check.ok && check.status === 402) {
+      setStartNotice(`この面接は開始できます。評価を実行するには META が ${check.requiredMeta} 必要です。`);
     }
 
-    // ✅ 万一 mode: need_meta が ok:true で返る実装でも、購入導線に倒す
-    if (check.mode === "need_meta") {
-      setMetaMode("purchase");
-      setStartDisplayRequiredMeta(check.requiredMeta || EVAL_REQUIRED_META);
-      pendingStartRef.current = null;
-      setMetaModalOpen(true);
-      return;
-    }
-
-    // フォールバック（基本ここには来ない）
-    setMetaMode("confirm");
-    setStartDisplayRequiredMeta(0);
-    pendingStartRef.current = () => startInterviewCore();
-    setMetaModalOpen(true);
+    startInterviewCore();
   };
-
-  const closeMetaModal = () => setMetaModalOpen(false);
 
   // ------------------------------
   // 評価（ジョブ方式）
   // ------------------------------
-  const openEvalMetaModal = async (required: number) => {
-    setEvalRequiredMeta(required);
-
-    const b = await fetchMyMetaBalance();
-    setMetaBalance(b);
-
-    // 402 を一回踏んだら confirm → purchase の二段階。2回目以降は purchase を先に見せる
-    setEvalMetaMode(evalConfirmTriedRef.current ? "purchase" : "confirm");
-    setEvalMetaModalOpen(true);
-  };
-
-  const closeEvalMetaModal = () => setEvalMetaModalOpen(false);
-
   const runEvaluation = async (finishedList: QA[], opts?: { metaConfirm?: boolean }) => {
     try {
       setStep("evaluating");
@@ -660,7 +640,7 @@ export default function InterviewPage() {
         headers,
         body: JSON.stringify({
           idempotencyKey: key,
-          featureId: FEATURE_ID, // ✅ API側で参照するなら送る（無視されてもOK）
+          featureId: FEATURE_ID,
           persona_id: personaId,
           qaList: finishedList,
           topic: topicLabel,
@@ -668,13 +648,23 @@ export default function InterviewPage() {
         }),
       });
 
+      // ✅ need_meta → モーダル1つで confirm/purchase を出し分け
       if (res.status === 402) {
         const data = await res.json().catch(() => ({}));
         const required =
           Number((data as any)?.requiredMeta ?? (data as any)?.required ?? EVAL_REQUIRED_META) || EVAL_REQUIRED_META;
 
         setNeedMeta(required);
-        await openEvalMetaModal(required);
+
+        await openMetaModalFor({
+          requiredMeta: required,
+          onProceed: async () => {
+            // confirm したら同じ key で metaConfirm 再実行
+            closeMetaModal();
+            await runEvaluation(finishedList, { metaConfirm: true });
+          },
+        });
+
         return;
       }
 
@@ -709,7 +699,6 @@ export default function InterviewPage() {
         return;
       }
 
-      // フォールバック：念のため
       await pollJobUntilDone(key);
     } catch (e: any) {
       console.error(e);
@@ -717,23 +706,6 @@ export default function InterviewPage() {
       setStep("finished");
       scrollToBottom();
     }
-  };
-
-  const retryEvaluationWithMetaConfirm = async () => {
-    const key = evalIdempotencyKeyRef.current;
-    if (!key) return;
-
-    evalConfirmTriedRef.current = true;
-    setEvalMetaModalOpen(false);
-
-    const finishedList = qaList;
-    if (!finishedList.length) {
-      setError("Q&Aログが復元できませんでした。もう一度面接を実施してください。");
-      setStep("finished");
-      return;
-    }
-
-    await runEvaluation(finishedList, { metaConfirm: true });
   };
 
   // ------------------------------
@@ -860,61 +832,42 @@ export default function InterviewPage() {
   }, [step]);
 
   const isLocked = step !== "idle" && step !== "finished";
+  const canRetryEval = qaList.length >= MAX_Q && !evaluation;
+  const lastJobKey = loadLastJob()?.key || null;
 
   return (
     <div className="px-10 py-8 space-y-8">
-      {/* ✅ 開始時：消費しない。無料/無制限なら META 不要 を自然に表示 */}
+      {/* ✅ 評価時だけ使う MetaConfirmModal（1つだけ） */}
       <MetaConfirmModal
         open={metaModalOpen}
         onClose={closeMetaModal}
         featureLabel={FEATURE_LABEL}
-        requiredMeta={startDisplayRequiredMeta} // ★無料/無制限なら0
+        requiredMeta={metaNeed}
         balance={metaBalance}
         mode={metaMode}
-        title={metaMode === "purchase" ? "METAが不足しています" : "面接を開始しますか？"}
-        message={
-          metaMode === "purchase"
-            ? `この機能の「評価」を実行するには META が ${
-                startDisplayRequiredMeta || EVAL_REQUIRED_META
-              } 必要です。購入して続行してください。`
-            : `開始に META は不要です。10問終了後の「評価」を実行する際に META を ${EVAL_REQUIRED_META} 消費します。`
-        }
-        confirmLabel="開始する"
-        cancelLabel="キャンセル"
-        purchaseLabel="METAを購入する"
-        onConfirm={() => {
-          setMetaModalOpen(false);
-          const fn = pendingStartRef.current;
-          pendingStartRef.current = null;
-          fn?.();
-        }}
-        onPurchase={() => {
-          setMetaModalOpen(false);
-          pendingStartRef.current = null;
-          router.push("/pricing");
-        }}
-      />
-
-      {/* ✅ 評価時：402 need_meta（confirm/purchase 二段階） */}
-      <MetaConfirmModal
-        open={evalMetaModalOpen}
-        onClose={closeEvalMetaModal}
-        featureLabel={FEATURE_LABEL}
-        requiredMeta={evalRequiredMeta}
-        balance={metaBalance}
-        mode={evalMetaMode}
-        title={evalMetaMode === "purchase" ? "METAが不足しています" : "METAの確認"}
-        message={
-          evalMetaMode === "purchase"
-            ? `この評価を実行するには META が ${evalRequiredMeta} 必要です。購入して続行してください。`
-            : `この評価の実行には META を ${evalRequiredMeta} 消費します。続行しますか？`
-        }
+        title={metaTitle}
+        message={metaMessage}
         confirmLabel="続行する"
         cancelLabel="キャンセル"
         purchaseLabel="METAを購入する"
-        onConfirm={retryEvaluationWithMetaConfirm}
+        onConfirm={async () => {
+          const required = metaNeed;
+          const latest = await fetchMyMetaBalance();
+          if (typeof latest === "number") setMetaBalance(latest);
+
+          if (typeof latest === "number" && latest < required) {
+            closeMetaModal();
+            router.push("/pricing");
+            return;
+          }
+
+          const fn = pendingAction;
+          closeMetaModal();
+          if (!fn) return;
+          await fn();
+        }}
         onPurchase={() => {
-          setEvalMetaModalOpen(false);
+          closeMetaModal();
           router.push("/pricing");
         }}
       />
@@ -942,6 +895,11 @@ export default function InterviewPage() {
               <p className="text-[11px] text-slate-500">
                 「面接官の質問」⇒「あなたが話す」⇒「AIが解析＆評価」という流れで、10問分のやりとりを一気に練習できます。
               </p>
+              {startNotice && (
+                <p className="mt-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2">
+                  {startNotice}
+                </p>
+              )}
             </div>
 
             <div className="flex flex-col items-start md:items-end gap-2">
@@ -1073,15 +1031,51 @@ export default function InterviewPage() {
             </div>
           )}
 
-          {step === "evaluating" && (
-            <p className="text-[11px] text-slate-500 pt-2">
-              AI が10問分の回答をまとめて解析し、評価を作成しています…（通信が切れても復帰できます）
-            </p>
+                    {step === "evaluating" && (
+            <div className="pt-2 space-y-2">
+              <p className="text-[11px] text-slate-500">
+                AI が10問分の回答をまとめて解析し、評価を作成しています…（通信が切れても復帰できます）
+              </p>
+
+              {/* ✅ evaluating中でも救済ボタンを出す */}
+              {canRetryEval && (
+                <div className="flex flex-col gap-2">
+                  {lastJobKey && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!lastJobKey) return;
+                        setError(null);
+                        setStep("evaluating");
+                        await pollJobUntilDone(lastJobKey);
+                      }}
+                      className="rounded-full bg-slate-700 text-white text-xs px-4 py-2 hover:bg-slate-800"
+                    >
+                      評価の復帰を試す
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      resetEvaluationJob();
+                      setError(null);
+                      await runEvaluation(qaList);
+                    }}
+                    className="rounded-full bg-sky-600 text-white text-xs px-4 py-2 hover:bg-sky-700"
+                  >
+                    評価を再実行する
+                  </button>
+                </div>
+              )}
+            </div>
           )}
+
 
           {error && (
             <div className="mt-2 space-y-2">
               <p className="text-[11px] text-red-500 bg-red-50 rounded-xl px-3 py-2">{error}</p>
+
               {needMeta != null && (
                 <button
                   type="button"
@@ -1093,37 +1087,36 @@ export default function InterviewPage() {
               )}
 
               {/* ✅ 同じジョブの「復帰」を試す（last_job がある場合） */}
-{loadLastJob()?.key && (
-  <button
-    type="button"
-    onClick={async () => {
-      const lj = loadLastJob();
-      if (!lj?.key) return;
-      setError(null);
-      setStep("evaluating");
-      await pollJobUntilDone(lj.key);
-    }}
-    className="rounded-full bg-slate-700 text-white text-xs px-4 py-2 hover:bg-slate-800"
-  >
-    評価の復帰を試す
-  </button>
-)}
+              {loadLastJob()?.key && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const lj = loadLastJob();
+                    if (!lj?.key) return;
+                    setError(null);
+                    setStep("evaluating");
+                    await pollJobUntilDone(lj.key);
+                  }}
+                  className="rounded-full bg-slate-700 text-white text-xs px-4 py-2 hover:bg-slate-800"
+                >
+                  評価の復帰を試す
+                </button>
+              )}
 
-{/* ✅ 新しいジョブで「評価を再実行」する（fetch failed / failed 対策の本命） */}
-{qaList.length >= MAX_Q && !evaluation && (
-  <button
-    type="button"
-    onClick={async () => {
-      resetEvaluationJob();
-      setError(null);
-      await runEvaluation(qaList);
-    }}
-    className="rounded-full bg-sky-600 text-white text-xs px-4 py-2 hover:bg-sky-700"
-  >
-    評価を再実行する
-  </button>
-)}
-
+              {/* ✅ 新しいジョブで「評価を再実行」する */}
+              {qaList.length >= MAX_Q && !evaluation && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    resetEvaluationJob();
+                    setError(null);
+                    await runEvaluation(qaList);
+                  }}
+                  className="rounded-full bg-sky-600 text-white text-xs px-4 py-2 hover:bg-sky-700"
+                >
+                  評価を再実行する
+                </button>
+              )}
             </div>
           )}
         </div>
