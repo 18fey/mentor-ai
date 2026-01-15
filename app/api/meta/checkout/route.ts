@@ -114,7 +114,8 @@ export async function POST(req: Request) {
           user_agent: userAgent,
           metadata: { pack, meta_amount: cfg.amount },
         },
-        { onConflict: "user_id,policy_key,version" }
+        { onConflict: "user_id,policy_key,version",ignoreDuplicates: true, }
+        
       );
 
     if (accErr) {
