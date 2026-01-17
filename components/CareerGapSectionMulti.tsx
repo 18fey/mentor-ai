@@ -24,13 +24,14 @@ type GateLike = {
   status?: number;
   error?: string;
   message?: string;
-
   feature?: string;
-  requiredMeta?: number;
-  balance?: number | null;
 
-  // あっても無くてもOK（互換）
-  cost?: number;
+  // ✅ career-gap で返ってくる可能性があるキーに全部対応
+  reason?: string; // "insufficient_meta" など
+  required?: number; // ← スクショの required: 3
+  requiredMeta?: number; // 互換
+  cost?: number; // 互換
+  balance?: number | null;
 };
 
 export const CareerGapSectionMulti: React.FC<Props> = ({
@@ -55,10 +56,13 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
 
   // ✅ Meta消費確認モーダル
   const [metaConfirmOpen, setMetaConfirmOpen] = useState(false);
-  const [metaRequired, setMetaRequired] = useState<number>(1);
+  const [metaRequired, setMetaRequired] = useState<number>(0);
   const [metaBalance, setMetaBalance] = useState<number | null>(null);
   const [metaMessage, setMetaMessage] = useState<string>(
     "Deep版はMETAを消費して生成します。よろしければ続行してください。"
+  );
+  const [metaModalMode, setMetaModalMode] = useState<"confirm" | "purchase">(
+    "confirm"
   );
 
   // ✅ 前回結果情報（任意表示用）
@@ -121,7 +125,8 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
     };
   }, []);
 
-  const run = async (mode: Mode) => {
+  // ✅ confirmed=true のときだけ X-Meta-Confirm: 1 を付けて再実行
+  const run = async (mode: Mode, confirmed: boolean = false) => {
     setLoadingMode(mode);
     setError(null);
 
@@ -152,7 +157,10 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
 
       const res = await fetch("/api/career-gap", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(confirmed ? { "X-Meta-Confirm": "1" } : {}),
+        },
         body: JSON.stringify(payload),
       });
 
@@ -161,18 +169,32 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
         return;
       }
 
-      // ✅ 402: gateからの応答（need_meta / confirm_needed など）
+      // ✅ 402: gateからの応答（insufficient_meta / confirm_needed など）
       if (res.status === 402) {
         const gate = (await res.json().catch(() => null)) as GateLike | null;
 
-        const required =
-          (gate?.requiredMeta ?? gate?.cost ?? 1) as number;
-        const balance =
-          (gate?.balance ?? null) as number | null;
+        const required = Number(
+          gate?.required ?? gate?.requiredMeta ?? gate?.cost ?? 0
+        );
+        const balance = (gate?.balance ?? null) as number | null;
+        const reason = gate?.reason ?? "";
 
-        // まずは「確認」モーダルを出す（他機能と同じUX）
         setMetaRequired(required);
         setMetaBalance(balance);
+
+        // ✅ 不足時は購入モード
+        if (reason === "insufficient_meta") {
+          setMetaModalMode("purchase");
+          setMetaMessage(
+            gate?.message ||
+              `この実行には META が ${required} 必要です。購入して続行してください。`
+          );
+          setMetaConfirmOpen(true);
+          return;
+        }
+
+        // ✅ それ以外（確認が必要など）は confirm モード
+        setMetaModalMode("confirm");
         setMetaMessage(
           gate?.message ||
             "Deep版はMETAを消費して生成します。よろしければ続行してください。"
@@ -233,7 +255,6 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
             して、勝ち筋と3ヶ月アクションまで落とし込みます。
           </p>
 
-          {/* 任意：前回結果の情報 */}
           {(lastMode || lastUpdatedAt) && (
             <p className="mt-2 text-[11px] text-slate-400">
               前回：{lastMode ?? "-"} / {lastUpdatedAt ?? "-"}
@@ -267,9 +288,7 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
               </option>
             ))}
           </select>
-          <p className="text-[11px] text-slate-400">
-            ライト版はこの1業界だけでOK
-          </p>
+          <p className="text-[11px] text-slate-400">ライト版はこの1業界だけでOK</p>
         </div>
 
         <div className="space-y-1">
@@ -354,9 +373,7 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
               />
             )}
           </div>
-          <p className="text-[11px] text-slate-400">
-            Deepは最大3業界まで比較OK
-          </p>
+          <p className="text-[11px] text-slate-400">Deepは最大3業界まで比較OK</p>
         </div>
       </div>
 
@@ -372,9 +389,7 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
             value={userReason}
             onChange={(e) => setUserReason(e.target.value)}
           />
-          <p className="text-[11px] text-slate-400">
-            1行でもOK。書くほど精度が上がります
-          </p>
+          <p className="text-[11px] text-slate-400">1行でもOK。書くほど精度が上がります</p>
         </div>
 
         <div className="space-y-1">
@@ -437,11 +452,8 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
                 armDeep();
                 return;
               }
-              // ✅ ここで MetaConfirmModal を開く（requiredMeta/balanceは一旦未確定なので仮値）
-              setMetaRequired(3);
-              setMetaBalance(null);
-              setMetaMessage("Deep版はMETAを消費して生成します。よろしければ続行してください。");
-              setMetaConfirmOpen(true);
+              // ✅ 先にAPI叩いて gate(402)で purchase/confirm を出し分ける
+              run("deep");
             }}
             className="mt-3 inline-flex w-full items-center justify-center rounded-full bg-sky-600 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-sky-700 disabled:opacity-60"
           >
@@ -453,7 +465,7 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
           </button>
 
           <p className="mt-2 text-[11px] text-sky-700/80">
-            ※ Deepを押す前に「META消費の確認」が出ます
+            ※ Deepを押すと必要に応じて「META消費の確認 / 購入導線」が出ます
           </p>
         </div>
       </div>
@@ -489,15 +501,16 @@ export const CareerGapSectionMulti: React.FC<Props> = ({
         message={metaMessage}
         requiredMeta={metaRequired}
         balance={metaBalance}
-        mode="confirm"
+        mode={metaModalMode}
         confirmLabel="METAを使って続行"
         cancelLabel="やめる"
+        purchaseLabel="METAを購入する"
         onConfirm={() => {
           setMetaConfirmOpen(false);
-          run("deep");
+          // ✅ confirm 済みで再実行（X-Meta-Confirm: 1）
+          run("deep", true);
         }}
         onPurchase={() => {
-          // 既存の購入導線へ
           window.location.href = "/pricing#meta";
         }}
       />
