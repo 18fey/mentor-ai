@@ -13,7 +13,16 @@ export default function PricingPage() {
   // ✅ 追加：購入前同意（Meta / Pro 共通で使えるが、まずはMetaで効かせる）
   const [agree, setAgree] = useState(false);
 
+  // ✅ ローンチ段階：Meta課金のみ（Proは準備中）
+  const PRO_COMING_SOON = true;
+
   const handleBuyPro = async (plan: ProPlan = "pro") => {
+    // ✅ 準備中は購入できない（フロントでブロック）
+    if (PRO_COMING_SOON) {
+      alert("Proプランは現在準備中です。公開までお待ちください。");
+      return;
+    }
+
     try {
       setLoadingPro(plan);
 
@@ -55,7 +64,7 @@ export default function PricingPage() {
       const res = await fetch("/api/meta/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pack , agree}),
+        body: JSON.stringify({ pack, agree }),
       });
 
       if (!res.ok) {
@@ -87,53 +96,66 @@ export default function PricingPage() {
         <p className="mt-2 text-sm text-slate-600">
           Mentor.AI は、まずは無料のライト版でお試しいただけます。より深い診断や
           Deepレポートを利用したい方は、Metaコインをご購入ください。
+          {PRO_COMING_SOON ? "（※Proは現在準備中です）" : ""}
         </p>
       </section>
 
       <section className="grid gap-6 md:grid-cols-3">
         {/* Free */}
-        <div className="rounded-2xl border border-slate-100 bg-white/80 p-6 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
-            Free
-          </p>
-          <p className="mt-2 text-2xl font-bold text-slate-900">¥0</p>
-          <p className="mt-1 text-xs text-slate-600">
-            まずはお試しで。16タイプ診断のライト版や基本機能を利用できます。
-          </p>
-          <ul className="mt-4 space-y-2 text-xs text-slate-700">
-            <li>・16タイプ診断（ライト版）</li>
-            <li>・業界マッチ（ライト版）</li>
-            <li>・ES添削 / 面接AI は回数制限付き</li>
-          </ul>
-        </div>
+<div className="rounded-2xl border border-slate-100 bg-white/80 p-6 shadow-sm">
+  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
+    Free
+  </p>
+  <p className="mt-2 text-2xl font-bold text-slate-900">¥0</p>
+  <p className="mt-1 text-xs text-slate-600">
+    まずは無料で体験。毎月の無料枠の範囲で、主要機能をご利用いただけます。
+  </p>
 
-        {/* Pro */}
-        <div className="rounded-2xl border border-sky-200 bg-sky-50/80 p-6 shadow-sm">
+  <ul className="mt-4 space-y-2 text-xs text-slate-700">
+    <li>・ケース面接AI：毎月 3 回まで</li>
+    <li>・ケース生成：毎月 4 回まで</li>
+    <li>・フェルミ推定AI：毎月 3 回まで</li>
+    <li>・フェルミ生成：毎月 4 回まで</li>
+    <li>・一般面接（10問）：毎月 1 回まで</li>
+    <li>・AI思考トレーニング：毎月 3 回まで</li>
+    <li>・ES添削：毎月 3 回まで</li>
+    <li>・業界インサイト：毎月 3 回まで</li>
+  </ul>
+
+  <p className="mt-4 text-[11px] text-slate-500">
+    ※無料枠は毎月リセットされます。
+  </p>
+</div>
+
+
+        {/* Pro (Coming Soon) */}
+        <div className="relative rounded-2xl border border-sky-200 bg-sky-50/80 p-6 shadow-sm">
+          <div className="absolute right-4 top-4 rounded-full bg-white/80 px-3 py-1 text-[11px] font-semibold text-sky-700 shadow-sm">
+            準備中
+          </div>
+
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-600">
             Pro
           </p>
-          <p className="mt-2 text-2xl font-bold text-slate-900">¥3980 / 月</p>
-          <p className="mt-1 text-xs text-slate-600">
-            月額サブスクで、Deep機能や保存機能をほぼ無制限に利用できるプランです。
-          </p>
+          <p className="mt-2 text-2xl font-bold text-slate-900">—</p>
 
-          <ul className="mt-4 space-y-2 text-xs text-slate-700">
-            <li>・Deepレポートの読み放題</li>
-            <li>・ES添削 / 面接AIの上限UP</li>
-            <li>・成長ログ（Growth Inbox）の解放</li>
-          </ul>
+          {/* ✅ 箇条書きは一旦削除して、将来の方針だけ記載 */}
+          <p className="mt-1 text-xs text-slate-600">
+            月額で <span className="font-semibold">全機能を無制限</span> に使っていただけるプランとして提供予定です。
+            生成結果の保存機能なども含めて、現在準備を進めています。
+          </p>
 
           <button
             type="button"
             onClick={() => handleBuyPro("pro")}
-            disabled={isAnyLoading}
-            className="mt-5 w-full rounded-full bg-sky-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-sky-700 disabled:opacity-60"
+            disabled
+            className="mt-5 w-full cursor-not-allowed rounded-full bg-sky-600 px-4 py-2 text-xs font-semibold text-white shadow-sm opacity-60"
           >
-            {loadingPro === "pro" ? "生成中…" : "Pro を購入する"}
+            Coming soon
           </button>
 
           <p className="mt-3 text-[11px] text-slate-500">
-            決済には Stripe を利用します。支払い完了後、自動的に Pro が反映されます（Webhook 連携）。
+            公開後にご案内します。
           </p>
         </div>
 
@@ -217,7 +239,6 @@ export default function PricingPage() {
       </section>
 
       <section className="mt-10 text-[11px] text-slate-500">
-        <p>※表記の金額は現時点の想定です。実際の価格は運用時に調整してください。</p>
         <p>※購入にはログインが必要です。未ログインの場合は途中でログイン画面に遷移します。</p>
         <p className="mt-2">
           関連ページ：{" "}

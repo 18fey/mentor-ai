@@ -28,7 +28,17 @@ function createMiddlewareSupabase(req: NextRequest, res: NextResponse) {
 }
 
 export async function proxy(req: NextRequest) {
-  const { pathname } = req.nextUrl;
+  const { pathname, search } = req.nextUrl;
+
+  // ✅ DEBUG: リクエスト到達確認（Vercelでも出るはず）
+  const host = req.headers.get("host");
+  const proto = req.headers.get("x-forwarded-proto") ?? "unknown";
+  console.log("[proxy middleware] request", {
+    pathname,
+    search,
+    host,
+    proto,
+  });
 
   // 静的ファイル系はそのまま通す
   if (
@@ -67,6 +77,7 @@ export async function proxy(req: NextRequest) {
 
   // クローズドモード時のリダイレクト
   if (IS_CLOSED_MODE && !isPublicEvenWhenClosed) {
+    console.log("[proxy middleware] closed mode redirect", { pathname });
     const url = req.nextUrl.clone();
     url.pathname = "/";
     return NextResponse.redirect(url);
@@ -79,14 +90,37 @@ export async function proxy(req: NextRequest) {
     },
   });
 
+  // ✅ DEBUG: Cookieが見えてるか（存在だけ確認）
+  try {
+    const cookieNames = req.cookies.getAll().map((c) => c.name);
+    const sbCookies = cookieNames.filter((n) => n.includes("sb-") || n.includes("supabase"));
+    console.log("[proxy middleware] cookies", {
+      cookieCount: cookieNames.length,
+      sbCookieCount: sbCookies.length,
+      sbCookieNames: sbCookies.slice(0, 10), // 念のため上限
+    });
+  } catch (e) {
+    console.log("[proxy middleware] cookies read failed", String(e));
+  }
+
   const supabase = createMiddlewareSupabase(req, res);
 
   const {
     data: { session },
+    error: sessionError,
   } = await supabase.auth.getSession();
+
+  // ✅ DEBUG: セッション取得結果
+  console.log("[proxy middleware] session", {
+    pathname,
+    hasSession: !!session,
+    userId: session?.user?.id ?? null,
+    err: sessionError ? String(sessionError) : null,
+  });
 
   // 未ログイン & 認証必須ページ → /auth へ
   if (!session && !isAuthRoute && !isPublicRoute) {
+    console.log("[proxy middleware] redirect -> /auth (no session)", { pathname });
     const url = req.nextUrl.clone();
     url.pathname = "/auth";
     url.searchParams.set("redirectedFrom", pathname);
@@ -95,6 +129,7 @@ export async function proxy(req: NextRequest) {
 
   // ログイン済み & /auth 直下 → ホームへ
   if (session && isAuthRoot) {
+    console.log("[proxy middleware] redirect -> / (already logged in)", { pathname });
     const url = req.nextUrl.clone();
     url.pathname = "/";
     return NextResponse.redirect(url);

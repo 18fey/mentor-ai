@@ -31,77 +31,91 @@ async function createSupabaseFromCookies() {
   );
 }
 
-async function resolveProfileIdFromAuthUserId(authUserId: string) {
-  // profiles.id = auth.users.id 運用が残ってるケース
-  const { data: byId } = await supabaseServer
-    .from("profiles")
-    .select("id")
-    .eq("id", authUserId)
-    .maybeSingle();
-
-  if (byId?.id) return byId.id;
-
-  // profiles.auth_user_id 運用のケース
-  const { data: byAuth } = await supabaseServer
-    .from("profiles")
-    .select("id")
-    // @ts-ignore
-    .eq("id", user.id) 
-    .maybeSingle();
-
-  if (byAuth?.id) return byAuth.id;
-
-  return null;
-}
-
-export async function POST(_req: NextRequest) {
+export async function POST(req: NextRequest) {
   try {
+    // 1) 認証（cookie auth）
     const supabase = await createSupabaseFromCookies();
     const { data: auth, error: authErr } = await supabase.auth.getUser();
     const user = auth?.user ?? null;
 
     if (authErr || !user?.id) {
-      return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: "not_authenticated" },
+        { status: 401 }
+      );
     }
 
     const authUserId = user.id;
-    const profileId = await resolveProfileIdFromAuthUserId(authUserId);
+    const email = user.email ?? null;
 
-    const results: any[] = [];
+    // 2) 任意：理由などを受け取る（UIが送ってないなら空でOK）
+    const body = await req.json().catch(() => ({}));
+    const reason =
+      typeof body?.reason === "string" ? body.reason.slice(0, 500) : null;
 
-    // ✅ user_id で紐づくもの（あなたの既存）
-    results.push(await supabaseServer.from("story_cards").delete().eq("user_id", authUserId));
-    results.push(await supabaseServer.from("interview_sessions").delete().eq("user_id", authUserId));
-    results.push(await supabaseServer.from("interview_turns").delete().in("session_id", [])); // 使ってるなら後で最適化（下に説明）
+    // 3) 直近24hのpendingがあれば重複作成しない（連打/二重送信対策）
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: recent, error: recentErr } = await supabaseServer
+      .from("data_deletion_requests")
+      .select("id, status, requested_at")
+      .eq("auth_user_id", authUserId)
+      .eq("status", "pending")
+      .gte("requested_at", since)
+      .order("requested_at", { ascending: false })
+      .limit(1);
 
-    // ✅ profile_id で紐づくもの（あるなら消す）
-    if (profileId) {
-      // 例：es_logs / es_corrections / feature_usage など
-      results.push(await supabaseServer.from("es_logs").delete().eq("profile_id", profileId));
-      results.push(await supabaseServer.from("es_corrections").delete().eq("profile_id", profileId));
-      results.push(await supabaseServer.from("feature_usage").delete().eq("profile_id", profileId));
-      // growth_logs が profile_id に移行してるならここも
-      // results.push(await supabaseServer.from("growth_logs").delete().eq("profile_id", profileId));
+    if (!recentErr && recent && recent.length > 0) {
+      return NextResponse.json(
+        {
+          ok: true,
+          deduped: true,
+          requestId: recent[0].id,
+          status: recent[0].status,
+          requestedAt: recent[0].requested_at,
+        },
+        { status: 200 }
+      );
     }
 
-    // ✅ auth_user_id で紐づく profiles 更新/削除（設計移行中の保険）
-    results.push(await supabaseServer.from("profiles").delete().eq("id", user.id) );
-    // ✅ profiles.id = authUserId の運用も残ってるならこちらも
-    results.push(await supabaseServer.from("profiles").delete().eq("id", authUserId));
+    // 4) 保存（Service Roleで確実にinsert）
+    const { data: inserted, error: insErr } = await supabaseServer
+      .from("data_deletion_requests")
+      .insert({
+        auth_user_id: authUserId,
+        email,
+        status: "pending",
+        reason,
+        meta: {
+          source: "settings_button",
+          user_agent: req.headers.get("user-agent") ?? null,
+        },
+      })
+      .select("id, status, requested_at")
+      .single();
 
-    const errors = results.map((r) => r?.error).filter(Boolean);
-
-    if (errors.length > 0) {
-      console.error("[data/delete] delete errors:", errors);
+    if (insErr || !inserted) {
+      console.error("[data/delete] insert request error:", insErr);
       return NextResponse.json(
-        { ok: false, error: "failed_to_delete_some_data", detail: errors },
+        { ok: false, error: "insert_failed" },
         { status: 500 }
       );
     }
 
-    return NextResponse.json({ ok: true }, { status: 200 });
+    // 5) 受付完了
+    return NextResponse.json(
+      {
+        ok: true,
+        requestId: inserted.id,
+        status: inserted.status,
+        requestedAt: inserted.requested_at,
+      },
+      { status: 200 }
+    );
   } catch (e) {
     console.error("[data/delete] exception:", e);
-    return NextResponse.json({ ok: false, error: "server_error" }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: "server_error" },
+      { status: 500 }
+    );
   }
 }
