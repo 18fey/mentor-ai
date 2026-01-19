@@ -8,7 +8,7 @@ export function Footer() {
         <div className="text-center sm:text-left">
           <div>© 2025 Mentor.AI</div>
           <div className="mt-1">
-            運営：渡邉 花鈴（屋号：Mentor.AI）<br />
+            運営：Mentor.AI<br />
             所在地：〒104-0061 東京都中央区銀座一丁目22番11号 銀座大竹ビジデンス 2F
           </div>
         </div>

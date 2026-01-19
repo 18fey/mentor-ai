@@ -711,7 +711,7 @@ export default function HomePage() {
         {/* フッター */}
         <section className="mt-10 border-t pt-6 text-xs text-slate-600">
           <h2 className="mb-2 text-sm font-semibold">運営者情報</h2>
-          <p>事業者名：渡邉 花鈴（屋号：Mentor.AI）</p>
+          <p>運営：Mentor.AI</p>
           <p>
             所在地：〒104-0061 東京都中央区銀座一丁目22番11号 銀座大竹ビジデンス 2F
           </p>

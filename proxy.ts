@@ -6,6 +6,9 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 const APP_MODE = process.env.NEXT_PUBLIC_APP_MODE || "production";
 const IS_CLOSED_MODE = APP_MODE === "closed";
 
+// ✅ canonical（本番のみ強制）
+const CANONICAL_HOST = "www.mentor-ai.net";
+
 // middleware 用 Supabase クライアント
 function createMiddlewareSupabase(req: NextRequest, res: NextResponse) {
   return createServerClient(
@@ -27,12 +30,37 @@ function createMiddlewareSupabase(req: NextRequest, res: NextResponse) {
   );
 }
 
+// ✅ res に積まれた cookie を redirect に引き継ぐ（Supabase refresh対策）
+function redirectWithCookies(res: NextResponse, url: URL, status: 302 | 307 | 308 = 307) {
+  const redirectRes = NextResponse.redirect(url, status);
+  for (const c of res.cookies.getAll()) {
+    redirectRes.cookies.set(c.name, c.value, c);
+  }
+  return redirectRes;
+}
+
+function isLocalhost(host: string) {
+  return (
+    host === "localhost" ||
+    host.startsWith("localhost:") ||
+    host === "127.0.0.1" ||
+    host.startsWith("127.0.0.1:") ||
+    host === "::1" ||
+    host.startsWith("[::1]:")
+  );
+}
+
+function isVercelPreview(host: string) {
+  // preview / deployment domains
+  return host.endsWith(".vercel.app") || host.includes("localhost");
+}
+
 export async function proxy(req: NextRequest) {
   const { pathname, search } = req.nextUrl;
 
-  // ✅ DEBUG: リクエスト到達確認（Vercelでも出るはず）
-  const host = req.headers.get("host");
-  const proto = req.headers.get("x-forwarded-proto") ?? "unknown";
+  const host = req.headers.get("host") ?? "";
+  const proto = req.headers.get("x-forwarded-proto") ?? "http";
+
   console.log("[proxy middleware] request", {
     pathname,
     search,
@@ -48,6 +76,28 @@ export async function proxy(req: NextRequest) {
     pathname.startsWith("/sitemap.xml")
   ) {
     return NextResponse.next();
+  }
+
+  // ✅ 本番の canonical 強制は「本番ホストで来たときだけ」適用
+  // - localhost / preview を殺さない
+  const shouldEnforceCanonical =
+    !isLocalhost(host) && !isVercelPreview(host) && process.env.NODE_ENV === "production";
+
+  if (shouldEnforceCanonical) {
+    // 1) host が canonical でなければ寄せる
+    if (host !== CANONICAL_HOST) {
+      const url = req.nextUrl.clone();
+      url.host = CANONICAL_HOST;
+      url.protocol = "https";
+      return NextResponse.redirect(url, 308);
+    }
+
+    // 2) proto が https でなければ寄せる（念のため）
+    if (proto !== "https") {
+      const url = req.nextUrl.clone();
+      url.protocol = "https";
+      return NextResponse.redirect(url, 308);
+    }
   }
 
   // closed モードでも見せてOKなページ
@@ -75,19 +125,9 @@ export async function proxy(req: NextRequest) {
     pathname.startsWith("/api/webhooks") ||
     pathname.startsWith("/api");
 
-  // クローズドモード時のリダイレクト
-  if (IS_CLOSED_MODE && !isPublicEvenWhenClosed) {
-    console.log("[proxy middleware] closed mode redirect", { pathname });
-    const url = req.nextUrl.clone();
-    url.pathname = "/";
-    return NextResponse.redirect(url);
-  }
-
-  // 認証付きのレスポンスを準備
+  // ✅ 認証付きのレスポンスを準備（ここに Supabase が cookie を積む）
   const res = NextResponse.next({
-    request: {
-      headers: req.headers,
-    },
+    request: { headers: req.headers },
   });
 
   // ✅ DEBUG: Cookieが見えてるか（存在だけ確認）
@@ -97,7 +137,7 @@ export async function proxy(req: NextRequest) {
     console.log("[proxy middleware] cookies", {
       cookieCount: cookieNames.length,
       sbCookieCount: sbCookies.length,
-      sbCookieNames: sbCookies.slice(0, 10), // 念のため上限
+      sbCookieNames: sbCookies.slice(0, 10),
     });
   } catch (e) {
     console.log("[proxy middleware] cookies read failed", String(e));
@@ -110,7 +150,6 @@ export async function proxy(req: NextRequest) {
     error: sessionError,
   } = await supabase.auth.getSession();
 
-  // ✅ DEBUG: セッション取得結果
   console.log("[proxy middleware] session", {
     pathname,
     hasSession: !!session,
@@ -118,21 +157,29 @@ export async function proxy(req: NextRequest) {
     err: sessionError ? String(sessionError) : null,
   });
 
-  // 未ログイン & 認証必須ページ → /auth へ
+  // ✅ クローズドモード時のリダイレクト（cookie引き継ぎ）
+  if (IS_CLOSED_MODE && !isPublicEvenWhenClosed) {
+    console.log("[proxy middleware] closed mode redirect", { pathname });
+    const url = req.nextUrl.clone();
+    url.pathname = "/";
+    return redirectWithCookies(res, url, 307);
+  }
+
+  // ✅ 未ログイン & 認証必須ページ → /auth（cookie引き継ぎ）
   if (!session && !isAuthRoute && !isPublicRoute) {
     console.log("[proxy middleware] redirect -> /auth (no session)", { pathname });
     const url = req.nextUrl.clone();
     url.pathname = "/auth";
     url.searchParams.set("redirectedFrom", pathname);
-    return NextResponse.redirect(url);
+    return redirectWithCookies(res, url, 307);
   }
 
-  // ログイン済み & /auth 直下 → ホームへ
+  // ✅ ログイン済み & /auth 直下 → /（cookie引き継ぎ）
   if (session && isAuthRoot) {
     console.log("[proxy middleware] redirect -> / (already logged in)", { pathname });
     const url = req.nextUrl.clone();
     url.pathname = "/";
-    return NextResponse.redirect(url);
+    return redirectWithCookies(res, url, 307);
   }
 
   return res;

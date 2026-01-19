@@ -70,6 +70,8 @@ const sections: MenuSection[] = [
 
       { label: "ケースガイド", path: "/case-guide" },
       { label: "フェルミガイド", path: "/fermi-guide" },
+
+      { label: "AI思考力トレーニング初心者向けガイド" , path :"/ai-training-guide" },
     ],
   },
 ];

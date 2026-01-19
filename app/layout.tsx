@@ -23,7 +23,7 @@ export default function RootLayout({
       <body className="min-h-[100dvh] bg-gradient-to-br from-white via-[#F0F7FD] to-white">
         {/* 🔹運営者情報バー */}
         <div className="w-full border-b bg-white/90 py-2 text-center text-[11px] text-slate-600">
-          運営：渡邉 花鈴（屋号：Mentor.AI）｜所在地：〒104-0061 東京都中央区銀座一丁目22番11号 銀座大竹ビジデンス 2F｜
+          運営：Mentor.AI｜所在地：〒104-0061 東京都中央区銀座一丁目22番11号 銀座大竹ビジデンス 2F｜
           お問い合わせ：support@mentor-ai.net
         </div>
 
