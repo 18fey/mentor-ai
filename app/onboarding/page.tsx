@@ -300,7 +300,7 @@ function Step1Basic({
             value={affiliation}
             onChange={(e) => setAffiliation(e.target.value)}
             className="w-full rounded-2xl border border-slate-200 bg-white/80 px-3 py-2 text-xs text-slate-900 outline-none focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-            placeholder="慶應義塾大学 経済学部 / 社会人 / フリーランス など"
+            placeholder="〇〇大学 〇〇学部 / 社会人 / フリーランス など"
           />
         </div>
 

@@ -266,7 +266,7 @@ function ProfileStandardSection({ profile, onUpdated }: ProfileStandardProps) {
           </label>
           <input
             className="border p-2 w-full text-sm rounded"
-            placeholder="例：慶應義塾大学 経済学部 / 社会人 など"
+            placeholder="例：〇〇大学 〇〇学部 / 社会人 など"
             value={form.affiliation}
             onChange={(e) => setForm((f) => ({ ...f, affiliation: e.target.value }))}
           />
