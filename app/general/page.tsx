@@ -19,6 +19,14 @@ import type { TopicType } from "@/lib/types/story";
  * - persona/topic 変更：混線防止で last_job / draft を削除
  */
 
+// ✅ /api/interview-stats の返却（必要なところだけ）
+type InterviewStatsResponse = {
+  ok: boolean;
+  sessionCount?: number;
+  avgScore5?: number | null;
+  // avgScore100?: number | null; // 必要なら将来使う
+};
+
 type QA = { question: string; answer: string };
 
 type EvaluationResult = {
@@ -78,13 +86,25 @@ type ProceedMode = "unlimited" | "free" | "need_meta";
 type UsageCheckOK = { ok: true; mode: ProceedMode; requiredMeta?: number; balance?: number };
 type UsageCheckNeedMeta = { ok: false; error: "need_meta"; requiredMeta: number; balance?: number };
 
-function buildQuestions(profile: Profile | null): string[] {
+function buildQuestions(profile: Profile | null, topicType: TopicType, personaId: string): string[] {
   const hasProfile = !!profile;
   const name = profile?.name || "あなた";
   const uni = profile?.university || "大学";
   const faculty = profile?.faculty || "";
   const grade = profile?.grade || "";
   const mainIndustry = profile?.interested_industries?.[0];
+
+  // 面接官タイプ：口調だけ変える（質問の骨格は維持）
+  const tonePrefix =
+    personaId === "consulting_finance"
+      ? "結論ファーストで、端的にお願いします。"
+      : personaId === "finance_banking_insurance"
+      ? "数字・根拠も交えて説明してください。"
+      : personaId === "sales_trading_commerce"
+      ? "相手目線（顧客・現場）を意識して話してください。"
+      : personaId === "maker_it_telecom"
+      ? "再現性（プロセス）と工夫を明確にしてください。"
+      : "具体例を交えて分かりやすくお願いします。";
 
   const baseIntro = hasProfile
     ? `まずは ${name} さんの簡単な自己紹介をお願いします。（${uni}${faculty ? ` / ${faculty}` : ""}${
@@ -98,7 +118,8 @@ function buildQuestions(profile: Profile | null): string[] {
 
   const industryTail = mainIndustry ? `（特に ${mainIndustry} を志望している前提で考えてみてください）` : "";
 
-  return [
+  // テーマ別：10問の「中身」を変える
+  const qGakuchika = [
     baseIntro,
     baseGakuchika,
     "その中で直面した最大の課題（困難）は何でしたか？",
@@ -110,6 +131,57 @@ function buildQuestions(profile: Profile | null): string[] {
     "あなたらしさが最も現れている部分はどこですか？",
     "最後に、この経験を通じて言える“あなたの強み”は何ですか？",
   ];
+
+  const qSelfPR = [
+    baseIntro,
+    "あなたの強みを一言で言うと何ですか？",
+    "その強みが最も発揮された具体的エピソードを教えてください。",
+    "その場面でのあなたの役割と、達成した成果は？（数字があれば）",
+    "なぜその強みが発揮できたと思いますか？（再現性）",
+    "逆に弱みは何ですか？それをどう補っていますか？",
+    "その強みは志望職種でどう活きますか？",
+    `同じ強みを ${mainIndustry ?? "志望業界"} で発揮するなら、どんな場面ですか？`,
+    "周囲からの評価（他者視点）を具体例付きで教えてください。",
+    "最後に、強みを一言でまとめ直してください。",
+  ];
+
+  const qWhyCompany = [
+    baseIntro,
+    "志望動機（企業）を結論→理由→具体で教えてください。",
+    "その企業を知ったきっかけは何ですか？",
+    "競合ではなくその企業である理由を3つ挙げてください。",
+    "企業のどの事業/領域に最も魅力を感じますか？なぜ？",
+    "入社後にやりたいこと（配属イメージ含む）を教えてください。",
+    "そのやりたいことのために、今足りない点は何で、どう埋めますか？",
+    "直近のニュース/取り組みで気になったものは？どう評価しますか？",
+    "入社後3ヶ月で成果を出すなら、何から着手しますか？",
+    "最後に、志望動機を30秒で言い直してください。",
+  ];
+
+  const qWhyIndustry = [
+    baseIntro,
+    `志望動機（業界）を結論→理由→具体で教えてください。${industryTail}`,
+    "その業界を選ぶ背景（原体験や問題意識）は何ですか？",
+    "業界の構造（プレイヤー/収益源/競争）をどう理解していますか？",
+    "今後その業界はどう変化しますか？（3〜5年）",
+    "その変化の中で、あなたはどんな価値を出せますか？",
+    "なぜ他業界ではだめですか？比較して説明してください。",
+    "志望業界で働く上での懸念点は？どう向き合いますか？",
+    "志望職種は何ですか？その職種を選ぶ理由は？",
+    "最後に志望動機（業界）を30秒でまとめてください。",
+  ];
+
+  const raw =
+    topicType === "self_pr"
+      ? qSelfPR
+      : topicType === "why_company"
+      ? qWhyCompany
+      : topicType === "why_industry"
+      ? qWhyIndustry
+      : qGakuchika;
+
+  // 面接官タイプの “圧/口調” を先頭に添える（質問本文は維持）
+  return raw.map((q, i) => (i === 0 ? q : `${q}\n（補足: ${tonePrefix}）`));
 }
 
 async function fetchMyMetaBalance(): Promise<number | null> {
@@ -118,7 +190,7 @@ async function fetchMyMetaBalance(): Promise<number | null> {
     const data = await res.json().catch(() => null);
     if (!res.ok) return null;
     if (!data?.ok) return null;
-    const b = Number(data?.balance ?? 0);
+    const b = Number((data as any)?.balance ?? 0);
     return Number.isFinite(b) ? b : null;
   } catch {
     return null;
@@ -222,19 +294,12 @@ export default function InterviewPage() {
   const router = useRouter();
 
   const supabase = useMemo(
-    () =>
-      createBrowserClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!),
+    () => createBrowserClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!),
     []
   );
 
   const [userId, setUserId] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
-
-  const stats = [
-    { label: "模擬面接回数", value: "—", helper: "これまでのセッション数（あなた専用）" },
-    { label: "平均評価", value: "—", helper: "5点満点の平均レビュー（あなた専用）" },
-    { label: "累計練習時間", value: "—", helper: "ケース以外の面接練習時間（あなた専用）" },
-  ];
 
   const [personaId, setPersonaId] = useState<string>("consulting_finance");
   const [topicType, setTopicType] = useState<TopicType>("gakuchika");
@@ -274,6 +339,57 @@ export default function InterviewPage() {
   const [metaTitle, setMetaTitle] = useState<string | undefined>(undefined);
   const [metaMessage, setMetaMessage] = useState<string | undefined>(undefined);
   const [pendingAction, setPendingAction] = useState<null | (() => Promise<void>)>(null);
+
+  // ✅ Stats 表示用 state（上の3カード）※ evaluation 宣言の後に置く（宣言前参照エラー回避）
+  const [statSessionCount, setStatSessionCount] = useState<number | null>(null);
+  const [statAvg5, setStatAvg5] = useState<number | null>(null);
+
+  // ✅ /api/interview-stats を叩く
+  const fetchInterviewStats = async () => {
+    try {
+      const res = await fetch("/api/interview-stats", { method: "GET" });
+      const data = (await res.json().catch(() => null)) as InterviewStatsResponse | null;
+      if (!res.ok || !data?.ok) return;
+
+      const sc = Number(data.sessionCount ?? 0);
+      setStatSessionCount(Number.isFinite(sc) ? sc : 0);
+
+      const a5 = data.avgScore5;
+      setStatAvg5(typeof a5 === "number" && Number.isFinite(a5) ? a5 : null);
+    } catch {
+      // 失敗しても UI は "—" のまま（静かに握る）
+    }
+  };
+
+  // ✅ ログイン確認後に1回取得
+  useEffect(() => {
+    if (!authChecked || !userId) return;
+    fetchInterviewStats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authChecked, userId]);
+
+  // ✅ evaluation が出たら stats を更新（面接終了→反映）
+  useEffect(() => {
+    if (!authChecked || !userId) return;
+    if (!evaluation) return;
+    fetchInterviewStats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [evaluation]);
+
+  // ✅ StatCard に渡す配列（state反映）
+  const stats = [
+    {
+      label: "模擬面接回数",
+      value: statSessionCount == null ? "—" : String(statSessionCount),
+      helper: "これまでのセッション数（あなた専用）",
+    },
+    {
+      label: "平均評価",
+      value: statAvg5 == null ? "—" : `${statAvg5} / 5`,
+      helper: "5点満点の平均レビュー（あなた専用）",
+    },
+    
+  ];
 
   const closeMetaModal = () => {
     setMetaModalOpen(false);
@@ -316,12 +432,14 @@ export default function InterviewPage() {
       localStorage.removeItem(LS_LAST_JOB);
     } catch {}
   };
+
   const saveLastJob = (key: string) => {
     const v: LastJobLS = { key, createdAt: nowIso() };
     try {
       localStorage.setItem(LS_LAST_JOB, JSON.stringify(v));
     } catch {}
   };
+
   const loadLastJob = (): LastJobLS | null => {
     try {
       return safeJsonParse<LastJobLS>(localStorage.getItem(LS_LAST_JOB));
@@ -343,6 +461,7 @@ export default function InterviewPage() {
       localStorage.removeItem(LS_DRAFT);
     } catch {}
   };
+
   const loadDraft = (): DraftLS | null => {
     try {
       return safeJsonParse<DraftLS>(localStorage.getItem(LS_DRAFT));
@@ -350,6 +469,7 @@ export default function InterviewPage() {
       return null;
     }
   };
+
   const saveDraft = (d: DraftLS) => {
     try {
       localStorage.setItem(LS_DRAFT, JSON.stringify(d));
@@ -369,19 +489,20 @@ export default function InterviewPage() {
 
   // ✅ ロック解除用：セッションを完全に初期化して選択可能に戻す
   const resetSessionToIdle = () => {
-+    resetPersistenceForInputChange();
-+    setQAList([]);
-+    setPendingTranscript("");
-+    setCurrentIdx(0);
-+    setCurrentQuestion("");
-+    setEvaluation(null);
-+    setError(null);
-+    setNeedMeta(null);
-+    setStartNotice(null);
-+    setCreateMessage(null);
-+    setIsCommitting(false);
-+    setStep("idle");
+    resetPersistenceForInputChange();
+    setQAList([]);
+    setPendingTranscript("");
+    setCurrentIdx(0);
+    setCurrentQuestion("");
+    setEvaluation(null);
+    setError(null);
+    setNeedMeta(null);
+    setStartNotice(null);
+    setCreateMessage(null);
+    setIsCommitting(false);
+    setStep("idle");
   };
+
   // ------------------------------
   // auth & profile
   // ------------------------------
@@ -399,7 +520,7 @@ export default function InterviewPage() {
 
         const res = await fetch(`/api/profile/get?userId=${encodeURIComponent(user.id)}`);
         const data = await res.json().catch(() => ({}));
-        if (data.profile) setProfile(data.profile);
+        if ((data as any).profile) setProfile((data as any).profile);
       } catch (e) {
         console.error("Failed to fetch auth/profile:", e);
       } finally {
@@ -410,7 +531,7 @@ export default function InterviewPage() {
     run();
   }, [supabase, router]);
 
-  const questions = useMemo(() => buildQuestions(profile), [profileLoaded, profile]);
+  const questions = useMemo(() => buildQuestions(profile, topicType, personaId), [profileLoaded, profile, topicType, personaId]);
 
   const scrollToBottom = () => {
     setTimeout(() => {
@@ -424,12 +545,11 @@ export default function InterviewPage() {
   // Draft persistence
   // ------------------------------
   const draftSaveTimer = useRef<number | null>(null);
+
   useEffect(() => {
     if (!authChecked) return;
 
-    const isTrivialIdle =
-      step === "idle" && qaList.length === 0 && !pendingTranscript && !evaluation && currentIdx === 0;
-
+    const isTrivialIdle = step === "idle" && qaList.length === 0 && !pendingTranscript && !evaluation && currentIdx === 0;
     if (isTrivialIdle) return;
 
     if (draftSaveTimer.current) {
@@ -488,7 +608,6 @@ export default function InterviewPage() {
     setCurrentIdx(Number.isFinite(d.currentIdx as any) ? d.currentIdx : 0);
     setCurrentQuestion(typeof d.currentQuestion === "string" ? d.currentQuestion : "");
     setPendingTranscript(restoredPending);
-
 
     if (typeof d.evalIdempotencyKey === "string" && d.evalIdempotencyKey.length > 5) {
       evalIdempotencyKeyRef.current = d.evalIdempotencyKey;
@@ -693,7 +812,7 @@ export default function InterviewPage() {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data?.message || data?.error || "面接評価APIでエラーが発生しました。");
+        throw new Error((data as any)?.message || (data as any)?.error || "面接評価APIでエラーが発生しました。");
       }
 
       const data = (await res.json().catch(() => null)) as any;
@@ -711,6 +830,7 @@ export default function InterviewPage() {
         setEvaluation(direct);
         setStep("finished");
         scrollToBottom();
+        fetchInterviewStats();
         return;
       }
 
@@ -747,11 +867,11 @@ export default function InterviewPage() {
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        throw new Error(data?.message || "文字起こしに失敗しました。");
+        throw new Error((data as any)?.message || "文字起こしに失敗しました。");
       }
 
       const transcript: string =
-        String(data?.transcript ?? "").trim() ||
+        String((data as any)?.transcript ?? "").trim() ||
         "（文字起こしに失敗しました。必要なら編集して確定してください。）";
 
       setPendingTranscript(transcript);
@@ -835,7 +955,7 @@ export default function InterviewPage() {
 
       const data = await res.json().catch(() => null);
 
-      if (!res.ok || !data?.storyCard) {
+      if (!res.ok || !(data as any)?.storyCard) {
         console.error("createStoryCardFromSession error:", { status: res.status, data });
         setCreateMessage("ストーリーカードの保存に失敗しました。時間をおいて再度お試しください。");
       } else {
@@ -962,8 +1082,9 @@ export default function InterviewPage() {
                   <option value="why_industry">{TOPIC_LABEL.why_industry}</option>
                 </select>
               </div>
+
               {isLocked && (
-               <button
+                <button
                   type="button"
                   onClick={resetSessionToIdle}
                   className="text-[11px] text-slate-500 underline hover:text-slate-700"
@@ -1063,7 +1184,7 @@ export default function InterviewPage() {
             </div>
           )}
 
-                    {step === "evaluating" && (
+          {step === "evaluating" && (
             <div className="pt-2 space-y-2">
               <p className="text-[11px] text-slate-500">
                 AI が10問分の回答をまとめて解析し、評価を作成しています…（通信が切れても復帰できます）
@@ -1102,7 +1223,6 @@ export default function InterviewPage() {
               )}
             </div>
           )}
-
 
           {error && (
             <div className="mt-2 space-y-2">
@@ -1230,9 +1350,7 @@ export default function InterviewPage() {
                     onClick={createStoryCardFromSession}
                     disabled={isCreatingCard}
                     className={`w-full rounded-full px-4 py-2 text-xs font-semibold ${
-                      isCreatingCard
-                        ? "bg-slate-200 text-slate-500 cursor-not-allowed"
-                        : "bg-violet-500 text-white hover:bg-violet-600"
+                      isCreatingCard ? "bg-slate-200 text-slate-500 cursor-not-allowed" : "bg-violet-500 text-white hover:bg-violet-600"
                     }`}
                   >
                     {isCreatingCard ? "ストーリーカード作成中…" : "このセッションからストーリーカードを作成（ES用）"}
