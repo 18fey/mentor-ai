@@ -76,7 +76,7 @@ const FEATURE_LIST: {
   },
   {
     id: "industry_insight",
-    label: "業界インサイト Deep",
+    label: "企業研究 Deep",
     note: "1 業界あたりの深堀り",
   },
   {
@@ -312,7 +312,7 @@ if (error) {
               <div className="rounded-xl bg-slate-50 px-3 py-2">
                 <p className="font-medium text-slate-700">使い道</p>
                 <p className="mt-1">
-                  ES 添削・ケース/フェルミ・業界インサイト・16タイプ Deep
+                  ES 添削・ケース/フェルミ・企業研究・16タイプ Deep
                   など、一部の高負荷タスクで消費されます。
                 </p>
               </div>

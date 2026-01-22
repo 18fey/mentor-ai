@@ -89,7 +89,7 @@ const SOURCE_LABEL: Record<string, { label: string; emoji: string }> = {
   es_draft: { label: "ESドラフト", emoji: "📝" },
   es_correction: { label: "ES添削", emoji: "✅" },
   interview_10: { label: "一般面接（10問）", emoji: "🎤" },
-  industry: { label: "業界インサイト", emoji: "📚" },
+  industry: { label: "企業研究", emoji: "📚" },
   case: { label: "ケース面接AI", emoji: "🧩" },
   fermi: { label: "フェルミ推定AI", emoji: "📏" },
   ai_training: { label: "AI思考力トレーニング", emoji: "🧠" },
@@ -167,7 +167,7 @@ function pickNextActions(params: {
   } else {
     if (last?.source === "es_draft" || last?.source === "es_correction") {
       actions.push({
-        title: "業界インサイトで、志望業界の“評価される型”を掴む",
+        title: "企業研究で、志望業界の“評価される型”を掴む",
         reason: "直近はESまで進んでいるので、次は“業界の勝ち筋”を押さえると精度が上がります。",
         href: "/industry",
       });
@@ -251,7 +251,7 @@ export default function HomePage() {
   async function fetchUsageSummary() {
     try {
       setUsageLoading(true);
-      const res = await fetch("/api/usage/summary", { method: "GET" });
+      const res = await fetch("/api/usage/summary", { method: "GET", cache: "no-store" });
       const json = (await res.json()) as UsageSummaryResponse;
       if (json?.ok) setUsage(json);
     } catch (e) {
@@ -275,6 +275,22 @@ export default function HomePage() {
     }
   }
 
+  // ✅ サーバ側でパーソナライズした NextActions を取る（あれば優先）
+  async function fetchNextActionsFromApi() {
+    try {
+      const res = await fetch("/api/recommendations/next-actions", {
+        method: "GET",
+        cache: "no-store",
+      });
+      const json = await res.json();
+      if (json?.ok && Array.isArray(json.actions)) {
+        setNextActions(json.actions as NextAction[]);
+      }
+    } catch (e) {
+      console.error("next-actions fetch error:", e);
+    }
+  }
+
   useEffect(() => {
     if (isClosed) return;
 
@@ -282,7 +298,10 @@ export default function HomePage() {
       try {
         const {
           data: { user },
+          error: authErr,
         } = await supabase.auth.getUser();
+
+        if (authErr) console.error("auth getUser error:", authErr);
 
         if (!user) {
           router.push("/auth");
@@ -308,7 +327,7 @@ export default function HomePage() {
         }
 
         if (!profile.first_run_completed) {
-          router.push("/start");
+          router.push("/");
           return;
         }
 
@@ -316,12 +335,11 @@ export default function HomePage() {
         const step2Completed = !!profile.ai_type_key;
 
         // ✅ STEP3〜5 固定判定
-        const [step3Completed, step4Completed, step5Completed] =
-          await Promise.all([
-            hasAnyLog(supabase, user.id, ["interview_10"]),
-            hasAnyLog(supabase, user.id, ["es_draft", "es_correction"]),
-            hasAnyLog(supabase, user.id, ["career_gap"]),
-          ]);
+        const [step3Completed, step4Completed, step5Completed] = await Promise.all([
+          hasAnyLog(supabase, user.id, ["interview_10"]),
+          hasAnyLog(supabase, user.id, ["es_draft", "es_correction"]),
+          hasAnyLog(supabase, user.id, ["career_gap"]),
+        ]);
 
         // ✅ growth_logs（直近）
         const { data: logs, error: logsError } = await supabase
@@ -346,14 +364,17 @@ export default function HomePage() {
         setEsDraftCount(d);
         setEsCorrectionCount(c);
 
-        setNextActions(
-          pickNextActions({
+        // ✅ NextActions：サーバAPI優先 → 失敗したらクライアント側fallback
+        await fetchNextActionsFromApi();
+        setNextActions((prev) => {
+          if (prev && prev.length > 0) return prev;
+          return pickNextActions({
             logs: safeLogs,
             step3Completed,
             step4Completed,
             step5Completed,
-          })
-        );
+          });
+        });
 
         setBaseSteps([
           {
@@ -395,9 +416,8 @@ export default function HomePage() {
           },
         ]);
 
-        // ✅ Usage Summary 取得
+        // ✅ Usage Summary / META lots
         void fetchUsageSummary();
-        // ✅ META lots 取得
         void fetchActiveMetaLots();
 
         setChecking(false);
@@ -415,9 +435,7 @@ export default function HomePage() {
     return (
       <main className="flex min-h-screen flex-col items-center justify-center bg-slate-950 px-6 text-slate-50">
         <div className="max-w-lg space-y-4 text-center">
-          <p className="text-xs uppercase tracking-[0.2em] text-slate-400">
-            Mentor.AI Classroom
-          </p>
+          <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Mentor.AI Classroom</p>
           <h1 className="text-2xl font-semibold">このクラス用デモは終了しました</h1>
           <p className="text-sm leading-relaxed text-slate-300">
             本日の授業で利用した Mentor.AI クラス専用環境はクローズしました。
@@ -428,8 +446,7 @@ export default function HomePage() {
             <p className="mb-1 font-semibold text-slate-100">これからのご利用について</p>
             <ul className="list-inside list-disc space-y-1">
               <li>
-                正式版リリース後、同じメールアドレス・パスワードで本番環境にログインすると、
-                今回のデータをそのまま引き継いでご利用いただけます。
+                正式版リリース後、同じメールアドレス・パスワードで本番環境にログインすると、今回のデータをそのまま引き継いでご利用いただけます。
               </li>
               <li>詳細なご案内は、Mentor.AI 公式Instagramや授業内で今後お知らせ予定です。</li>
             </ul>
@@ -455,9 +472,7 @@ export default function HomePage() {
   if (error) {
     return (
       <main className="flex min-h-screen items-center justify-center">
-        <div className="rounded-3xl bg-rose-50 px-6 py-4 text-sm text-rose-700 shadow">
-          {error}
-        </div>
+        <div className="rounded-3xl bg-rose-50 px-6 py-4 text-sm text-rose-700 shadow">{error}</div>
       </main>
     );
   }
@@ -474,23 +489,56 @@ export default function HomePage() {
       <div className="mx-auto max-w-5xl space-y-10 px-6 py-8">
         {/* ヘッダー */}
         <header className="space-y-2">
-          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-sky-500">
-            Mentor.AI
-          </p>
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-sky-500">Mentor.AI</p>
           <h1 className="text-2xl font-semibold text-slate-900">あなたの成長ダッシュボード</h1>
-          <p className="text-sm text-slate-600">
-            最近の取り組みと、今日やると良い一歩をまとめています。
-          </p>
+          <p className="text-sm text-slate-600">最近の取り組みと、今日やると良い一歩をまとめています。</p>
         </header>
+
+        {/* ✅ 次の一手（最上部に移動） */}
+        <section className="space-y-3 rounded-3xl bg-white/90 p-5 shadow-sm shadow-sky-100">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold text-slate-900">次の一手（あなた向け）</h2>
+            <Link
+              href="/start"
+              className="text-[11px] font-medium text-sky-700 underline underline-offset-2 hover:text-sky-800"
+            >
+             
+            </Link>
+          </div>
+          <p className="text-[11px] text-slate-500">
+            直近のログと進捗から、今日やると効くものを1〜2個だけ提案します。
+          </p>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            {nextActions.map((a, idx) => (
+              <NextActionCard key={`${a.href}-${idx}`} action={a} />
+            ))}
+          </div>
+
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => router.push("/start")}
+              className="inline-flex items-center rounded-full bg-sky-500 px-4 py-1.5 text-xs font-medium text-white shadow-sm shadow-sky-200 hover:bg-sky-600"
+            >
+              まず何をすればいい？（スタートガイド） →
+            </button>
+            <button
+              type="button"
+              onClick={() => router.refresh?.()}
+              className="text-[11px] font-medium text-sky-700 underline underline-offset-2 hover:text-sky-800"
+            >
+              ※提案を再読み込み
+            </button>
+          </div>
+        </section>
 
         {/* ✅ 今月の無料枠（小さめ・邪魔しない） */}
         <section className="rounded-3xl bg-white/90 p-5 shadow-sm shadow-sky-100">
           <div className="flex items-center justify-between gap-3">
             <div>
               <h2 className="text-sm font-semibold text-slate-900">今月の無料枠</h2>
-              <p className="text-[11px] text-slate-500">
-                無料枠を超えると META で続行できます。
-              </p>
+              <p className="text-[11px] text-slate-500">無料枠を超えると META で続行できます。</p>
             </div>
             <button
               type="button"
@@ -521,9 +569,7 @@ export default function HomePage() {
           <div className="flex items-center justify-between gap-3">
             <div>
               <h2 className="text-sm font-semibold text-slate-900">利用可能なMETAの内訳</h2>
-              <p className="text-[11px] text-slate-500">
-                有効期限が近いMETAから自動で消費されます。
-              </p>
+              <p className="text-[11px] text-slate-500">有効期限が近いMETAから自動で消費されます。</p>
             </div>
 
             <button
@@ -580,10 +626,7 @@ export default function HomePage() {
         <section className="space-y-3 rounded-3xl bg-white/90 p-5 shadow-sm shadow-sky-100">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-sm font-semibold text-slate-900">直近アクティビティ</h2>
-            <Link
-              href="/growth"
-              className="text-[11px] font-medium text-sky-700 underline underline-offset-2 hover:text-sky-800"
-            >
+            <Link href="/growth" className="text-[11px] font-medium text-sky-700 underline underline-offset-2 hover:text-sky-800">
               すべて見る →
             </Link>
           </div>
@@ -600,20 +643,13 @@ export default function HomePage() {
               {recentLogs.map((log) => {
                 const meta = SOURCE_LABEL[log.source] ?? { label: "その他", emoji: "✨" };
                 return (
-                  <li
-                    key={log.id}
-                    className="rounded-2xl border border-slate-100 bg-white/95 px-4 py-3 text-sm shadow-sm"
-                  >
+                  <li key={log.id} className="rounded-2xl border border-slate-100 bg-white/95 px-4 py-3 text-sm shadow-sm">
                     <div className="flex items-center justify-between gap-3">
                       <div className="flex items-center gap-2">
                         <span className="text-base">{meta.emoji}</span>
-                        <span className="text-[11px] font-medium text-slate-500">
-                          {meta.label}
-                        </span>
+                        <span className="text-[11px] font-medium text-slate-500">{meta.label}</span>
                       </div>
-                      <span className="text-[11px] text-slate-400">
-                        {formatJpShort(log.created_at)}
-                      </span>
+                      <span className="text-[11px] text-slate-400">{formatJpShort(log.created_at)}</span>
                     </div>
                     <p className="mt-1 text-sm font-semibold text-slate-900">{log.title}</p>
                   </li>
@@ -621,29 +657,6 @@ export default function HomePage() {
               })}
             </ul>
           )}
-        </section>
-
-        {/* 次の一手 */}
-        <section className="space-y-3 rounded-3xl bg-white/90 p-5 shadow-sm shadow-sky-100">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-sm font-semibold text-slate-900">次の一手（あなた向け）</h2>
-            <button
-              type="button"
-              onClick={() => router.push("/start")}
-              className="text-[11px] font-medium text-sky-700 underline underline-offset-2 hover:text-sky-800"
-            >
-              スタートガイドをもう一度見る
-            </button>
-          </div>
-          <p className="text-[11px] text-slate-500">
-            直近のログと進捗から、今日やると効くものを1〜2個だけ提案します。
-          </p>
-
-          <div className="grid gap-3 md:grid-cols-2">
-            {nextActions.map((a, idx) => (
-              <NextActionCard key={`${a.href}-${idx}`} action={a} />
-            ))}
-          </div>
         </section>
 
         {/* 基礎STEP */}
@@ -700,7 +713,7 @@ export default function HomePage() {
               locked={!allBaseStepsCompleted}
             />
             <AdvancedToolCard
-              title="業界インサイト"
+              title="企業研究"
               description="あなたのタイプ・経験に基づいて、志望業界とのフィット感を解説します。"
               href="/industry"
               locked={!allBaseStepsCompleted}
@@ -708,13 +721,60 @@ export default function HomePage() {
           </div>
         </section>
 
+        {/* ✅ Mentor.AI 推奨の使い方（下の方に追加） */}
+        <section className="rounded-3xl border border-sky-100 bg-white/90 p-5 shadow-sm shadow-sky-100">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <h2 className="text-sm font-semibold text-slate-900">Mentor.AI 推奨の使い方</h2>
+              <p className="text-[11px] leading-relaxed text-slate-500">
+                迷ったらこの順番。最短で「ES・面接で使える成果物」に変換するためのガイドです。
+              </p>
+            </div>
+            <Link
+              href="/start"
+              className="shrink-0 text-[11px] font-medium text-sky-700 underline underline-offset-2 hover:text-sky-800"
+            >
+              ガイドへ →
+            </Link>
+          </div>
+
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
+            <div className="rounded-2xl bg-slate-50/70 px-4 py-3">
+              <p className="text-[11px] font-semibold text-slate-700">1) 素材化</p>
+              <p className="mt-1 text-[11px] text-slate-500">一般面接10問で経験を「話して」ログにする</p>
+            </div>
+            <div className="rounded-2xl bg-slate-50/70 px-4 py-3">
+              <p className="text-[11px] font-semibold text-slate-700">2) 成果物化</p>
+              <p className="mt-1 text-[11px] text-slate-500">ESドラフト/添削で提出物に変換する</p>
+            </div>
+            <div className="rounded-2xl bg-slate-50/70 px-4 py-3">
+              <p className="text-[11px] font-semibold text-slate-700">3) 最適化</p>
+              <p className="mt-1 text-[11px] text-slate-500">志望業界の勝ち筋（インサイト/診断）で精度を上げる</p>
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => router.push("/start")}
+              className="inline-flex items-center rounded-full bg-sky-500 px-4 py-1.5 text-xs font-medium text-white shadow-sm shadow-sky-200 hover:bg-sky-600"
+            >
+              推奨フローを確認する →
+            </button>
+            <Link
+              href="/start"
+              className="text-[11px] font-medium text-sky-700 underline underline-offset-2 hover:text-sky-800"
+            >
+              迷ったらここ（/start）
+            </Link>
+          </div>
+        </section>
+
         {/* フッター */}
         <section className="mt-10 border-t pt-6 text-xs text-slate-600">
           <h2 className="mb-2 text-sm font-semibold">運営者情報</h2>
           <p>運営：Mentor.AI</p>
-          <p>
-            所在地：〒104-0061 東京都中央区銀座一丁目22番11号 銀座大竹ビジデンス 2F
-          </p>
+          <p>所在地：〒104-0061 東京都中央区銀座一丁目22番11号 銀座大竹ビジデンス 2F</p>
           <p>お問い合わせ：support@mentor-ai.net</p>
           <p className="mt-2">
             特定商取引法に基づく表記は{" "}
@@ -750,9 +810,7 @@ function UsageCard({ item }: { item: UsageSummaryItem }) {
       <div className="mt-2 h-2 w-full rounded-full bg-slate-100">
         <div className="h-2 rounded-full bg-sky-500" style={{ width: `${Math.min(100, pct)}%` }} />
       </div>
-      <p className="mt-2 text-[11px] text-slate-500">
-        今月 {item.usedThisMonth}回利用（残り{remaining}回）
-      </p>
+      <p className="mt-2 text-[11px] text-slate-500">今月 {item.usedThisMonth}回利用（残り{remaining}回）</p>
     </div>
   );
 }
@@ -914,25 +972,19 @@ function MetaLotsTable({ lots, loading }: { lots: MetaLot[]; loading: boolean })
               <div className="flex items-center gap-3">
                 <div className="text-lg">{expiryBadge(d)}</div>
                 <div>
-                  <div className="text-sm font-medium text-slate-900">
-                    {formatDateJP(lot.expires_at)} まで
-                  </div>
+                  <div className="text-sm font-medium text-slate-900">{formatDateJP(lot.expires_at)} まで</div>
                   <div className="text-[11px] text-slate-500">
                     {sourceLabel(lot.source)} ・あと {d} 日
                   </div>
                 </div>
               </div>
-              <div className="text-sm font-semibold text-slate-900 tabular-nums">
-                {lot.remaining} META
-              </div>
+              <div className="text-sm font-semibold text-slate-900 tabular-nums">{lot.remaining} META</div>
             </div>
           );
         })}
       </div>
 
-      <div className="mt-2 text-[11px] text-slate-500">
-        🔴 7日以内 / 🟠 30日以内 / 🟢 それ以降
-      </div>
+      <div className="mt-2 text-[11px] text-slate-500">🔴 7日以内 / 🟠 30日以内 / 🟢 それ以降</div>
     </div>
   );
 }

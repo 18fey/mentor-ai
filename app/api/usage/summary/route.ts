@@ -30,7 +30,7 @@ const FEATURE_UI: Record<FeatureKey, { label: string; emoji?: string }> = {
   case_interview: { label: "ケース面接", emoji: "🧩" },
   fermi: { label: "フェルミ推定", emoji: "📏" },
   ai_training: { label: "AI思考力トレーニング", emoji: "🧠" },
-  industry_insight: { label: "業界インサイト", emoji: "📚" },
+  industry_insight: { label: "企業研究", emoji: "📚" },
 };
 
 // ✅ JST月初にしたいならこれ（推奨）

@@ -119,7 +119,7 @@ export default function PricingPage() {
     <li>・一般面接（10問）：毎月 1 回まで</li>
     <li>・AI思考トレーニング：毎月 3 回まで</li>
     <li>・ES添削：毎月 3 回まで</li>
-    <li>・業界インサイト：毎月 3 回まで</li>
+    <li>・企業研究：毎月 3 回まで</li>
   </ul>
 
   <p className="mt-4 text-[11px] text-slate-500">

@@ -367,6 +367,21 @@ export default function InterviewPage() {
     setStartNotice(null);
   };
 
+  // ✅ ロック解除用：セッションを完全に初期化して選択可能に戻す
+  const resetSessionToIdle = () => {
++    resetPersistenceForInputChange();
++    setQAList([]);
++    setPendingTranscript("");
++    setCurrentIdx(0);
++    setCurrentQuestion("");
++    setEvaluation(null);
++    setError(null);
++    setNeedMeta(null);
++    setStartNotice(null);
++    setCreateMessage(null);
++    setIsCommitting(false);
++    setStep("idle");
+  };
   // ------------------------------
   // auth & profile
   // ------------------------------
@@ -461,11 +476,19 @@ export default function InterviewPage() {
     setPersonaId(d.personaId);
     setTopicType(d.topicType);
 
-    setStep(d.step);
-    setQAList(Array.isArray(d.qaList) ? d.qaList : []);
+    const restoredQA = Array.isArray(d.qaList) ? d.qaList : [];
+    const restoredPending = typeof d.pendingTranscript === "string" ? d.pendingTranscript : "";
+
+    // ✅ 実質進捗がないのに step だけ途中になってる事故を救済
+    const hasProgress = restoredQA.length > 0 || restoredPending.trim().length > 0;
+    const safeStep: Step = hasProgress ? d.step : "idle";
+
+    setStep(safeStep);
+    setQAList(restoredQA);
     setCurrentIdx(Number.isFinite(d.currentIdx as any) ? d.currentIdx : 0);
     setCurrentQuestion(typeof d.currentQuestion === "string" ? d.currentQuestion : "");
-    setPendingTranscript(typeof d.pendingTranscript === "string" ? d.pendingTranscript : "");
+    setPendingTranscript(restoredPending);
+
 
     if (typeof d.evalIdempotencyKey === "string" && d.evalIdempotencyKey.length > 5) {
       evalIdempotencyKeyRef.current = d.evalIdempotencyKey;
@@ -939,6 +962,15 @@ export default function InterviewPage() {
                   <option value="why_industry">{TOPIC_LABEL.why_industry}</option>
                 </select>
               </div>
+              {isLocked && (
+               <button
+                  type="button"
+                  onClick={resetSessionToIdle}
+                  className="text-[11px] text-slate-500 underline hover:text-slate-700"
+                >
+                  セッションをリセットして条件を変更
+                </button>
+              )}
 
               <div className="flex items-center gap-3">
                 <span className="text-[11px] text-slate-400">

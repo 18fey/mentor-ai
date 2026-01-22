@@ -32,7 +32,7 @@ const TYPE_LABEL: Record<string, string> = {
   fermi: "フェルミ",
   es_review: "ES添削",
   es_draft: "ESドラフト",
-  industry_insight: "業界インサイト",
+  industry_insight: "企業研究",
 };
 
 function fmt(d: string) {

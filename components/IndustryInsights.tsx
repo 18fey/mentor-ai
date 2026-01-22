@@ -171,7 +171,7 @@ const SAMPLE_CONTENT: Record<string, InsightResult> = {
 };
 
 const DEFAULT_SAMPLE: InsightResult = {
-  insight: `### 業界インサイト（サンプル）
+  insight: `### 企業研究（サンプル）
 
 - ここには、選択した業界の「構造」「プレーヤー」「収益源」「規制」「トレンド」などが整理されます。
 - 「インサイトを生成する」を押すと、あなたが選んだ業界・企業に合わせた内容に置き換わります。`,

@@ -32,7 +32,7 @@ const sections: MenuSection[] = [
       { label: "フェルミ推定AI", path: "/fermi" },
       { label: "一般面接（模擬）", path: "/general" },
       { label: "ES", path: "/es" },
-      { label: "業界インサイト", path: "/industry" },
+      { label: "企業研究", path: "/industry" },
     ],
   },
   {

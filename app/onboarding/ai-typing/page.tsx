@@ -127,7 +127,7 @@ export default function AIThinkingOnboardingPage() {
     setStage("questions");
   };
 
-  const handleSkip = () => router.push("/start");
+  const handleSkip = () => router.push("/");
 
   // -------------------------------
   // ローディング

@@ -33,7 +33,7 @@ const FLOW_ITEMS = [
   },
   {
     step: "③",
-    title: "業界インサイトで気になる企業を見る",
+    title: "企業研究で気になる企業を見る",
     caption: "就活全体のマップを“企業ベース”で見渡す",
     description:
       "志望業界や気になっている企業について、事業内容・ビジネスモデル・どんな人が活躍しているかなどの基本情報をキャッチアップします。“なんとなく志望”を“ちゃんと見えている”状態に近づけます。",
@@ -234,7 +234,7 @@ export default function StartPage() {
                 ✅ 志望業界・興味の方向性
               </p>
               <p className="text-[11px] leading-relaxed text-slate-600">
-                「なんとなく興味がある業界」「今見ている企業」の情報を、業界インサイトや質問テーマの優先順位づけに使います。
+                「なんとなく興味がある業界」「今見ている企業」の情報を、企業研究や質問テーマの優先順位づけに使います。
               </p>
             </div>
           </div>
@@ -254,10 +254,10 @@ export default function StartPage() {
           <div className="flex items-center justify-between gap-3 mb-4">
             <div>
               <h2 className="text-sm font-semibold text-slate-900">
-                🌟 今日の体験フロー（授業と同じ 3本柱＋余裕があれば④）
+                この流れで行うと、自分の現在地がわかります。
               </h2>
               <p className="mt-1 text-[11px] text-slate-600">
-                一気に全部やらなくても大丈夫です。まずは ① の一般面接から始めるのがおすすめです。
+               
               </p>
             </div>
           </div>
@@ -375,7 +375,7 @@ export default function StartPage() {
                   onClick={() => router.push("/industry")}
                   className="rounded-full border border-slate-200 bg-white px-3 py-1 text-slate-600 hover:border-sky-200 hover:text-sky-700"
                 >
-                  業界インサイトを開く
+                  企業研究を開く
                 </button>
                 <button
                   type="button"

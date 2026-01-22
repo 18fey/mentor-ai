@@ -449,7 +449,7 @@ ${newsPart}
       await supabase.from("growth_logs").insert({
         user_id: authUserId,
         source: "industry_insight",
-        title: `業界インサイト：${industryGroup}${industrySub ? ` / ${industrySub}` : ""}`,
+        title: `企業研究：${industryGroup}${industrySub ? ` / ${industrySub}` : ""}`,
         description: "業界構造・企業論点・想定質問・ニュース整理を生成しました。",
         metadata: {
           feature: "industry_insight",

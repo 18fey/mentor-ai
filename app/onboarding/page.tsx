@@ -68,7 +68,7 @@ export default function OnboardingPage() {
       }
 
       if (profile?.onboarding_completed) {
-        router.push("/start");
+        router.push("/");
         return;
       }
 
