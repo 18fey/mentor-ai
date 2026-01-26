@@ -222,6 +222,9 @@ async function hasAnyLog(
 // ★ APP_MODE
 const APP_MODE = process.env.NEXT_PUBLIC_APP_MODE || "production";
 
+// ✅ AI思考タイプ診断は「任意」にする（ロック解除条件・進捗%から除外）
+const REQUIRED_STEP_IDS = new Set<BaseStepId>([1, 3, 4, 5]); // 2 は任意
+
 export default function HomePage() {
   const router = useRouter();
   const supabase = useMemo(() => createBrowserSupabaseClient(), []);
@@ -304,7 +307,7 @@ export default function HomePage() {
         if (authErr) console.error("auth getUser error:", authErr);
 
         if (!user) {
-          router.push("/auth");
+          router.replace("/auth");
           return;
         }
 
@@ -322,14 +325,15 @@ export default function HomePage() {
         }
 
         if (!profile || !profile.onboarding_completed) {
-          router.push("/onboarding");
+          router.replace("/onboarding");
           return;
         }
 
-        if (!profile.first_run_completed) {
-          router.push("/");
-          return;
-        }
+        // ✅ ここ重要：自己ループになるので gate しない（first_run_completed は別導線で使うなら /start 等へ）
+        // if (!profile.first_run_completed) {
+        //   router.replace("/start");
+        //   return;
+        // }
 
         const step1Completed = !!profile.onboarding_completed;
         const step2Completed = !!profile.ai_type_key;
@@ -386,11 +390,12 @@ export default function HomePage() {
           },
           {
             id: 2,
-            title: "AI思考タイプ診断",
+            title: "AI思考タイプ診断（任意）",
             description:
-              "直感アンケート10問で、あなたの「AIとの付き合い方」と思考スタイルを16タイプにマッピングします。",
+              "直感アンケート10問で、あなたの「AIとの付き合い方」と思考スタイルを16タイプにマッピングします。（後からいつでもOK）",
             href: "/onboarding/ai-typing",
             completed: step2Completed,
+            badge: "任意",
           },
           {
             id: 3,
@@ -477,10 +482,12 @@ export default function HomePage() {
     );
   }
 
-  const completedCount = baseSteps.filter((s) => s.completed).length;
-  const totalSteps = baseSteps.length;
+  // ✅ 進捗%とロック解除条件は「必須STEPだけ」で計算（Step2=任意）
+  const requiredSteps = baseSteps.filter((s) => REQUIRED_STEP_IDS.has(s.id));
+  const completedCount = requiredSteps.filter((s) => s.completed).length;
+  const totalSteps = requiredSteps.length;
   const progressPercent = totalSteps > 0 ? Math.round((completedCount / totalSteps) * 100) : 0;
-  const allBaseStepsCompleted = completedCount === totalSteps;
+  const allBaseStepsCompleted = requiredSteps.every((s) => s.completed);
 
   const esTotal = esDraftCount + esCorrectionCount;
 
@@ -501,9 +508,7 @@ export default function HomePage() {
             <Link
               href="/start"
               className="text-[11px] font-medium text-sky-700 underline underline-offset-2 hover:text-sky-800"
-            >
-             
-            </Link>
+            ></Link>
           </div>
           <p className="text-[11px] text-slate-500">
             直近のログと進捗から、今日やると効くものを1〜2個だけ提案します。
@@ -607,7 +612,7 @@ export default function HomePage() {
             <SummaryCard
               label="基礎STEP 完了数"
               value={`${completedCount}/${totalSteps}`}
-              helper="プロフィールとAI診断が終わっていれば土台はOKです。"
+              helper="まずはプロフィール→一般面接→ES→キャリア診断が土台です（AIタイプ診断は任意）。"
             />
             <SummaryCard
               label="一般面接（10問）"
@@ -683,7 +688,7 @@ export default function HomePage() {
                   <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 text-[9px]">
                     🔒
                   </span>
-                  <span>基礎セットが終わると、すべてのツールが解放されます</span>
+                  <span>基礎セット（必須）を終えると、すべてのツールが解放されます</span>
                 </>
               ) : (
                 <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
@@ -810,7 +815,9 @@ function UsageCard({ item }: { item: UsageSummaryItem }) {
       <div className="mt-2 h-2 w-full rounded-full bg-slate-100">
         <div className="h-2 rounded-full bg-sky-500" style={{ width: `${Math.min(100, pct)}%` }} />
       </div>
-      <p className="mt-2 text-[11px] text-slate-500">今月 {item.usedThisMonth}回利用（残り{remaining}回）</p>
+      <p className="mt-2 text-[11px] text-slate-500">
+        今月 {item.usedThisMonth}回利用（残り{remaining}回）
+      </p>
     </div>
   );
 }
@@ -923,7 +930,7 @@ function AdvancedToolCard({ title, description, href, locked }: AdvancedToolCard
             className="inline-flex cursor-not-allowed items-center rounded-full bg-slate-100 px-4 py-1.5 text-xs font-medium text-slate-400"
             type="button"
           >
-            基礎セットをすべて終えると解放されます
+            基礎セット（必須）をすべて終えると解放されます
           </button>
         ) : (
           <Link

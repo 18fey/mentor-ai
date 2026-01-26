@@ -51,7 +51,6 @@ export async function POST(req: Request) {
   const startedAt = Date.now();
 
   try {
-    // body
     const body = (await req.json().catch(() => ({}))) as RequestBody;
 
     console.log("[onboarding] start", {
@@ -66,7 +65,7 @@ export async function POST(req: Request) {
       },
     });
 
-    // ✅ セッションから user を確定（bodyのauthUserIdは使わない）
+    // ✅ セッションから user を確定
     const supabase = await createSupabaseFromCookies();
     const { data: auth, error: authErr } = await supabase.auth.getUser();
     const user = auth?.user ?? null;
@@ -92,7 +91,7 @@ export async function POST(req: Request) {
     const planType = body.planType ?? "beta_free";
     const contact = body.contact ?? null;
 
-    // ✅ 紹介コード（ref）を保存したい場合
+    // ✅ 紹介コード（ref）
     const ref = (body.ref ?? null)?.trim() || null;
 
     console.log("[onboarding] normalized", {
@@ -103,7 +102,7 @@ export async function POST(req: Request) {
       ref,
     });
 
-    // 既存の referred_by を確認
+    // 既存の referred_by を確認（profiles.id === authUserId 前提）
     const { data: existing, error: existingErr } = await supabaseServer
       .from("profiles")
       .select("id, auth_user_id, referred_by")
@@ -125,9 +124,10 @@ export async function POST(req: Request) {
     const referredByToSave =
       (existing as any)?.referred_by ? (existing as any).referred_by : ref;
 
-    // profiles を upsert（なければ作る、あれば更新）
+    // ✅ profiles 不変ルール：profiles.id === auth.users.id
     const payload = {
-      auth_user_id: authUserId,
+      id: authUserId,              // ✅ 追加（最重要）
+      auth_user_id: authUserId,    // 冗長だけど外部参照に使うならOK
       agreed_terms: agreed,
       agreed_terms_at: new Date().toISOString(),
       plan_type: planType,
@@ -142,12 +142,13 @@ export async function POST(req: Request) {
         ...payload,
         contact_optional: maskContact(payload.contact_optional),
       },
-      onConflict: "auth_user_id",
+      onConflict: "id",
     });
 
+    // ✅ onConflict も id に統一
     const { error: upsertErr } = await supabaseServer
       .from("profiles")
-      .upsert(payload, { onConflict: "auth_user_id" });
+      .upsert(payload, { onConflict: "id" });
 
     if (upsertErr) {
       console.error("[onboarding] upsert error", {

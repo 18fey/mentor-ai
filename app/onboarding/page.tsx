@@ -23,7 +23,6 @@ type Database = any;
 export default function OnboardingPage() {
   const router = useRouter();
 
-  // ✅ 新SDK：createBrowserClient をそのまま使用
   const supabase = useMemo(
     () =>
       createBrowserClient<Database>(
@@ -51,7 +50,7 @@ export default function OnboardingPage() {
     const init = async () => {
       const { data: auth } = await supabase.auth.getUser();
       if (!auth.user) {
-        router.push("/auth");
+        router.replace("/auth");
         return;
       }
 
@@ -68,7 +67,7 @@ export default function OnboardingPage() {
       }
 
       if (profile?.onboarding_completed) {
-        router.push("/");
+        router.replace("/");
         return;
       }
 
@@ -114,7 +113,7 @@ export default function OnboardingPage() {
     if (!auth.user) {
       setError("セッションが切れました。再度ログインしてください。");
       setSaving(false);
-      router.push("/auth");
+      router.replace("/auth");
       return;
     }
 
@@ -142,8 +141,9 @@ export default function OnboardingPage() {
     }
 
     setSaving(false);
-    // プロフィール完了 → 16タイプ診断へ
-    router.push("/diagnosis-16type");
+
+    // ✅ オンボ完了 → すぐホームへ（AIタイプ診断は任意ページに切り離し）
+    router.replace("/");
   };
 
   if (loading) {
@@ -236,7 +236,7 @@ export default function OnboardingPage() {
               disabled={saving}
               className="rounded-full bg-sky-500 px-6 py-2 text-xs font-semibold text-white shadow-sm hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {saving ? "保存中..." : "AIタイプ診断へ進む"}
+              {saving ? "保存中..." : "はじめる（ホームへ）"}
             </button>
           )}
         </div>
@@ -344,7 +344,6 @@ function Step2Purpose({
   setPurpose: (p: Purpose) => void;
   toggleInterest: (v: string) => void;
 }) {
-  // 業界タイプ（interests に入れる）
   const interestOptions = [
     "戦略コンサル",
     "総合コンサル",

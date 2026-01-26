@@ -1182,9 +1182,9 @@ type Props = {
                   value={category}
                   onChange={(e) => setCategory(e.target.value as FermiCategory)}
                 >
-                  <option value="daily">Daily（日常）</option>
-                  <option value="business">Business</option>
-                  <option value="consulting">Consulting</option>
+                  <option value="daily">日常</option>
+                  <option value="business">ビジネス</option>
+                  <option value="consulting">コンサル</option>
                 </select>
               </div>
 
@@ -1195,9 +1195,9 @@ type Props = {
                   value={difficulty}
                   onChange={(e) => setDifficulty(e.target.value as FermiDifficulty)}
                 >
-                  <option value="easy">⭐ Easy</option>
-                  <option value="medium">⭐⭐ Medium</option>
-                  <option value="hard">⭐⭐⭐ Hard</option>
+                  <option value="easy">⭐ 簡単</option>
+                  <option value="medium">⭐⭐ 普通</option>
+                  <option value="hard">⭐⭐⭐ 難しい</option>
                 </select>
               </div>
 

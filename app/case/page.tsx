@@ -15,7 +15,7 @@ export default function CasePage() {
           ケース面接AI
         </h1>
         <p className="text-sm md:text-base text-slate-500">
-          コンサル・総合商社・外銀IB向けのケース面接を、業界別モードでトレーニングできます。
+          業界別モードでトレーニングできます。
           ゴール設定 → フレーム提出 → 仮説 → 打ち手 → クロージング まで、一連の流れを型に沿って練習できます。
         </p>
       </header>
