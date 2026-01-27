@@ -361,7 +361,7 @@ export default function StartPage() {
                   onClick={() => router.push("/es")}
                   className="rounded-full border border-slate-200 bg-white px-3 py-1 text-slate-600 hover:border-sky-200 hover:text-sky-700"
                 >
-                  ES をつくってみる
+                  ES を添削してみる
                 </button>
                 <button
                   type="button"
