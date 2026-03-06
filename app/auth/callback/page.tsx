@@ -1,14 +1,9 @@
 // app/auth/callback/page.tsx
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { createBrowserClient } from "@supabase/ssr";
-
-const supabase = createBrowserClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
 
 // localStorage key（AuthInner → callback に橋渡し）
 const PENDING_ACCEPT_KEY = "mentorai:pending_accept_terms";
@@ -20,6 +15,14 @@ type PendingAcceptTerms = {
 
 export default function AuthCallbackPage() {
   const router = useRouter();
+  const supabase = useMemo(
+    () =>
+      createBrowserClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      ),
+    []
+  );
 
   useEffect(() => {
     const run = async () => {
@@ -102,7 +105,7 @@ export default function AuthCallbackPage() {
     };
 
     run();
-  }, [router]);
+  }, [router, supabase]);
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-slate-950 px-6">
