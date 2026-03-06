@@ -57,7 +57,7 @@ function isVercelPreview(host: string) {
   return host.endsWith(".vercel.app") || host.includes("localhost");
 }
 
-export async function middleware(req: NextRequest) {
+export async function proxy(req: NextRequest) {
   const { pathname, search } = req.nextUrl;
 
   const host = req.headers.get("host") ?? "";
