@@ -1,7 +1,7 @@
 // app/legal/confirm/page.tsx
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 const TERMS_VERSION = "2025-12-02";
@@ -242,7 +242,7 @@ AI就活支援サービス「Mentor.AI」（以下「本サービス」といい
 当社の氏名または名称および住所については、上記お問い合わせ窓口に請求があった場合に、遅滞なく提供します。
 `;
 
-export default function LegalConfirmPage() {
+function LegalConfirmInner() {
   const router = useRouter();
   const sp = useSearchParams();
 
@@ -355,5 +355,13 @@ export default function LegalConfirmPage() {
         </p>
       </div>
     </main>
+  );
+}
+
+export default function LegalConfirmPage() {
+  return (
+    <Suspense>
+      <LegalConfirmInner />
+    </Suspense>
   );
 }
