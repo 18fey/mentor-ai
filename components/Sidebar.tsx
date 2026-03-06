@@ -33,6 +33,7 @@ const sections: MenuSection[] = [
       { label: "一般面接（模擬）", path: "/general" },
       { label: "ES", path: "/es" },
       { label: "企業研究", path: "/industry" },
+       { label: "ケース面接ライブ", path: "/caselive" },
     ],
   },
   {
