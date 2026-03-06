@@ -27,37 +27,44 @@ export default function AuthCallbackPage() {
   useEffect(() => {
     const run = async () => {
       try {
-        // 1) セッション確認（メール認証・ログイン後）
+        // 1) getUser() でセッション確認（getSession() より確実：サーバー側でJWT検証）
         const {
-          data: { session },
-        } = await supabase.auth.getSession();
+          data: { user },
+          error: userErr,
+        } = await supabase.auth.getUser();
 
-        if (!session?.user?.id) {
-          router.replace("/auth?mode=login");
+        if (userErr || !user?.id) {
+          router.replace(“/auth?mode=login”);
           return;
         }
 
-        const userId = session.user.id;
+        const userId = user.id;
 
-        // 2) profiles を取得（同意＆オンボーディング状態も一緒に見る）
+        // 2) profiles を取得（proxy.ts の LEGAL GATE と同じ5列を確認）
         const { data: profile, error: profileErr } = await supabase
-          .from("profiles")
-          .select("onboarding_completed, agreed_terms, is_adult, terms_version")
-          .eq("id", userId)
+          .from(“profiles”)
+          .select(“onboarding_completed, agreed_terms, agreed_terms_at, is_adult, is_adult_at, terms_version”)
+          .eq(“id”, userId)
           .maybeSingle();
 
         if (profileErr) {
-          console.error("[auth/callback] Failed to fetch profile:", profileErr);
-          router.replace("/onboarding");
+          console.error(“[auth/callback] Failed to fetch profile:”, profileErr);
+          router.replace(“/onboarding”);
           return;
         }
 
-        // 3) 規約同意・年齢確認が未確定なら、ここで確定保存
-        const needsLegal =
-          !profile?.agreed_terms || profile?.is_adult !== true || !profile?.terms_version;
+        // 3) legalOk チェック（proxy.ts の LEGAL GATE と同じ5列で統一）
+        const legalOk =
+          profile?.agreed_terms === true &&
+          profile?.is_adult === true &&
+          !!profile?.agreed_terms_at &&
+          !!profile?.is_adult_at &&
+          !!profile?.terms_version;
 
-        if (needsLegal) {
-          // AuthInner が localStorage に入れてくれた情報を読む
+        if (!legalOk) {
+          const next = profile?.onboarding_completed ? “/” : “/onboarding”;
+
+          // signup フロー: localStorage に pending があれば /api/accept-terms で確定
           let pending: PendingAcceptTerms | null = null;
           try {
             const raw = localStorage.getItem(PENDING_ACCEPT_KEY);
@@ -66,41 +73,38 @@ export default function AuthCallbackPage() {
             pending = null;
           }
 
-          if (!pending?.terms_version || typeof pending.is_adult !== "boolean") {
-            // pending が無い = UIで同意を取れてない / 途中導線で来た
-            // → いったん signup に戻してやり直させる（法律的に安全）
-            router.replace("/auth?mode=signup&need_legal=1");
+          if (pending?.terms_version && typeof pending.is_adult === “boolean”) {
+            // signup フロー: フォームで同意済みの pending を確定保存
+            const res = await fetch(“/api/accept-terms”, {
+              method: “POST”,
+              headers: { “Content-Type”: “application/json” },
+              body: JSON.stringify(pending),
+            });
+
+            if (!res.ok) {
+              console.error(“[auth/callback] accept-terms failed:”, await res.text());
+              router.replace(`/legal/confirm?next=${encodeURIComponent(next)}`);
+              return;
+            }
+
+            localStorage.removeItem(PENDING_ACCEPT_KEY);
+            // fall through to onboarding check
+          } else {
+            // login フロー（pending なし）: /legal/confirm に誘導してUIで同意取得
+            router.replace(`/legal/confirm?next=${encodeURIComponent(next)}`);
             return;
           }
-
-          const res = await fetch("/api/accept-terms", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(pending),
-          });
-
-          if (!res.ok) {
-            console.error("[auth/callback] accept-terms failed:", await res.text());
-            router.replace("/auth?mode=signup&need_legal=1");
-            return;
-          }
-
-          // 一回確定したら消す（再送防止）
-          localStorage.removeItem(PENDING_ACCEPT_KEY);
         }
 
         // 4) onboarding 判定 → 遷移
-        // ※ ここは “同意確定後” にやるのがポイント
-        const onboardingCompleted = profile?.onboarding_completed === true;
-
-        if (!onboardingCompleted) {
-          router.replace("/onboarding");
+        if (!profile?.onboarding_completed) {
+          router.replace(“/onboarding”);
         } else {
-          router.replace("/");
+          router.replace(“/”);
         }
       } catch (err) {
-        console.error("[auth/callback] error:", err);
-        router.replace("/auth?mode=login");
+        console.error(“[auth/callback] error:”, err);
+        router.replace(“/auth?mode=login”);
       }
     };
 
