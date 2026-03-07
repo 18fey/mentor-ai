@@ -48,8 +48,10 @@ export default function OnboardingPage() {
   // 既にオンボ完了していたら / に逃がす
   useEffect(() => {
     const init = async () => {
-      const { data: auth } = await supabase.auth.getUser();
-      if (!auth.user) {
+      // getSession() はローカルストレージから読むため即時完了・ネットワーク不要。
+      // loading=true の間は UI を表示しないので、session が取れてから /auth 判定する。
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.user) {
         router.replace("/auth");
         return;
       }
@@ -59,7 +61,7 @@ export default function OnboardingPage() {
         .select(
           "affiliation,status,purpose,interests,target_companies,onboarding_completed"
         )
-        .eq("id", auth.user.id)
+        .eq("id", session.user.id)
         .maybeSingle<ProfileRow>();
 
       if (error) {

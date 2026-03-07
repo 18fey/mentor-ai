@@ -61,19 +61,23 @@ export default function StartPage() {
 
       const supabase = createSupabaseClient();
 
+      // getSession() はローカルストレージから読むため即時完了・ネットワーク不要。
+      // loading=true の間は UI を表示しないので、session が取れてから /auth 判定する。
       const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser();
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
 
-      if (userError) {
-        console.error(userError);
+      if (sessionError) {
+        console.error(sessionError);
       }
 
-      if (!user) {
+      if (!session?.user) {
         router.replace("/auth?redirectTo=/start");
         return;
       }
+
+      const user = session.user;
 
       const { data, error: profileError } = await supabase
         .from("profiles")

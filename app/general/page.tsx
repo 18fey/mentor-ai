@@ -509,14 +509,16 @@ export default function InterviewPage() {
   useEffect(() => {
     const run = async () => {
       try {
+        // getSession() はローカルストレージから読むため即時完了・ネットワーク不要。
+        // authChecked=false の間は面接を開始できないので、session が取れてから /auth 判定する。
         const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        if (!user) {
+          data: { session },
+        } = await supabase.auth.getSession();
+        if (!session?.user) {
           router.push("/auth");
           return;
         }
-        setUserId(user.id);
+        setUserId(session.user.id);
 
         const res = await fetch(`/api/profile/get?userId=${encodeURIComponent(user.id)}`);
         const data = await res.json().catch(() => ({}));
