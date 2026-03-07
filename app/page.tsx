@@ -300,11 +300,13 @@ export default function HomePage() {
     const run = async () => {
       try {
         const {
-          data: { user },
+          data: { session },
           error: authErr,
-        } = await supabase.auth.getUser();
+        } = await supabase.auth.getSession();
 
-        if (authErr) console.error("auth getUser error:", authErr);
+        if (authErr) console.error("auth getSession error:", authErr);
+
+        const user = session?.user ?? null;
 
         if (!user) {
           router.replace("/auth");

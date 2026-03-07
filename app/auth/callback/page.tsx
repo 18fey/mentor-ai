@@ -27,18 +27,19 @@ export default function AuthCallbackPage() {
   useEffect(() => {
     const run = async () => {
       try {
-        // 1) getUser() でセッション確認（getSession() より確実：サーバー側でJWT検証）
+        // 1) getSession() でセッション確認（ローカルストレージから読むため即時・確実。
+        //    getUser() はネットワークリクエストが必要で、ログイン直後に失敗するケースがある）
         const {
-          data: { user },
-          error: userErr,
-        } = await supabase.auth.getUser();
+          data: { session },
+          error: sessionErr,
+        } = await supabase.auth.getSession();
 
-        if (userErr || !user?.id) {
+        if (sessionErr || !session?.user?.id) {
           router.replace(“/auth?mode=login”);
           return;
         }
 
-        const userId = user.id;
+        const userId = session.user.id;
 
         // 2) profiles を取得（proxy.ts の LEGAL GATE と同じ5列を確認）
         const { data: profile, error: profileErr } = await supabase
