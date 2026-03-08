@@ -518,9 +518,12 @@ export default function InterviewPage() {
           router.push("/auth");
           return;
         }
-        setUserId(session.user.id);
+        const currentUserId = session.user.id;
+setUserId(currentUserId);
 
-        const res = await fetch(`/api/profile/get?userId=${encodeURIComponent(user.id)}`);
+const res = await fetch(
+  `/api/profile/get?userId=${encodeURIComponent(currentUserId)}`
+);
         const data = await res.json().catch(() => ({}));
         if ((data as any).profile) setProfile((data as any).profile);
       } catch (e) {
