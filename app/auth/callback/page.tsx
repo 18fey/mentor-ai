@@ -1,8 +1,7 @@
-// app/auth/callback/page.tsx
 "use client";
 
 import { useEffect, useMemo } from "react";
-import { useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { createBrowserClient } from "@supabase/ssr";
 
 // localStorage key（AuthInner → callback に橋渡し）
@@ -11,10 +10,24 @@ const PENDING_ACCEPT_KEY = "mentorai:pending_accept_terms";
 type PendingAcceptTerms = {
   is_adult: boolean;
   terms_version: string;
+  agreed_terms: true;
 };
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sanitizeNext(raw: string | null): string {
+  if (!raw) return "/";
+  if (!raw.startsWith("/")) return "/";
+  if (raw.startsWith("//")) return "/";
+  if (raw.startsWith("/auth")) return "/";
+  return raw;
+}
+
 export default function AuthCallbackPage() {
-  const router = useRouter();
+  const searchParams = useSearchParams();
+
   const supabase = useMemo(
     () =>
       createBrowserClient(
@@ -25,36 +38,55 @@ export default function AuthCallbackPage() {
   );
 
   useEffect(() => {
+    const redirectTo = (path: string) => {
+      window.location.replace(path);
+    };
+
     const run = async () => {
       try {
-        // 1) getSession() でセッション確認（ローカルストレージから読むため即時・確実。
-        //    getUser() はネットワークリクエストが必要で、ログイン直後に失敗するケースがある）
-        const {
-          data: { session },
-          error: sessionErr,
-        } = await supabase.auth.getSession();
+        const requestedNext = sanitizeNext(searchParams.get("next"));
 
-        if (sessionErr || !session?.user?.id) {
-          router.replace(“/auth?mode=login”);
+        // callback直後は cookie/session が安定するまで少しラグがあることがある
+        let sessionUserId: string | null = null;
+        let sessionErr: unknown = null;
+
+        for (let i = 0; i < 6; i++) {
+          const {
+            data: { session },
+            error,
+          } = await supabase.auth.getSession();
+
+          sessionErr = error;
+
+          if (session?.user?.id) {
+            sessionUserId = session.user.id;
+            break;
+          }
+
+          await sleep(250);
+        }
+
+        if (sessionErr || !sessionUserId) {
+          redirectTo("/auth?mode=login");
           return;
         }
 
-        const userId = session.user.id;
+        const userId = sessionUserId;
 
-        // 2) profiles を取得（proxy.ts の LEGAL GATE と同じ5列を確認）
         const { data: profile, error: profileErr } = await supabase
-          .from(“profiles”)
-          .select(“onboarding_completed, agreed_terms, agreed_terms_at, is_adult, is_adult_at, terms_version”)
-          .eq(“id”, userId)
+          .from("profiles")
+          .select(
+            "onboarding_completed, agreed_terms, agreed_terms_at, is_adult, is_adult_at, terms_version"
+          )
+          .eq("id", userId)
           .maybeSingle();
 
         if (profileErr) {
-          console.error(“[auth/callback] Failed to fetch profile:”, profileErr);
-          router.replace(“/onboarding”);
+          console.error("[auth/callback] Failed to fetch profile:", profileErr);
+          redirectTo("/onboarding");
           return;
         }
 
-        // 3) legalOk チェック（proxy.ts の LEGAL GATE と同じ5列で統一）
         const legalOk =
           profile?.agreed_terms === true &&
           profile?.is_adult === true &&
@@ -62,11 +94,11 @@ export default function AuthCallbackPage() {
           !!profile?.is_adult_at &&
           !!profile?.terms_version;
 
-        if (!legalOk) {
-          const next = profile?.onboarding_completed ? “/” : “/onboarding”;
+        const afterLegalNext = profile?.onboarding_completed ? requestedNext : "/onboarding";
 
-          // signup フロー: localStorage に pending があれば /api/accept-terms で確定
+        if (!legalOk) {
           let pending: PendingAcceptTerms | null = null;
+
           try {
             const raw = localStorage.getItem(PENDING_ACCEPT_KEY);
             pending = raw ? (JSON.parse(raw) as PendingAcceptTerms) : null;
@@ -74,43 +106,43 @@ export default function AuthCallbackPage() {
             pending = null;
           }
 
-          if (pending?.terms_version && typeof pending.is_adult === “boolean”) {
-            // signup フロー: フォームで同意済みの pending を確定保存
-            const res = await fetch(“/api/accept-terms”, {
-              method: “POST”,
-              headers: { “Content-Type”: “application/json” },
+          if (
+            pending?.terms_version &&
+            pending?.agreed_terms === true &&
+            typeof pending.is_adult === "boolean"
+          ) {
+            const res = await fetch("/api/accept-terms", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
               body: JSON.stringify(pending),
             });
 
             if (!res.ok) {
-              console.error(“[auth/callback] accept-terms failed:”, await res.text());
-              router.replace(`/legal/confirm?next=${encodeURIComponent(next)}`);
+              console.error("[auth/callback] accept-terms failed:", await res.text());
+              redirectTo(`/legal/confirm?next=${encodeURIComponent(afterLegalNext)}`);
               return;
             }
 
             localStorage.removeItem(PENDING_ACCEPT_KEY);
-            // fall through to onboarding check
           } else {
-            // login フロー（pending なし）: /legal/confirm に誘導してUIで同意取得
-            router.replace(`/legal/confirm?next=${encodeURIComponent(next)}`);
+            redirectTo(`/legal/confirm?next=${encodeURIComponent(afterLegalNext)}`);
             return;
           }
         }
 
-        // 4) onboarding 判定 → 遷移
         if (!profile?.onboarding_completed) {
-          router.replace(“/onboarding”);
+          redirectTo("/onboarding");
         } else {
-          router.replace(“/”);
+          redirectTo(requestedNext);
         }
       } catch (err) {
-        console.error(“[auth/callback] error:”, err);
-        router.replace(“/auth?mode=login”);
+        console.error("[auth/callback] error:", err);
+        window.location.replace("/auth?mode=login");
       }
     };
 
     run();
-  }, [router, supabase]);
+  }, [searchParams, supabase]);
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-slate-950 px-6">

@@ -22,17 +22,15 @@ export const CaseInterviewLive: React.FC<{ caseData: CaseDataLite }> = ({ caseDa
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // タイマー処理
   useEffect(() => {
-   {phase === "thinking" && (
-  <button
-    onClick={() => void startRecording()}
-    className="rounded-full bg-violet-600 px-6 py-2 text-white"
-  >
-    思考終了 → 発表スタート
-  </button>
-)}
-    // 既存タイマーがあれば消す（多重起動防止）
+    if (phase !== "thinking" && phase !== "speaking") {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      return;
+    }
+
     if (timerRef.current) clearInterval(timerRef.current);
 
     timerRef.current = setInterval(() => {
@@ -41,13 +39,12 @@ export const CaseInterviewLive: React.FC<{ caseData: CaseDataLite }> = ({ caseDa
           if (timerRef.current) clearInterval(timerRef.current);
           timerRef.current = null;
 
-          // NOTE: phase は closure なのでここでは条件分岐しない
-          // 後段で useEffect が動くより確実にしたいので、明示的に分岐
           if (phase === "thinking") {
             void startRecording();
           } else if (phase === "speaking") {
             stopRecording();
           }
+
           return 0;
         }
         return prev - 1;
@@ -58,7 +55,6 @@ export const CaseInterviewLive: React.FC<{ caseData: CaseDataLite }> = ({ caseDa
       if (timerRef.current) clearInterval(timerRef.current);
       timerRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
 
   const startThinking = () => {
@@ -82,13 +78,11 @@ export const CaseInterviewLive: React.FC<{ caseData: CaseDataLite }> = ({ caseDa
       };
 
       recorder.onstop = () => {
-        // onstop は sync callback なので async を wrap
         void handleTranscription();
       };
 
       recorder.start();
       setMediaRecorder(recorder);
-
       setPhase("speaking");
       setTimeLeft(SPEAK_TIME);
     } catch (e) {
@@ -104,7 +98,6 @@ export const CaseInterviewLive: React.FC<{ caseData: CaseDataLite }> = ({ caseDa
     try {
       if (!mediaRecorder) return;
 
-      // stop → onstop → handleTranscription が走る
       mediaRecorder.stop();
       mediaRecorder.stream.getTracks().forEach((t) => t.stop());
       setPhase("processing");
@@ -123,7 +116,6 @@ export const CaseInterviewLive: React.FC<{ caseData: CaseDataLite }> = ({ caseDa
       const formData = new FormData();
       formData.append("file", blob);
 
-      // ✅ ここが新しいAPIに変更
       const res = await fetch("/api/case/transcribe", {
         method: "POST",
         body: formData,
@@ -140,7 +132,6 @@ export const CaseInterviewLive: React.FC<{ caseData: CaseDataLite }> = ({ caseDa
       const text = String(data.transcript ?? "");
       setTranscript(text);
 
-      // eval APIに投げる（最小：analysisに transcript を入れる）
       await fetch("/api/eval/case", {
         method: "POST",
         headers: {
@@ -162,7 +153,7 @@ export const CaseInterviewLive: React.FC<{ caseData: CaseDataLite }> = ({ caseDa
           },
         }),
       }).catch(() => {
-        // 評価失敗は UI を止めない（あとで改善可）
+        // 評価失敗は UI を止めない
       });
 
       setPhase("idle");
@@ -200,6 +191,15 @@ export const CaseInterviewLive: React.FC<{ caseData: CaseDataLite }> = ({ caseDa
           className="rounded-full bg-violet-600 px-6 py-2 text-white"
         >
           10分思考スタート
+        </button>
+      )}
+
+      {phase === "thinking" && (
+        <button
+          onClick={() => void startRecording()}
+          className="rounded-full bg-violet-600 px-6 py-2 text-white"
+        >
+          思考終了 → 発表スタート
         </button>
       )}
 

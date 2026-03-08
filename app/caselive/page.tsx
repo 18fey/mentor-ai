@@ -10,7 +10,6 @@ type CaseQuestion = {
   title: string;
   client: string;
   prompt: string;
-  // generate側には domain/pattern/hint/kpiExamples もあるけど、Liveでは最小でOK
 };
 
 export default function CaseLivePage() {
@@ -20,7 +19,6 @@ export default function CaseLivePage() {
   const [loading, setLoading] = useState(true);
   const [uiError, setUiError] = useState<string | null>(null);
 
-  // META modal
   const [metaOpen, setMetaOpen] = useState(false);
   const [metaNeed, setMetaNeed] = useState<number>(1);
   const [pendingConfirm, setPendingConfirm] = useState<null | (() => Promise<void>)>(null);
@@ -51,21 +49,23 @@ export default function CaseLivePage() {
 
         const data: any = await res.json().catch(() => ({}));
 
-        // --- 401: 未ログイン
         if (!res.ok && res.status === 401) {
           setUiError("ログインが必要です。ログインし直してください。");
-          // あなたの導線に合わせて
-          router.push("/login"); // もし /login がないならコメントアウトでOK
+
+          const redirectedFrom =
+            typeof window !== "undefined"
+              ? `${window.location.pathname}${window.location.search}`
+              : "/case-live";
+
+          window.location.replace(`/auth?redirectedFrom=${encodeURIComponent(redirectedFrom)}`);
           return;
         }
 
-        // --- 402: META不足 → confirmモーダル出す
         if (!res.ok && res.status === 402 && data?.error === "need_meta") {
           const requiredMeta = Number(data?.requiredMeta ?? data?.required ?? 1);
           setMetaNeed(requiredMeta);
 
           setPendingConfirm(() => async () => {
-            // confirm後の再実行
             await fetchCase(true);
           });
 
@@ -73,17 +73,12 @@ export default function CaseLivePage() {
           return;
         }
 
-        // --- その他エラー
         if (!res.ok || !data?.ok) {
           setUiError(data?.message ?? `ケース生成に失敗しました（status=${res.status}）`);
           return;
         }
 
-        // --- 成功：cases or case 互換
-        const c =
-          (Array.isArray(data?.cases) && data.cases[0]) ||
-          data?.case ||
-          null;
+        const c = (Array.isArray(data?.cases) && data.cases[0]) || data?.case || null;
 
         if (!c?.id || !c?.prompt) {
           setUiError("生成結果が不正です（caseが取れません）");
@@ -103,7 +98,7 @@ export default function CaseLivePage() {
         setLoading(false);
       }
     },
-    [router]
+    []
   );
 
   useEffect(() => {
@@ -156,14 +151,13 @@ export default function CaseLivePage() {
         )}
       </main>
 
-      {/* ✅ 402 need_meta 用モーダル（既存コンポーネント流用） */}
       <MetaConfirmModal
         open={metaOpen}
         onClose={closeMeta}
         featureLabel={"ケース面接 Live"}
         requiredMeta={metaNeed}
-        balance={null} // ここは簡易。必要なら /api/meta/balance を叩いて入れる
-        mode={"confirm"} // 残高チェック無しの簡易版（足りなければAPI側でまた402返る）
+        balance={null}
+        mode={"confirm"}
         title={"METAが必要です"}
         message={`この実行には META が ${metaNeed} 必要です。続行しますか？`}
         onConfirm={async () => {

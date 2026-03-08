@@ -6,13 +6,11 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 const APP_MODE = process.env.NEXT_PUBLIC_APP_MODE || "production";
 const IS_CLOSED_MODE = APP_MODE === "closed";
 
-// ✅ canonical（本番のみ強制）
+// canonical（本番のみ強制）
 const CANONICAL_HOST = "www.mentor-ai.net";
 
-// ✅ legal version（バージョン一致まで厳密に見るなら使う）
 // const TERMS_VERSION = "2025-12-02";
 
-// middleware 用 Supabase クライアント
 function createMiddlewareSupabase(req: NextRequest, res: NextResponse) {
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -33,8 +31,11 @@ function createMiddlewareSupabase(req: NextRequest, res: NextResponse) {
   );
 }
 
-// ✅ res に積まれた cookie を redirect に引き継ぐ（Supabase refresh対策）
-function redirectWithCookies(res: NextResponse, url: URL, status: 302 | 307 | 308 = 307) {
+function redirectWithCookies(
+  res: NextResponse,
+  url: URL,
+  status: 302 | 307 | 308 = 307
+) {
   const redirectRes = NextResponse.redirect(url, status);
   for (const c of res.cookies.getAll()) {
     redirectRes.cookies.set(c.name, c.value, c);
@@ -63,7 +64,6 @@ export async function proxy(req: NextRequest) {
   const host = req.headers.get("host") ?? "";
   const proto = req.headers.get("x-forwarded-proto") ?? "http";
 
-  // 静的ファイル系はそのまま通す
   if (
     pathname.startsWith("/_next") ||
     pathname.startsWith("/favicon.ico") ||
@@ -73,7 +73,6 @@ export async function proxy(req: NextRequest) {
     return NextResponse.next();
   }
 
-  // ✅ 本番 canonical 強制（localhost / preview は殺さない）
   const shouldEnforceCanonical =
     !isLocalhost(host) && !isVercelPreview(host) && process.env.NODE_ENV === "production";
 
@@ -84,6 +83,7 @@ export async function proxy(req: NextRequest) {
       url.protocol = "https";
       return NextResponse.redirect(url, 308);
     }
+
     if (proto !== "https") {
       const url = req.nextUrl.clone();
       url.protocol = "https";
@@ -91,7 +91,6 @@ export async function proxy(req: NextRequest) {
     }
   }
 
-  // closed モードでも見せてOKなページ
   const isPublicEvenWhenClosed =
     pathname === "/" ||
     pathname.startsWith("/legal") ||
@@ -104,11 +103,8 @@ export async function proxy(req: NextRequest) {
 
   const isAuthRoute = pathname.startsWith("/auth");
   const isAuthRoot = pathname === "/auth";
-
-  // ✅ ここがポイント：legal confirm は “ゲート先” なので除外して無限ループ回避
   const isLegalConfirmRoute = pathname.startsWith("/legal/confirm");
 
-  // 通常の「ログイン不要ルート」
   const isPublicRoute =
     pathname === "/" ||
     pathname.startsWith("/legal") ||
@@ -119,7 +115,6 @@ export async function proxy(req: NextRequest) {
     pathname.startsWith("/api/webhooks") ||
     pathname.startsWith("/api");
 
-  // ✅ 認証付きのレスポンスを準備（ここに Supabase が cookie を積む）
   const res = NextResponse.next({
     request: { headers: req.headers },
   });
@@ -131,23 +126,29 @@ export async function proxy(req: NextRequest) {
     error: sessionError,
   } = await supabase.auth.getSession();
 
-  // ✅ クローズドモード時のリダイレクト（cookie引き継ぎ）
+  console.log("[proxy]", {
+    pathname,
+    search,
+    isAuthRoute,
+    isPublicRoute,
+    hasSession: !!session,
+    sessionUserId: session?.user?.id ?? null,
+    sessionError: sessionError?.message ?? null,
+  });
+
   if (IS_CLOSED_MODE && !isPublicEvenWhenClosed) {
     const url = req.nextUrl.clone();
     url.pathname = "/";
     return redirectWithCookies(res, url, 307);
   }
 
-  // ✅ 未ログイン & 認証必須ページ → /auth（cookie引き継ぎ）
   if (!session && !isAuthRoute && !isPublicRoute) {
     const url = req.nextUrl.clone();
     url.pathname = "/auth";
-    url.searchParams.set("redirectedFrom", pathname);
+    url.searchParams.set("redirectedFrom", pathname + (search || ""));
     return redirectWithCookies(res, url, 307);
   }
 
-  // ✅ LEGAL GATE: ログイン済みなのに同意がDBで未確定なら /legal/confirm へ
-  // - /legal/confirm 自体、/auth、/api、publicページは除外
   if (
     session?.user?.id &&
     !isLegalConfirmRoute &&
@@ -163,8 +164,6 @@ export async function proxy(req: NextRequest) {
       .eq("id", userId)
       .maybeSingle();
 
-    // ✅ profiles が取れない/無い/未確定 も “安全側” でゲートに寄せる
-    // ✅ 厳密に「5カラム全部」確認（あなたのDBの5つ）
     const legalOk =
       !profErr &&
       profile?.agreed_terms === true &&
@@ -173,14 +172,21 @@ export async function proxy(req: NextRequest) {
       !!profile?.is_adult_at &&
       !!profile?.terms_version;
 
-    // ✅ バージョン一致まで要求するなら、上の legalOk を↓に差し替え
-    // const legalOk =
-    //   !profErr &&
-    //   profile?.agreed_terms === true &&
-    //   profile?.is_adult === true &&
-    //   !!profile?.agreed_terms_at &&
-    //   !!profile?.is_adult_at &&
-    //   profile?.terms_version === TERMS_VERSION;
+    console.log("[proxy][legal]", {
+      pathname,
+      userId,
+      profErr: profErr?.message ?? null,
+      legalOk,
+      profile: profile
+        ? {
+            agreed_terms: profile.agreed_terms,
+            agreed_terms_at: !!profile.agreed_terms_at,
+            is_adult: profile.is_adult,
+            is_adult_at: !!profile.is_adult_at,
+            terms_version: profile.terms_version ?? null,
+          }
+        : null,
+    });
 
     if (!legalOk) {
       const url = req.nextUrl.clone();
@@ -190,7 +196,6 @@ export async function proxy(req: NextRequest) {
     }
   }
 
-  // ✅ ログイン済み & /auth 直下 → /（cookie引き継ぎ）
   if (session && isAuthRoot) {
     const url = req.nextUrl.clone();
     url.pathname = "/";
