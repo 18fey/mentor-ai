@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { Suspense, useEffect, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import { createBrowserClient } from "@supabase/ssr";
 
@@ -25,7 +25,7 @@ function sanitizeNext(raw: string | null): string {
   return raw;
 }
 
-export default function AuthCallbackPage() {
+function AuthCallbackInner() {
   const searchParams = useSearchParams();
 
   const supabase = useMemo(
@@ -46,7 +46,6 @@ export default function AuthCallbackPage() {
       try {
         const requestedNext = sanitizeNext(searchParams.get("next"));
 
-        // callback直後は cookie/session が安定するまで少しラグがあることがある
         let sessionUserId: string | null = null;
         let sessionErr: unknown = null;
 
@@ -154,5 +153,23 @@ export default function AuthCallbackPage() {
         </p>
       </div>
     </main>
+  );
+}
+
+function CallbackFallback() {
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-slate-950 px-6">
+      <div className="rounded-3xl bg-slate-900/70 px-6 py-4 text-center text-xs text-slate-100 shadow-[0_18px_45px_rgba(15,23,42,0.5)] backdrop-blur-[26px]">
+        <p>アカウント情報を確認しています…</p>
+      </div>
+    </main>
+  );
+}
+
+export default function AuthCallbackPage() {
+  return (
+    <Suspense fallback={<CallbackFallback />}>
+      <AuthCallbackInner />
+    </Suspense>
   );
 }
