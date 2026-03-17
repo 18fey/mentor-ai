@@ -22,30 +22,22 @@ const sections: MenuSection[] = [
     title: "基本",
     items: [
       { label: "ホーム", path: "/" },
-      { label: "プロフィール", path: "/profile" },
     ],
   },
   {
     title: "応用ツール",
     items: [
       { label: "ケース面接AI", path: "/case" },
-      { label: "フェルミ推定AI", path: "/fermi" },
       { label: "一般面接（模擬）", path: "/general" },
       { label: "ES", path: "/es" },
       { label: "企業研究", path: "/industry" },
-       { label: "ケース面接ライブ", path: "/caselive" },
     ],
   },
   {
     title: "その他",
     items: [
       {
-        label: "AI思考タイプ診断",
-        path: "/diagnosis-16type",
-        badge: "NEW",
-      },
-      { label: "AI思考力トレーニング", path: "/mentor-ai-index" },
-       {
+        
         label: "Growth Inbox",
         path: "/growth",
       },
@@ -72,7 +64,6 @@ const sections: MenuSection[] = [
       { label: "ケースガイド", path: "/case-guide" },
       { label: "フェルミガイド", path: "/fermi-guide" },
 
-      { label: "AI思考力トレーニング初心者向けガイド" , path :"/ai-training-guide" },
     ],
   },
 ];
